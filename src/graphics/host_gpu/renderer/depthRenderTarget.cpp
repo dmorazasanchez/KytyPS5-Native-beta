@@ -298,8 +298,9 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		}
 		return;
 	}
-	if (rc.copy_depth_to_color || rc.copy_stencil_to_color || rc.copy_centroid ||
-	    rc.copy_sample != 0 || dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
+	// Centroid/sample selectors only affect depth/stencil-to-color copies.
+	if (rc.copy_depth_to_color || rc.copy_stencil_to_color ||
+	    dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
 	    (!z.depth_view.depth_write_disable && z.z_write_base_addr != z.z_read_base_addr) ||
 	    (has_stencil && !z.depth_view.stencil_write_disable &&
 	     z.stencil_write_base_addr != z.stencil_read_base_addr)) {
