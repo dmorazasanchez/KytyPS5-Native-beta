@@ -1429,7 +1429,9 @@ void ValidateSpirv(const char *shader_name, const std::vector<u32> &spirv) {
     messages += buffer;
   });
 
-  if (!tools.Validate(spirv)) {
+  spvtools::ValidatorOptions options;
+  options.SetAllowOffsetTextureOperand(true);
+  if (!tools.Validate(spirv.data(), spirv.size(), options)) {
     Fail(shader_name, "SPIR-V validation", messages);
   }
 }
@@ -1648,6 +1650,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   }
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Compute;
+  options.maintenance8_enabled = true;
   options.dump_ir = true;
   auto compute_info = test.compute_info;
   compute_info.host_subgroup_size = host_subgroup_size;
@@ -1717,7 +1720,8 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
     }
     result.program.shader_info_complete = false;
     ShaderRecompiler::IR::CollectShaderInfo(result.program, options.input_info);
-    result.spirv = ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info);
+    result.spirv = ShaderRecompiler::Spirv::EmitProgram(
+        result.program, options.input_info, 0u, options.maintenance8_enabled);
     const auto shader_data = result.program.bindings.descriptor_counts[
         static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::ShaderData)];
     Require(test.name, "binding layout",
@@ -1825,6 +1829,7 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
 
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Pixel;
+  options.maintenance8_enabled = true;
   options.dump_ir = false;
   options.input_info.pixel = &pixel_info;
   options.user_data = user_data;
@@ -18712,6 +18717,7 @@ private:
     m_runtime_context.queue_family = m_queue_family;
     m_runtime_context.queue = m_queue;
     m_runtime_context.shader_image_int64_atomics_enabled = true;
+    m_runtime_context.maintenance8_enabled = true;
     m_runtime_context.attachment_feedback_loop_enabled = m_rasterization_supported;
     m_runtime_context.provoking_vertex_last_enabled = m_rasterization_supported;
     const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info{
@@ -18859,9 +18865,11 @@ private:
     available_provoking_vertex.pNext = &available_feedback_dynamic;
     vk::PhysicalDeviceImageViewMinLodFeaturesEXT available_min_lod{};
     available_min_lod.pNext = &available_provoking_vertex;
+    vk::PhysicalDeviceMaintenance8FeaturesKHR available_maintenance8{};
+    available_maintenance8.pNext = &available_min_lod;
     vk::PhysicalDeviceFeatures2 available_features2{};
     available_features2.sType = vk::StructureType::ePhysicalDeviceFeatures2;
-    available_features2.pNext = &available_min_lod;
+    available_features2.pNext = &available_maintenance8;
     m_physical_device.getFeatures2(&available_features2);
     Require("VulkanHarness", "dispatch",
             available_features.shaderStorageImageWriteWithoutFormat == true,
@@ -18899,6 +18907,8 @@ private:
             "nonuniform storage buffer indexing is not supported");
     Require("VulkanHarness", "dispatch", available_min_lod.minLod == true,
             "image view minimum LOD is not supported");
+    Require("VulkanHarness", "dispatch", available_maintenance8.maintenance8 == true,
+            "maintenance8 dynamic image offsets are not supported");
     Require("VulkanHarness", "graphics", available_features12.shaderOutputLayer == true,
             "vertex layer output is not supported");
     m_rasterization_supported = available_features.fillModeNonSolid &&
@@ -18977,7 +18987,10 @@ private:
     min_lod.pNext = m_rasterization_supported
                         ? static_cast<void *>(&provoking_vertex)
                         : static_cast<void *>(&derivatives);
-    device_info.pNext = &min_lod;
+    vk::PhysicalDeviceMaintenance8FeaturesKHR maintenance8{};
+    maintenance8.maintenance8 = true;
+    maintenance8.pNext = &min_lod;
+    device_info.pNext = &maintenance8;
     vk::PhysicalDeviceFeatures device_features{};
     device_features.shaderStorageImageWriteWithoutFormat = true;
     device_features.shaderImageGatherExtended = true;
@@ -18994,6 +19007,7 @@ private:
         VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME,
         VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME,
         VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME,
+        VK_KHR_MAINTENANCE_8_EXTENSION_NAME,
         VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME};
     if (m_rasterization_supported) {
       device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
@@ -35228,6 +35242,88 @@ template <u32 wave_size> TestCase ImageSampleOffsetsReadFourNeighbors() {
   return test;
 }
 
+void CheckDynamicSampleOffsets(VulkanHarness &vulkan, u32 wave_size) {
+  using O = ShaderOpcode;
+  TestCase test;
+  test.name = wave_size == 32u ? "DynamicSampleOffsets32" : "DynamicSampleOffsets64";
+  test.has_compute_info = test.has_user_data = true;
+  test.compute_info.wave_size = wave_size;
+  test.compute_info.host_subgroup_size = vulkan.SubgroupSize();
+  test.compute_info.threads_num[0] = wave_size;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1u;
+  test.compute_info.thread_ids_num = 1;
+  test.user_data = MakeSampledTextureData(Prospero::BufferFormat::k32_32_32_32Float);
+  test.user_data[2] = 7u | (7u << 14u);
+  test.user_data[3] |= 1u << 16u;
+  test.user_data[5] = 1u << 4u;
+  test.user_data[50] = wave_size * sizeof(u32);
+  // Read the offset selector from a texture, as the native shader does.
+  test.code = {EncodeVop2(0x1b, 20, InlineU32(7), 0),
+               EncodeVop2(0x16, 21, InlineU32(3), 0),
+               EncodeVop2(0x1b, 21, InlineU32(1), 21),
+               EncodeMimg0(0x00, 0x1), EncodeMimg1(4, 20),
+               EncodeVop2(0x1b, 20, InlineU32(3), 4),
+               EncodeVop2(0x16, 22, InlineU32(2), 4),
+               EncodeVop2(0x1b, 22, InlineU32(3), 22)};
+  for (u32 reg : {20u, 22u}) {
+    test.code.push_back(EncodeVop2(0x25, reg, InlineU32(63), reg));
+    test.code.push_back(EncodeVop2(0x1b, reg, InlineU32(63), reg));
+  }
+  test.code.push_back(EncodeVop2(0x1a, 22, InlineU32(8), 22));
+  test.code.push_back(EncodeVop2(0x1c, 20, Vgpr(22), 20));
+  AppendVMovLiteral(&test.code, 21, std::bit_cast<u32>(0.375f));
+  AppendVMovLiteral(&test.code, 22, std::bit_cast<u32>(0.375f));
+  AppendVMovLiteral(&test.code, 23, std::bit_cast<u32>(1.0f));
+  test.code.push_back(EncodeMimg0(0x34, 0x1)); // SAMPLE_L_O: offset is applied at mip 1.
+  test.code.push_back(EncodeMimg1(5, 20));
+  AppendStoreVgprAtLaneDwordOffset(&test.code, 5, 0, 0);
+  AppendEnd(&test.code);
+  test.opcodes = {O::V_AND_B32, O::V_LSHRREV_B32, O::V_ADD_NC_U32, O::V_LSHLREV_B32,
+                  O::V_OR_B32, O::V_MOV_B32, O::IMAGE_LOAD, O::IMAGE_SAMPLE,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"ImageGatherExtended", "Lod|Offset", "OpBitFieldSExtract %int"};
+  test.forbidden_spirv = {"OpSwitch", "OpImageQuerySizeLod", "OpFDiv"};
+  test.initial.assign(wave_size, 0xdeadbeefu);
+  for (u32 lane = 0; lane < wave_size; ++lane)
+    test.expected.push_back(std::bit_cast<u32>(float(100u + (lane & 15u))));
+  auto compiled = CompileCase(test, vulkan.SubgroupSize());
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+  std::string text;
+  const auto halves = wave_size > vulkan.SubgroupSize() ? 2u : 1u;
+  Require(test.name, "direct dynamic offset", tools.Disassemble(compiled.spirv, &text) &&
+              CountText(text, "OpImageSampleExplicitLod") == halves &&
+              CountText(text, "OpBitFieldSExtract %int") == 2u * halves,
+          "dynamic offsets expanded samples or lost signed six-bit components");
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+  if (wave_size == 32u) {
+    Require(test.name, "default feature gate", !ShaderRecompiler::CompileOptions{}.maintenance8_enabled,
+            "maintenance8 must reflect the enabled device feature");
+    ExpectFatal("DynamicSampleOffsetsRequireMaintenance8", [&] {
+      ShaderRecompiler::Spirv::EmitProgram(compiled.program, {.compute = &test.compute_info});
+    });
+  }
+#endif
+  auto base = MakeRgbaImage(8, 8);
+  auto mip = MakeRgbaImage(4, 4);
+  for (u32 selector = 0; selector < 16u; ++selector) {
+    SetRgbaPixel(&base, 8, selector & 7u, selector >> 3u, 0x3f800000u | selector, 0, 0, 0);
+    SetRgbaPixel(&mip, 4, selector & 3u, selector >> 2u,
+                 std::bit_cast<u32>(float(100u + selector)), 0, 0, 0);
+  }
+  auto texture = vulkan.CreateImageMips(test.name, 8, 8, vk::Format::eR32G32B32A32Sfloat,
+      vk::ImageUsageFlagBits::eSampled, {base, mip}, 4u, vk::ImageLayout::eShaderReadOnlyOptimal,
+      vk::ImageType::e2D, vk::ImageViewType::e2D, 1u);
+  const auto sampler = vulkan.CreateSampler(test.name, 2u);
+  auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
+  vulkan.Dispatch(test, compiled, output, nullptr, &texture, nullptr, nullptr, sampler);
+  CompareWords(test, "image-derived offsets -1..2 at mip 1", test.expected,
+                vulkan.ReadBuffer(test.name, output, test.expected.size()));
+  vulkan.DestroyBuffer(&output);
+  vulkan.Device().destroySampler(sampler);
+  vulkan.DestroyImage(&texture);
+  std::printf("[compute] %-32s ok\n", test.name);
+}
+
 TestCase ImageSampleA16CompareBiasRdna2AddressOrder() {
   using O = ShaderOpcode;
 
@@ -43794,6 +43890,8 @@ int main(int argc, char **argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--image-sample-offset-only") == 0) {
     VulkanHarness vulkan;
+    CheckDynamicSampleOffsets(vulkan, 32u);
+    CheckDynamicSampleOffsets(vulkan, 64u);
     RunCase(&vulkan, ImageSampleOffsetsReadFourNeighbors<32>());
     RunCase(&vulkan, ImageSampleOffsetsReadFourNeighbors<64>());
     RunCase(&vulkan, ImageSampleA16OffsetKeepsTexelOffset32BitOnGpu<32>());
@@ -44463,6 +44561,8 @@ int main(int argc, char **argv) {
   CheckRuntimeBufferRecords(vulkan);
   CheckComputeThreadDimensions(vulkan);
   CheckIndirectImageKeySwitch(vulkan);
+  CheckDynamicSampleOffsets(vulkan, 32u);
+  CheckDynamicSampleOffsets(vulkan, 64u);
   CheckFiniteInlineSamplerPhi(vulkan);
   CheckWave64WholeWaveResults();
   CheckPs5GameExampleImageClearRuntimeShape();

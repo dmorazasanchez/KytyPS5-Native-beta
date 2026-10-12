@@ -333,6 +333,7 @@ uint32_t PackedOffset(ValueEmitContext& ctx, IR::Value value, ImageDimension dim
 		                                        TypeI32Vector(ctx.state, components),
 		                                        std::span(values).first(components));
 	}
+	ctx.state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
 	mask |= spv::ImageOperandsOffsetMask;
 	const auto packed = Unary(ctx.state, spv::OpBitcast, TypeI32(ctx.state), ctx.Def(value));
 	for (uint32_t index = 0; index < components; index++) {
@@ -937,8 +938,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			operand_count = 2;
 		}
 		if (layout.offset != NoImageComponent &&
-		    !offset_value.IsImmediate()) {
-			ctx.Fail(inst, "has a nonconstant sample texel offset");
+		    !offset_value.IsImmediate() && !state.maintenance8_enabled) {
+			ctx.Fail(inst, "requires maintenance8 for a dynamic sample texel offset");
 		}
 		const auto samplers = EmitImageSamplers(ctx, inst);
 		const auto EmitSample = [&](uint32_t resource, uint32_t array_index) {
