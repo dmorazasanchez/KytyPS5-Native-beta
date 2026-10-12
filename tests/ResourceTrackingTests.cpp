@@ -1084,6 +1084,132 @@ void TestBoundedComputeImageLoop() {
         "oversized compute loop bound was accepted for image enumeration");
 }
 
+void TestDescendingImageRange() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  enum class Variant { Valid, WrongStep, IncrementBypass, MissingNonzero, NegativeInitial };
+  const auto make_plan = [](Variant variant) {
+    Fixture fixture;
+    auto *entry = fixture.block;
+    auto *header = fixture.AddBlock();
+    auto *guard = fixture.AddBlock();
+    auto *body = fixture.AddBlock();
+    auto *latch = fixture.AddBlock();
+    auto *exit = fixture.AddBlock();
+    const auto branch = [](Block *from, Block *to) {
+      from->AddBranch(to);
+      from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
+    };
+    const auto choose = [](Block *from, Block *yes, Block *no, Value condition) {
+      from->AddBranch(yes);
+      from->AddBranch(no);
+      from->condition = condition;
+      from->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                         .true_block = yes, .false_block = no};
+    };
+    branch(entry, header);
+    branch(body, latch);
+    branch(latch, header);
+    auto &induction = header->AppendNewInst(ValueOpcode::Phi);
+    induction.SetFlags(Type::U32);
+    const auto bound = fixture.Emit(ValueOpcode::SGreaterThanEqual32,
+        {Value(&induction), Value(0u)}, 0, header);
+    choose(header, guard, variant == Variant::IncrementBypass ? latch : exit, bound);
+    MemoryInfo lds;
+    lds.kind = ResourceKind::Lds;
+    const auto mask = fixture.Emit(ValueOpcode::LoadSharedU32,
+        {Value(0u), Value(true)}, fixture.AddMemory(lds, 0x10), guard);
+    auto active = bound;
+    if (variant != Variant::MissingNonzero)
+      active = fixture.Emit(ValueOpcode::LogicalAnd,
+          {bound, fixture.Emit(ValueOpcode::ULessThan32, {Value(0u), mask}, 0, guard)}, 0, guard);
+    choose(guard, body, latch, active);
+    fixture.block = body;
+    const auto stale = fixture.UserData(3);
+    const auto leading = fixture.Emit(ValueOpcode::SelectU32,
+        {fixture.Emit(ValueOpcode::INotEqual32, {mask, Value(0u)}),
+         fixture.Emit(ValueOpcode::ISub32,
+             {Value(31u), fixture.Emit(ValueOpcode::FindUMsb32, {mask})}), Value(UINT32_MAX)});
+    const auto predicated = fixture.Emit(ValueOpcode::SelectU32, {active, leading, stale});
+    auto bit = fixture.Emit(ValueOpcode::SelectU32,
+        {fixture.Emit(ValueOpcode::LogicalAnd,
+             {active, fixture.Emit(ValueOpcode::IEqual32, {predicated, Value(UINT32_MAX)})}),
+         Value(UINT32_MAX), fixture.Emit(ValueOpcode::SelectU32,
+             {active, fixture.Emit(ValueOpcode::ISub32, {Value(31u), predicated}), stale})});
+    const auto overwritten = fixture.Emit(ValueOpcode::LogicalAnd,
+        {active, fixture.Emit(ValueOpcode::IEqual32,
+             {fixture.Emit(ValueOpcode::BitwiseAnd32, {Value(&induction), Value(255u)}), Value(26u)})});
+    const auto relative_write = fixture.Emit(ValueOpcode::SelectU32, {overwritten, mask, bit});
+    const auto ordinal = fixture.Emit(ValueOpcode::IAdd32,
+        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {Value(&induction), Value(5u)}), relative_write});
+    const auto selected = fixture.Emit(ValueOpcode::ReadFirstLane,
+        {fixture.Emit(ValueOpcode::SelectU32, {active, ordinal, stale}), active});
+    const auto key = fixture.Emit(ValueOpcode::ISub32, {fixture.UserData(2), selected});
+    const auto offset = fixture.Emit(ValueOpcode::IAdd32,
+        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}), Value(0x1000u)});
+    const auto table = fixture.Address(fixture.UserData(0), fixture.UserData(1));
+    std::array<Value, 8> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      MemoryInfo memory;
+      memory.kind = ResourceKind::ScalarAddress;
+      memory.offset = word * 4u;
+      words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {table, offset, Value(0u), Value(true)}, fixture.AddMemory(memory, 0x20));
+    }
+    MemoryInfo sample;
+    sample.kind = ResourceKind::Image;
+    sample.image_dimension = Decoder::ImageDimension::Dim2D;
+    fixture.Emit(ValueOpcode::ImageSampleRaw,
+        {fixture.Image(words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
+         fixture.ImageAddress(), active}, fixture.AddMemory(sample, 0x30));
+    const auto step = fixture.Emit(ValueOpcode::IAdd32,
+        {Value(&induction), Value(variant == Variant::WrongStep ? UINT32_MAX - 1u : UINT32_MAX)}, 0, latch);
+    induction.AddPhiOperand(entry, Value(variant == Variant::NegativeInitial ? UINT32_MAX : 3u));
+    induction.AddPhiOperand(latch, step);
+    fixture.PlanAndTrack();
+    Check(ordinal.Instruction()->Arg(1).Resolve() == bit.Resolve(),
+          "descending range retained impossible relative-register stores");
+    const auto &indirect = fixture.program.descriptor_sources[
+        fixture.program.info.images[0].source].indirect_descriptor;
+    Check(indirect && !indirect->selector && indirect->key_count == Value(128u) &&
+              !indirect->selector_first.IsEmpty(),
+          "descending bitscan range lost its runtime first key or 128-key bound");
+    return ExtractResourcePlan(fixture.program);
+  };
+  auto plan = make_plan(Variant::Valid);
+  for (const auto variant : {Variant::WrongStep, Variant::IncrementBypass,
+                             Variant::MissingNonzero, Variant::NegativeInitial})
+    CheckFatal([&] { make_plan(variant); }, "not a valid runtime value",
+               "descending descriptor range accepted an unproved update or zero bit scan");
+  LinearTestMemory memory;
+  for (uint32_t record = 1u; record <= 130u; ++record) {
+    const auto word = record * 8u;
+    memory.words[word] = 0x100u + (record & 1u);
+    memory.words[word + 1u] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    memory.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  }
+  std::array<uint32_t, 4> user_data {0x1000u, 0u, 0u, UINT32_MAX};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const SrtRuntime runtime {.user_data = user_data, .read_memory = ReadLinearTestMemory,
+      .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  for (const auto count : {0u, 2u, 0u}) {
+    user_data[2] = count;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) && snapshot.images.size() == 2u,
+          "descending descriptor subtraction failed when the runtime key underflowed");
+    const auto offset = specialization.images[0].indirect_mapping_offset;
+    Check(snapshot.flattened_srt[offset] == 128u, "descending mapping lost candidate keys");
+    uint32_t previous = 0u;
+    for (uint32_t entry = 0; entry < 128u; ++entry) {
+      const auto key = snapshot.flattened_srt[offset + 1u + entry * 2u];
+      Check((entry == 0u || key > previous) && uint32_t(count - key) <= 127u,
+            "wrapped descending keys were unsorted or outside the proven domain");
+      previous = key;
+    }
+  }
+}
+
 void TestUniformizedMaterialImageKeys() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   enum class Variant {
@@ -3959,6 +4085,7 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
+    Run("descending image range", TestDescendingImageRange);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
