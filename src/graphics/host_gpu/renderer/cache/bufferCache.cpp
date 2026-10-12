@@ -471,7 +471,9 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset) {
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
-			std::memcpy(mapped + copy.srcOffset, reinterpret_cast<const void*>(address), copy.size);
+			if (!LibKernel::Memory::CopySparseMemory(address, mapped + copy.srcOffset, copy.size)) {
+				EXIT("BufferCache: failed to read sparse guest buffer memory\n");
+			}
 			copy.srcOffset += base_offset;
 		}
 	});
@@ -493,7 +495,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
-			std::memcpy(mapped, reinterpret_cast<const void*>(vaddr), size);
+			if (!LibKernel::Memory::CopySparseMemory(vaddr, mapped, size)) {
+				EXIT("BufferCache: failed to read sparse guest buffer memory\n");
+			}
 			m_stream_buffer.Commit();
 			return {&m_stream_buffer, offset};
 		}

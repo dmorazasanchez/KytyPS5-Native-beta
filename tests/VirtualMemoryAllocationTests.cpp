@@ -619,7 +619,8 @@ void TestConcurrentBackingReads() {
 	constexpr uint64_t original = 0x123456789abcdef0ull;
 	for (const auto& readers: {std::pair {&TryReadBacking, &TryReadBacking},
 	                           std::pair {&TryReadBacking, &TryReadSparseBacking},
-	                           std::pair {&TryReadSparseBacking, &TryReadSparseBacking}}) {
+	                           std::pair {&TryReadSparseBacking, &TryReadSparseBacking},
+	                           std::pair {&CopySparseMemory, &CopySparseMemory}}) {
 		const auto base = MapNamedFlexible(test, SceKernelPageSize, SceKernelProtCpuRw,
 		                                   "concurrent_backing_reads");
 		std::memcpy(reinterpret_cast<void*>(base), &original, sizeof(original));
@@ -654,7 +655,7 @@ void TestBackingReadExcludesWritesAndUnmap() {
 	const char*        test        = "BackingReadExcludesWritesAndUnmap";
 	constexpr uint64_t original    = 0x123456789abcdef0ull;
 	constexpr uint64_t replacement = 0xfedcba9876543210ull;
-	for (const auto read: {TryReadBacking, TryReadSparseBacking}) {
+	for (const auto read: {TryReadBacking, TryReadSparseBacking, CopySparseMemory}) {
 		for (const bool unmap: {false, true}) {
 			const auto base = MapNamedFlexible(test, SceKernelPageSize, SceKernelProtCpuRw,
 			                                   "backing_read_exclusion");
@@ -1149,6 +1150,54 @@ void TestRuntimeMemoryOwnerLifecycle() {
 	Check(test, Libs::LibKernel::Memory::FreeGuestMemory(adjacent_reused, SceKernelPageSize),
 	      "adjacent runtime reuse cleanup failed");
 
+	std::printf("[host]    %-48s ok\n", test);
+}
+
+void TestCopySparseMemoryMappings() {
+	using namespace Libs::LibKernel::Memory;
+	const char* test = "CopySparseMemoryMappings";
+	constexpr uint64_t size = SceKernelPageSize * 5;
+	const auto base = AllocateRuntimeMemory(0, size, Common::VirtualMemory::Mode::ReadWrite,
+	                                        "sparse_copy_private");
+	Check(test, base != 0, "private allocation failed");
+	for (const auto page : {0u, 2u, 4u}) {
+		Check(test, FreeGuestMemory(base + page * SceKernelPageSize, SceKernelPageSize),
+		      "private page release failed");
+	}
+	void* shared = reinterpret_cast<void*>(base);
+	CheckOk(test, KernelMapNamedFlexibleMemory(&shared, SceKernelPageSize, SceKernelProtCpuRw,
+	                                           SceKernelMapFixed, "sparse_copy_shared"),
+	        "map shared first page");
+	constexpr std::array<uint8_t, 5> values {0x3c, 0xa7, 0, 0x5d, 0};
+	for (const auto page : {0u, 1u, 3u}) {
+		std::memset(reinterpret_cast<void*>(base + page * SceKernelPageSize), values[page],
+		            SceKernelPageSize);
+	}
+	CheckOk(test, KernelMprotect(shared, SceKernelPageSize, 0), "protect shared first page");
+	constexpr uint64_t prefix = 29, suffix = 17, copied = size - prefix - suffix;
+	std::vector<uint8_t> bytes(copied + 2, 0x55);
+	Check(test, !TryReadSparseBacking(base + prefix, bytes.data() + 1, copied) &&
+	                std::all_of(bytes.begin(), bytes.end(), [](uint8_t value) { return value == 0x55; }),
+	      "strict backing read accepted private memory or changed its destination");
+	Check(test, CopySparseMemory(base + prefix, bytes.data() + 1, copied),
+	      "sparse copy rejected mixed shared, private and unbacked pages");
+	Check(test, bytes.front() == 0x55 && bytes.back() == 0x55,
+	      "sparse copy overwrote destination canaries");
+	for (uint64_t i = 0; i < copied; ++i) {
+		Check(test, bytes[i + 1] == values[(prefix + i) / SceKernelPageSize],
+		      "sparse copy misplaced mapped data or an unbacked gap");
+	}
+	uint64_t canary = UINT64_MAX;
+	Check(test, !CopySparseMemory(0x10000, &canary, sizeof(canary)) &&
+	                !CopySparseMemory(UINT64_MAX - 3, &canary, sizeof(canary)) &&
+	                !CopySparseMemory(base, &canary, 0) &&
+	                !CopySparseMemory(base, nullptr, sizeof(canary)) && canary == UINT64_MAX,
+	      "invalid sparse copy accepted its range or changed its destination");
+	CheckOk(test, KernelMunmap(base, SceKernelPageSize), "unmap shared first page");
+	for (const auto page : {1u, 3u}) {
+		Check(test, FreeGuestMemory(base + page * SceKernelPageSize, SceKernelPageSize),
+		      "private page cleanup failed");
+	}
 	std::printf("[host]    %-48s ok\n", test);
 }
 
@@ -4420,6 +4469,7 @@ int main(int argc, char** argv) {
 		RunTest(TestConcurrentBackingReads);
 		RunTest(TestBackingReadExcludesWritesAndUnmap);
 		RunTest(TestSparseBackingReadPreservesResidency);
+		RunTest(TestCopySparseMemoryMappings);
 		RunTest(TestSparseReadDuringDirectCommit);
 		RunTest(TestDirectMapQueryOffsetAndPartialMunmap);
 		RunTest(TestFlexibleMemoryUsesSharedBacking);
@@ -4473,6 +4523,7 @@ int main(int argc, char** argv) {
 	RunTest(TestProsperoArgumentAndInfoSizeContracts);
 	RunTest(TestGuestAddressSpaceOwnsReservationsBeforeBacking);
 	RunTest(TestSparseBackingReadPreservesResidency);
+	RunTest(TestCopySparseMemoryMappings);
 	RunTest(TestSparseReadDuringDirectCommit);
 	RunTest(TestConcurrentBackingReads);
 	RunTest(TestBackingReadExcludesWritesAndUnmap);

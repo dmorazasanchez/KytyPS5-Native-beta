@@ -962,7 +962,11 @@ static bool IsInPrtAperture(uint64_t address, uint64_t size = 1) {
 }
 
 bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
-	return g_guest_address_space->TryReadSparseBacking(vaddr, data, size);
+	return g_guest_address_space->CopySparseMemory<false>(vaddr, data, size);
+}
+
+bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+	return g_guest_address_space->CopySparseMemory<true>(vaddr, data, size);
 }
 
 static bool SelfTestSub64SharedPlaceholderAlias() {

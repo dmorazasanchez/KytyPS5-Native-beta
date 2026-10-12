@@ -5344,6 +5344,47 @@ public:
         ReadBuffer(name, readback, 8) == std::vector<u32>{0x00020001u, 0x00020001u, 0u, 0u,
             0x00020101u, 0xabcdef01u, 0x00020103u, 0x00040101u},
         "upload lost sparse holes, boundary bytes, compute access, or in-flight lifetime");
+    // Cached uploads must read reserved holes without faulting back into the tracker,
+    // while retaining the private-memory sources accepted by ordinary buffer reads.
+    const auto private_base = LibKernel::Memory::AllocateRuntimeMemory(
+        0, page, Common::VirtualMemory::Mode::ReadWrite, "private_buffer_upload");
+    Require(name, "private source allocation", private_base != 0, "private allocation failed");
+    auto *private_words = reinterpret_cast<u32 *>(private_base);
+    private_words[0] = 0x55667788u;
+    private_words[page / sizeof(u32) - 1u] = 0x99aabbccu;
+    context.MapMemory(private_base, page);
+    context.MapMemory(base + page, 2u * page);
+    const auto sparse_buffer = cache.ObtainBuffer(base, 2u * page, false);
+    const auto private_buffer = cache.ObtainBuffer(private_base, page, false);
+    const auto sparse_stream = cache.ObtainBuffer(base + 2u * page, sizeof(u32), false);
+    Require(name, "sparse stream source",
+        sparse_stream.first == &cache.GetUtilityBuffer(MemoryUsage::Stream),
+        "small sparse read did not exercise the stream path");
+    const std::array<vk::BufferCopy, 2> sparse_copies{{
+        {sparse_buffer.second, 0, sizeof(u32)},
+        {sparse_buffer.second + page, sizeof(u32), sizeof(u32)}}};
+    const std::array<vk::BufferCopy, 2> private_copies{{
+        {private_buffer.second, 2u * sizeof(u32), sizeof(u32)},
+        {private_buffer.second + page - sizeof(u32), 3u * sizeof(u32), sizeof(u32)}}};
+    scheduler.Current().Handle().copyBuffer(sparse_buffer.first->Handle(), readback.buffer,
+        sparse_copies.size(), sparse_copies.data());
+    scheduler.Current().Handle().copyBuffer(private_buffer.first->Handle(), readback.buffer,
+        private_copies.size(), private_copies.data());
+    const vk::BufferCopy stream_copy{sparse_stream.second, 4u * sizeof(u32), sizeof(u32)};
+    scheduler.Current().Handle().copyBuffer(sparse_stream.first->Handle(), readback.buffer,
+        1, &stream_copy);
+    scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+    scheduler.Finish();
+    Require(name, "cached sparse and private upload",
+        ReadBuffer(name, readback, 5) == std::vector<u32>{0x00020001u, 0u, 0x55667788u, 0x99aabbccu, 0u} &&
+        !cache.IsRegionGpuModified(base, 2u * page) &&
+        !cache.IsRegionGpuModified(private_base, page),
+        "cached upload lost sparse/private data or changed read-only GPU ownership");
+    context.UnmapMemory(private_base, page);
+    context.UnmapMemory(base + page, 2u * page);
+    Require(name, "private source release", LibKernel::Memory::FreeGuestMemory(private_base, page),
+        "private allocation release failed");
     DestroyBuffer(&readback);
     for (const auto offset : mapped_offsets) context.UnmapMemory(base + offset, page);
     scheduler.Finish();
