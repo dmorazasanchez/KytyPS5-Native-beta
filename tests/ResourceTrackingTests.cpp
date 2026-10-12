@@ -2055,19 +2055,22 @@ void TestScalarBufferSelectorDomain() {
 void TestCountedRowImageSelector() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   enum class Variant { Valid, Signed, WrongStep, Bypass, WrongRow, CountStride,
-                       KeyStride, CountImmediate, KeyImmediate };
+                       KeyStride, CountImmediate, KeyImmediate, Masked, EmptyCountMask, VaryingRow,
+                       EmptyMask, UnprovenMask, WrongMask, AnyBound, MaskedWrongStep };
   const auto make_plan = [](Variant variant = Variant::Valid, uint32_t capacity = 16u) {
     Fixture fixture;
+    const bool masked = variant >= Variant::Masked;
     auto *entry = fixture.block;
     auto *header = fixture.AddBlock();
     auto *body = fixture.AddBlock();
     auto *latch = fixture.AddBlock();
     auto *exit = fixture.AddBlock();
+    auto *preheader = masked ? fixture.AddBlock() : entry;
     const auto branch = [](Block *from, Block *to) {
       from->AddBranch(to);
       from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
     };
-    branch(entry, header);
+    branch(preheader, header);
     branch(body, latch);
     branch(latch, header);
     const auto keys = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
@@ -2076,15 +2079,45 @@ void TestCountedRowImageSelector() {
                                         fixture.UserData(6), fixture.UserData(7)});
     const auto material = fixture.Buffer({fixture.UserData(8), fixture.UserData(9),
                                           fixture.UserData(10), fixture.UserData(11)});
-    const auto row = fixture.Emit(ValueOpcode::GetBuiltin,
+    auto row = fixture.Emit(ValueOpcode::GetBuiltin,
         {Value(static_cast<uint32_t>(StageInputKind::WorkgroupId)), Value(0u)});
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarBuffer;
+    Value active(true);
+    if (masked) {
+      const auto local = fixture.Emit(ValueOpcode::GetBuiltin,
+          {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+      row = fixture.Emit(ValueOpcode::ReadConstBuffer,
+          {keys, fixture.Emit(ValueOpcode::ShiftLeftLogical32, {row, Value(2u)})},
+          fixture.AddMemory(scalar, 0x04));
+      row = fixture.Emit(ValueOpcode::IMul32,
+          {row, fixture.Emit(ValueOpcode::ConvertU32F32,
+              {fixture.Emit(ValueOpcode::BitCastF32U32, {fixture.UserData(12u)})})});
+      Check(ValidateWaveUniformValue(fixture.program, row) &&
+                !ValidateRuntimeValue(fixture.program, row),
+            "wave-uniform workgroup data escaped the host evaluation boundary");
+      if (variant == Variant::VaryingRow)
+        row = fixture.Emit(ValueOpcode::IAdd32, {row, local});
+      active = fixture.Emit(ValueOpcode::INotEqual32, {local, Value(0u)});
+      entry->condition = fixture.Emit(ValueOpcode::ConditionRef, {active},
+                                       CFG::BranchCondition::ExecNonZero);
+      if (variant == Variant::UnprovenMask) {
+        entry->condition = fixture.Emit(ValueOpcode::INotEqual32,
+            {fixture.UserData(13u), Value(0u)});
+      }
+      entry->AddBranch(preheader);
+      entry->AddBranch(exit);
+      entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                            .true_block = preheader, .false_block = exit};
+      if (variant == Variant::EmptyMask) active = Value(false);
+    }
     auto count_row = row;
+    if (masked) count_row = fixture.Emit(ValueOpcode::ReadFirstLane,
+        {row, Value(variant != Variant::EmptyCountMask)});
     if (variant == Variant::WrongRow)
       count_row = fixture.Emit(ValueOpcode::IAdd32, {row, Value(1u)});
     const auto count_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
         {count_row, Value(variant == Variant::CountStride ? 3u : 2u)});
-    MemoryInfo scalar;
-    scalar.kind = ResourceKind::ScalarBuffer;
     scalar.offset = variant == Variant::CountImmediate ? 4u : 0u;
     const auto count = fixture.Emit(ValueOpcode::ReadConstBuffer,
         {counts, count_offset}, fixture.AddMemory(scalar, 0x10));
@@ -2095,7 +2128,9 @@ void TestCountedRowImageSelector() {
     header->AddBranch(body);
     auto *outside = variant == Variant::Bypass ? latch : exit;
     header->AddBranch(outside);
-    header->condition = guard;
+    header->condition = variant == Variant::AnyBound
+        ? fixture.Emit(ValueOpcode::ConditionRef, {guard}, CFG::BranchCondition::ExecNonZero, header)
+        : guard;
     header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
                           .true_block = body, .false_block = outside};
     fixture.block = body;
@@ -2103,8 +2138,14 @@ void TestCountedRowImageSelector() {
     auto index = Value(&induction);
     if (variant == Variant::KeyStride)
       index = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {index, Value(1u)});
-    const auto key_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
-        {fixture.Emit(ValueOpcode::IAdd32, {row_start, index}), Value(2u)});
+    auto element = fixture.Emit(ValueOpcode::IAdd32, {row_start, index});
+    if (masked) {
+      const auto write_mask = variant == Variant::WrongMask
+          ? fixture.Emit(ValueOpcode::LogicalNot, {active}) : active;
+      element = fixture.Emit(ValueOpcode::ReadFirstLane,
+          {fixture.Emit(ValueOpcode::SelectU32, {write_mask, element, Value(0xdeadbeefu)}), active});
+    }
+    const auto key_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {element, Value(2u)});
     scalar.offset = variant == Variant::KeyImmediate ? 4u : 0u;
     const auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
         {keys, key_offset}, fixture.AddMemory(scalar, 0x20));
@@ -2123,25 +2164,32 @@ void TestCountedRowImageSelector() {
         {fixture.Image(image_words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
          fixture.ImageAddress(), Value(true)}, fixture.AddMemory(sample, 0x40));
     const auto step = fixture.Emit(ValueOpcode::IAdd32,
-        {Value(&induction), Value(variant == Variant::WrongStep ? 2u : 1u)}, 0, latch);
-    induction.AddPhiOperand(entry, Value(0u));
+        {Value(&induction), Value(variant == Variant::WrongStep ||
+                                  variant == Variant::MaskedWrongStep ? 2u : 1u)}, 0, latch);
+    induction.AddPhiOperand(preheader, Value(0u));
     induction.AddPhiOperand(latch, step);
     fixture.PlanAndTrack();
     const auto &source = fixture.program.descriptor_sources[fixture.program.info.images[0].source];
     Check(source.indirect_descriptor.has_value(), "counted-row image lost its indirect source");
     const auto &selector = source.indirect_descriptor->selector;
-    Check((selector && selector->rows.has_value()) == (variant == Variant::Valid),
+    const bool valid = variant == Variant::Valid || variant == Variant::Masked ||
+                       variant == Variant::EmptyCountMask;
+    Check((selector && selector->rows.has_value()) == valid,
           "counted-row selector lost its proof or accepted mismatched row/induction bounds");
-    if (variant == Variant::Valid)
+    if (valid)
       Check(selector->stride == 4u && selector->offset == 0u &&
                 selector->rows->stride == uint64_t(capacity) * 4u,
             "counted-row selector changed native row or element byte spacing");
     return ExtractResourcePlan(fixture.program);
   };
   auto plan = make_plan();
+  make_plan(Variant::Masked);
+  make_plan(Variant::EmptyCountMask);
   for (const auto variant : {Variant::Signed, Variant::WrongStep, Variant::Bypass,
                              Variant::WrongRow, Variant::CountStride, Variant::KeyStride,
-                             Variant::CountImmediate, Variant::KeyImmediate})
+                             Variant::CountImmediate, Variant::KeyImmediate, Variant::VaryingRow,
+                             Variant::EmptyMask, Variant::UnprovenMask, Variant::WrongMask,
+                             Variant::AnyBound, Variant::MaskedWrongStep})
     make_plan(variant);
 
   constexpr uint32_t CountBase = 0x1000u, KeyBase = 0x2000u, MaterialBase = 0x4000u;

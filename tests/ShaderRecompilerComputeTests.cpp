@@ -36182,13 +36182,17 @@ void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
   constexpr u32 poison = 0x345d1746u;
   const auto alignment = static_cast<u32>(vulkan.RuntimeContext().GetPhysicalDeviceProperties()
                                              .limits.minStorageBufferOffsetAlignment);
-  const auto slot = std::max(256u, alignment);
-  const u32 srt = slot, counts = slot * 2u, keys = slot * 3u, material = slot * 4u;
+  for (const bool masked : {false, true})
   for (const u32 wave : {32u, 64u}) {
+    const auto output_words = masked ? 48u * wave : 64u;
+    const auto slot = (output_words * 4u + alignment - 1u) / alignment * alignment;
+    const u32 srt = slot, counts = slot * 2u, keys = slot * 3u, material = slot * 4u;
+    const auto tile_list = slot * 5u;
     TestCase test;
-    test.name = wave == 32u ? "CountedRowImageSelector32" : "CountedRowImageSelector64";
-    test.initial.resize((material + 396u * 4u) / 4u, 0u);
-    std::fill_n(test.initial.begin(), 64u, 0xdeadbeefu);
+    test.name = masked ? (wave == 32u ? "MaskedRowImageSelector32" : "MaskedRowImageSelector64")
+                       : (wave == 32u ? "CountedRowImageSelector32" : "CountedRowImageSelector64");
+    test.initial.resize((masked ? tile_list + 12u : material + 396u * 4u) / 4u, 0u);
+    std::fill_n(test.initial.begin(), output_words, 0xdeadbeefu);
     const std::array<u32, 12> descriptors{counts, 4u << 16u, 3u, 0x14004u,
         keys, 4u << 16u, 48u, 0x14004u, material, 396u << 16u, 4u, 0x14004u};
     std::copy(descriptors.begin(), descriptors.end(), test.initial.begin() + srt / 4u);
@@ -36210,19 +36214,32 @@ void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
       put_image(key * 396u + 184u, 0x100u + key, F::k32_32_32_32Float);
     put_image(32u, 0x104u, F::k32_32_32_32Float);
     put_image(256u, 0x200u, F::k8SScaled);
+    if (masked) {
+      // The scalar tile list reverses workgroups; row selection must remain on the GPU.
+      test.initial[tile_list / 4u] = 2u;
+      test.initial[tile_list / 4u + 1u] = 1u;
+      test.user_data[52] = tile_list;
+      test.user_data[53] = 4u << 16u;
+      test.user_data[54] = 3u;
+      test.user_data[55] = 0x14004u;
+    }
     test.expected = test.initial;
-    test.expected[0] = 0x3f800002u;
-    test.expected[1] = 0x3f800001u;
-    test.expected[2] = 0x3f800004u;
-    test.expected[32] = 0x3f800003u;
+    for (const auto [index, bits] : std::array<std::pair<u32, u32>, 4>{{
+             {0u, 0x3f800002u}, {1u, 0x3f800001u}, {2u, 0x3f800004u}, {32u, 0x3f800003u}}}) {
+      if (masked) {
+        for (u32 lane = 1u; lane < wave; lane += 2u)
+          test.expected[index * wave + lane] = bits;
+      } else test.expected[index] = bits;
+    }
     test.user_data[0] = srt;
-    test.user_data[50] = 256u;
+    test.user_data[50] = output_words * 4u;
     test.user_data[51] = 3u << 28u;
     test.has_user_data = true;
     test.has_compute_info = true;
     test.compute_info.wave_size = wave;
-    test.compute_info.threads_num[0] = test.compute_info.threads_num[1] =
-        test.compute_info.threads_num[2] = 1u;
+    test.compute_info.threads_num[0] = masked ? wave : 1u;
+    test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1u;
+    test.compute_info.thread_ids_num = masked ? 1 : 0;
     test.compute_info.group_id[0] = true;
     test.compute_info.workgroup_register = 44u;
     test.dispatch_x = 3u;
@@ -36230,32 +36247,58 @@ void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
     code.insert(code.end(), {EncodeSmem0(0x03, 8), EncodeSmem1(0, 125),
                             EncodeSmem0(0x02, 16), EncodeSmem1(32, 125)});
     code.push_back(EncodeSop2(0x1e, 22, 44, InlineU32(2)));
+    if (masked) {
+      code.push_back(EncodeVop1(0x01, 2, Vgpr(0))); // Preserve the lane for disjoint output addresses.
+      code.insert(code.end(), {EncodeSmem0(0x08, 23, 26), EncodeSmem1(0, 22)});
+      code.push_back(EncodeVop1(0x01, 18, 23));
+      code.push_back(EncodeVop1(0x02, 22, Vgpr(18)));
+      code.push_back(EncodeSop2(0x1e, 22, 22, InlineU32(2)));
+    }
     code.insert(code.end(), {EncodeSmem0(0x08, 21, 4), EncodeSmem1(0, 22)});
     AppendSMovLiteral(&code, 20, 0u);
     AppendVMovU32(&code, 0, 0x3f000000u);
     AppendVMovU32(&code, 1, 0x3f000000u);
+    const auto masked_exit_branch = masked ? code.size() + 2u : 0u;
+    if (masked) {
+      code.push_back(EncodeVop2(0x1b, 6, InlineU32(1), 2));
+      code.push_back(EncodeVopc(0xd5, InlineU32(0), 6));
+      code.push_back(0u); // Skip the loop when the new EXEC is empty.
+    }
     const auto header = code.size();
     code.push_back(EncodeSopc(0x0a, 20, 21));
     const auto exit_branch = code.size();
     code.push_back(0u);
-    code.push_back(EncodeSop2(0x1e, 22, 44, InlineU32(4)));
-    code.push_back(EncodeSop2(0x02, 22, 22, 20));
+    if (masked) {
+      code.insert(code.end(), {EncodeVop3Word0(0x346, 3),
+                              EncodeVop3Word1(Vgpr(18), InlineU32(4), 20)});
+      code.push_back(EncodeVop1(0x02, 22, Vgpr(3)));
+    } else {
+      code.push_back(EncodeSop2(0x1e, 22, 44, InlineU32(4)));
+      code.push_back(EncodeSop2(0x02, 22, 22, 20));
+    }
     code.push_back(EncodeSop2(0x1e, 22, 22, InlineU32(2)));
     code.insert(code.end(), {EncodeSmem0(0x08, 23, 6), EncodeSmem1(0, 22)});
     code.push_back(EncodeSop2(0x26, 24, 23, 255)); code.push_back(396u);
     code.push_back(EncodeSop2(0x02, 24, 24, 255)); code.push_back(184u);
     code.insert(code.end(), {EncodeSmem0(0x0b, 32, 8), EncodeSmem1(0, 24),
                             EncodeMimg0(0x27, 1), EncodeMimg1(4, 0, 8, 10)});
-    code.push_back(EncodeVop1(0x01, 30, 22));
+    if (masked) {
+      code.push_back(EncodeVop2(0x1a, 5, InlineU32(2), 2));
+      code.insert(code.end(), {EncodeVop3Word0(0x346, 30),
+          EncodeVop3Word1(22, InlineU32(std::countr_zero(wave)), Vgpr(5))});
+    } else code.push_back(EncodeVop1(0x01, 30, 22));
     AppendBufferStoreDword(&code, 4, 30);
     code.push_back(EncodeSop2(0x02, 20, 20, InlineU32(1)));
     code.push_back(EncodeSopp(0x02, header - code.size() - 1u));
     code[exit_branch] = EncodeSopp(0x04, code.size() - exit_branch - 1u);
+    if (masked) code[masked_exit_branch] = EncodeSopp(0x08, code.size() - masked_exit_branch - 1u);
     AppendEnd(&code);
     test.opcodes = {O::S_LOAD_DWORDX8, O::S_LOAD_DWORDX4, O::S_BUFFER_LOAD_DWORD,
         O::S_BUFFER_LOAD_DWORDX8, O::S_MOV_B32, O::S_LSHL_B32, O::S_ADD_I32,
         O::S_MUL_I32, O::S_CMP_LT_U32, O::S_CBRANCH_SCC0, O::S_BRANCH,
         O::V_MOV_B32, O::IMAGE_SAMPLE, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+    if (masked) test.opcodes.insert(test.opcodes.end(), {O::V_READFIRSTLANE_B32,
+        O::V_LSHL_ADD_U32, O::V_LSHLREV_B32, O::V_AND_B32, O::V_CMPX_NE_U32, O::S_CBRANCH_EXECZ});
     const auto compiled = CompileCase(test, vulkan.SubgroupSize());
     Require(test.name, "exact active images", compiled.resources.images.size() == 4u &&
                 std::ranges::all_of(compiled.resources.images, [](const auto &image) {
