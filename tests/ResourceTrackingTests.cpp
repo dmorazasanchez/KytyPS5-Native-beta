@@ -566,10 +566,11 @@ void TestGuardedDirectImageTable() {
     Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane,
     BoundDiamond, BoundBranchSpecific, BoundMismatched,
     BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive,
+    BoundExecFactored,
     Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor,
     FiniteShared, FiniteSharedBypass, FiniteLate
   };
-  const auto make_plan = [](Guard guard) {
+  const auto make_plan = [](Guard guard, uint32_t operand_order = 0u) {
     const bool finite = guard >= Guard::Finite;
     const bool bounded = guard >= Guard::Bounded && !finite;
     const bool exec_bound = bounded && guard >= Guard::BoundExec;
@@ -650,8 +651,19 @@ void TestGuardedDirectImageTable() {
             ? ValueOpcode::BitwiseAnd32 : ValueOpcode::BitwiseOr32, {encoded, varying});
         const auto retained = fixture.Emit(ValueOpcode::SelectU32,
             {previous, stopped, Value(0u)});
-        const auto vcc = fixture.Emit(ValueOpcode::LogicalAnd, {previous,
-            fixture.Emit(ValueOpcode::INotEqual32, {retained, Value(0u)})});
+        const auto stopped_lane = fixture.Emit(ValueOpcode::INotEqual32, {retained, Value(0u)});
+        auto vcc = fixture.Emit(ValueOpcode::LogicalAnd,
+            operand_order & 1u ? std::initializer_list<Value>{stopped_lane, previous}
+                               : std::initializer_list<Value>{previous, stopped_lane});
+        if (guard == Guard::BoundExecFactored) {
+          const auto empty = fixture.Emit(ValueOpcode::IEqual32, {key, Value(UINT32_MAX)});
+          const auto sentinel = fixture.Emit(ValueOpcode::LogicalAnd,
+              operand_order & 2u ? std::initializer_list<Value>{empty, previous}
+                                 : std::initializer_list<Value>{previous, empty});
+          vcc = fixture.Emit(ValueOpcode::LogicalOr,
+              operand_order & 4u ? std::initializer_list<Value>{sentinel, vcc}
+                                 : std::initializer_list<Value>{vcc, sentinel});
+        }
         const auto remaining = fixture.Emit(ValueOpcode::LogicalNot, {vcc});
         active = guard == Guard::BoundExecUnprovenActive ? remaining
             : fixture.Emit(ValueOpcode::LogicalAnd, {previous, remaining});
@@ -799,10 +811,12 @@ void TestGuardedDirectImageTable() {
                    fixture.AddMemory(memory, 0x130));
     }
     if (exec_bound) ConstantPropagationPass(fixture.program.blocks);
-    if (guard == Guard::BoundExec) {
+    if (guard == Guard::BoundExec || guard == Guard::BoundExecFactored) {
       std::vector<const Inst *> pending{active.ResolveInstruction()};
+      uint32_t conjunctions = 0;
       for (size_t index = 0; index < pending.size(); ++index) {
         const auto *inst = pending[index];
+        conjunctions += inst->GetOpcode() == ValueOpcode::LogicalAnd;
         Check(inst->GetOpcode() != ValueOpcode::SelectU32 &&
                   inst->GetOpcode() != ValueOpcode::BitwiseOr32,
               "EXEC bound retained its integer Boolean encoding");
@@ -812,6 +826,7 @@ void TestGuardedDirectImageTable() {
             pending.push_back(operand);
         }
       }
+      Check(conjunctions == 1u, "EXEC bound retained repeated active-lane conjunctions");
     }
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
@@ -829,6 +844,7 @@ void TestGuardedDirectImageTable() {
   auto plan = make_plan(Guard::Nonzero);
   make_plan(Guard::SccNonZero);
   make_plan(Guard::Plain);
+  for (uint32_t order = 0; order < 8u; ++order) make_plan(Guard::BoundExecFactored, order);
   for (const auto guard : {Guard::Zero, Guard::Unrelated, Guard::Bypass,
                            Guard::ExecZero, Guard::VccZero, Guard::BoundMissing,
                            Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane,
@@ -914,13 +930,14 @@ void TestGuardedDirectImageTable() {
         "batched descriptor read crossed the 48-bit endpoint");
 
   make_plan(Guard::Bounded);
-  for (const auto guard : {Guard::BoundDiamond, Guard::BoundExec}) {
+  for (const auto guard : {Guard::BoundDiamond, Guard::BoundExec, Guard::BoundExecFactored}) {
     auto bounded = make_plan(guard);
     Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
           "bounded table with image writes omitted specialization read capture");
     LinearTestMemory records;
-    const uint32_t record_offset = guard == Guard::BoundExec ? 672u : 3696u;
-    const uint32_t record_stride = guard == Guard::BoundExec ? 784u : 272u;
+    const bool exec_bound = guard != Guard::BoundDiamond;
+    const uint32_t record_offset = exec_bound ? 672u : 3696u;
+    const uint32_t record_stride = exec_bound ? 784u : 272u;
     for (uint32_t key = 0; key < 2u; ++key) {
       const auto word = (record_offset + key * record_stride) / 4u;
       records.words[word] = 0x500u + key;

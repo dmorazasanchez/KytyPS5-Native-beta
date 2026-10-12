@@ -36569,8 +36569,11 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
                                           EncodeSop1(0x04, 126, 28)});
       code.push_back(EncodeSopc(0x09, 22, 21));
       if (masked) code.insert(code.end(), {
+          EncodeVopc(0xc2, 249, 22), // Mask the FF1 sentinel into s2:s3.
+          EncodeVopcSdwa(193, 2, 1, 6, 6, 0, 0, 0, 0, 0, 0, 1, 1),
           EncodeVop2(0x1c, 10, 253, 13), // SCC encoded as 0/1, OR per-lane done.
           EncodeVopc(0xc5, InlineU32(0), 10),
+          EncodeSop2(0x11, 106, 106, 2),
           EncodeSop2(0x15, 126, 28, 106)});
       range_exit = code.size(); code.push_back(0u);
     }
@@ -36621,7 +36624,8 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     else test.opcodes.insert(test.opcodes.end(), {O::S_CMP_GE_U32, O::S_CBRANCH_SCC1,
                                                 O::S_BITCMP1_B32});
     if (masked) test.opcodes.insert(test.opcodes.end(), {O::S_CSELECT_B64,
-        O::V_OR_B32, O::V_CMP_NE_U32, O::S_ANDN2_B64, O::S_CBRANCH_EXECZ});
+        O::V_CMP_EQ_U32, O::V_OR_B32, O::V_CMP_NE_U32, O::S_OR_B64,
+        O::S_ANDN2_B64, O::S_CBRANCH_EXECZ});
     test.opcodes.insert(test.opcodes.end(), {O::S_MOV_B64, O::V_ADD_NC_U32});
     auto compiled = CompileCase(test, vulkan.SubgroupSize());
     const auto sampled_count = std::ranges::count_if(compiled.program.info.images,
