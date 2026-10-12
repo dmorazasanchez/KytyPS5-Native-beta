@@ -297,9 +297,6 @@ void TextureCache::TouchImage(Image& image) {
 
 void TextureCache::MarkAsMaybeDirty(ImageId id, Image& image) {
 	image.MarkMaybeCpuDirty();
-	if (image.NeedsMaybeCpuHash()) {
-		image.SetMaybeCpuHash(image.HashGuestEdges());
-	}
 	UntrackImage(id);
 }
 
@@ -1144,12 +1141,7 @@ void TextureCache::RefreshImage(ImageId id) {
 	}
 	TrackImage(id);
 	if (image.IsMaybeCpuDirty()) {
-		const auto hash = image.HashGuestEdges();
-		if (image.NeedsMaybeCpuHash()) {
-			image.SetMaybeCpuHash(hash);
-			return;
-		}
-		(void)image.ResolveMaybeCpuHash(hash);
+		(void)image.ResolveMaybeCpuHash(image.HashGuestEdges());
 	}
 	bool cpu_dirty = image.IsBufferModified() || image.IsDefinitelyCpuDirty();
 	if (image.info.metadata.compression != VideoOutCompression::Uncompressed) {
@@ -1444,7 +1436,6 @@ vk::ImageView TextureCache::FindDepthTarget(ImageId id, const ImageDesc& desc) {
 	}
 	TouchImage(image);
 	image.MarkGpuModified();
-	image.usage.depth_target = true;
 	if (desc.info.HasStencil()) {
 		const auto layers = image.info.resources.layers;
 		EXIT_IF(layers == 0 || image.info.data.size % layers != 0 ||
@@ -1860,7 +1851,7 @@ void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 			continue;
 		}
 		if (owner->Overlaps(address, size)) {
-			owner->InvalidateCpuWrite(address, size);
+			owner->MarkCpuDirty();
 			UntrackImage(id);
 			continue;
 		}

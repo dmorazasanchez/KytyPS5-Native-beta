@@ -873,7 +873,6 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		auto&      image   = texture_cache.GetImage(binding.image_id);
 		const bool storage = binding.desc.type == TextureCache::BindingType::Storage;
 		image.usage.storage |= storage;
-		image.usage.texture |= !storage;
 	}
 }
 

@@ -5455,7 +5455,7 @@ public:
           name, "dynamic views",
           first_view != nullptr && repeated_view == first_view &&
               mapped_view != nullptr && mapped_view != first_view &&
-              image.views.size() == 2 && !image.usage.texture &&
+              image.views.size() == 2 &&
               !image.IsGpuModified() && !image.IsCpuDirty() &&
               !TextureCacheTestAccess::PendingDownload(texture_cache, first),
           "TextureCache::FindTexture did not preserve sampled view "
@@ -7244,6 +7244,48 @@ public:
               !texture_cache.GetImage(fault_b_image).IsDefinitelyCpuDirty() &&
               texture_cache.GetImage(fault_b_image).IsGpuModified(),
           "the surviving image could not reconcile its CPU write");
+
+      // Further writes on the unprotected page must retain the first baseline.
+      Require(name, "same-page repeated-write fault",
+              resources.HandleFault(PageFaultAccess::Write,
+                                    base + padding_fault_offset),
+              "the padding write fault was not handled");
+      constexpr uint32_t fault_a_cpu = 0x81828384u;
+      std::memcpy(memory + 0x8000, &fault_a_cpu, sizeof(fault_a_cpu));
+      texture_cache.InvalidateMemory(base + padding_fault_offset, 1);
+      Require(name, "repeated same-page invalidation",
+              texture_cache.GetImage(fault_a_image).IsMaybeCpuDirty() &&
+                  !texture_cache.GetImage(fault_a_image).IsDefinitelyCpuDirty(),
+              "a repeated padding notification lost maybe-dirty ownership");
+      texture_cache.InvalidateMemory(base + 0x8010, sizeof(fault_b));
+      Require(name, "definite write supersedes maybe-dirty state",
+              texture_cache.GetImage(fault_b_image).IsDefinitelyCpuDirty() &&
+                  !texture_cache.GetImage(fault_b_image).IsMaybeCpuDirty(),
+              "an overlapping CPU write retained the padding-only dirty state");
+      texture_cache.UpdateImage(fault_a_image);
+      texture_cache.UpdateImage(fault_b_image);
+
+      auto fault_readback = CreateHostBuffer(
+          name, 2 * sizeof(uint32_t), vk::BufferUsageFlagBits::eTransferDst, {0, 0});
+      vk::BufferImageCopy fault_copy{};
+      fault_copy.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+      fault_copy.imageExtent = {1, 1, 1};
+      for (const auto id : {fault_a_image, fault_b_image}) {
+        texture_cache.GetImage(id).Download(
+            {&fault_copy, 1}, fault_readback.buffer, fault_copy.bufferOffset,
+            sizeof(uint32_t));
+        fault_copy.bufferOffset += sizeof(uint32_t);
+      }
+      HostReadBarrier(fault_readback.buffer, fault_readback.size,
+                      vk::PipelineStageFlagBits::eTransfer,
+                      vk::AccessFlagBits::eTransferWrite);
+      scheduler.Finish();
+      Require(name, "same-page CPU refresh contents",
+              ReadBuffer(name, fault_readback, 2) ==
+                  std::vector<u32>{fault_a_cpu, fault_b_cpu},
+              "repeated padding invalidation lost a CPU write or definite "
+              "invalidation failed to refresh the native image");
+      DestroyBuffer(&fault_readback);
 
       constexpr uint64_t publish_image_offset = 0x26000;
       constexpr uint64_t publish_buffer_offset = 0x26010;
@@ -12669,7 +12711,7 @@ public:
               null_image.info.data.Empty() && !null_image.binding.is_bound &&
                   !null_image.binding.is_target &&
                   !null_image.binding.needs_rebind &&
-                  null_image.usage.texture && null_image.usage.storage &&
+                  null_image.usage.storage &&
                   null_image.IsGpuModified() &&
                   !TextureCacheTestAccess::PendingDownload(texture_cache,
                                                            null_image_id),
@@ -13344,8 +13386,7 @@ public:
                   texture_cache.GetImage(storage_id).binding.force_general &&
                   texture_cache.GetImage(storage_id).binding.shader_write &&
                   texture_cache.GetImage(storage_id).IsGpuModified() &&
-                  texture_cache.GetImage(storage_id).usage.storage &&
-                  texture_cache.GetImage(storage_id).usage.texture,
+                  texture_cache.GetImage(storage_id).usage.storage,
               "the production graphics binding path did not complete vertex "
               "storage acquisition before pixel sampling");
       descriptor_pipelines.push_back(RenderExecutorTestAccess::CommitBindings(
@@ -13671,8 +13712,7 @@ public:
               phased_depth.desc.info.metadata.stencil_compressed &&
               !phased_depth.depth_clear_enable &&
               !texture_cache.IsMeta(phased_depth.desc.info.metadata.range.address) &&
-              !texture_cache.GetImage(phased_depth.image_id).IsGpuModified() &&
-              !texture_cache.GetImage(phased_depth.image_id).usage.depth_target,
+              !texture_cache.GetImage(phased_depth.image_id).IsGpuModified(),
           "valid PS5 texture-compatibility policy changed logical depth image "
           "identity or discovery side effects");
 
@@ -13754,8 +13794,7 @@ public:
               !texture_cache.IsMetaCleared(
                   phased_depth.desc.info.metadata.range.address,
                   phased_depth.desc.view_info.base_layer) &&
-              texture_cache.GetImage(phased_depth.image_id).IsGpuModified() &&
-              texture_cache.GetImage(phased_depth.image_id).usage.depth_target,
+              texture_cache.GetImage(phased_depth.image_id).IsGpuModified(),
           "final depth acquisition did not publish and consume HTile "
           "state at the final acquisition boundary");
       RenderExecutorTestAccess::ResetBindings(executor);
@@ -14457,7 +14496,7 @@ public:
               array_binding.images[0].desc.view_info.layer_count ==
                   2 &&
               expanded_array.backing.layers == 2 &&
-              expanded_array.IsGpuModified() && expanded_array.usage.texture,
+              expanded_array.IsGpuModified(),
           "raw array view did not expand and reuse the Color2D backing");
 
       RenderColorInfo rebound_array_target{};
@@ -14755,13 +14794,11 @@ public:
               !texture_cache.FindImageFromRange(stencil_address,
                                                 stencil_layout.size, false) &&
                   !texture_cache.GetImage(depth_id).binding.is_bound &&
-                  !texture_cache.GetImage(depth_id).binding.is_target &&
-                  !texture_cache.GetImage(depth_id).usage.depth_target,
+                  !texture_cache.GetImage(depth_id).binding.is_target,
               "FindImage created depth acquisition state or a stencil proxy");
       RenderExecutorTestAccess::BindRenderTarget(executor, depth_id);
       Require(name, "depth prefetch purity",
               texture_cache.GetImage(depth_id).binding.is_target &&
-                  !texture_cache.GetImage(depth_id).usage.depth_target &&
                   !texture_cache.FindImageFromRange(stencil_address,
                                                     stencil_layout.size, false),
               "depth prefetch performed final target acquisition");
@@ -14892,7 +14929,6 @@ public:
               texture_cache.GetImage(target_parent_id).binding.is_target &&
               texture_cache.GetImage(target_parent_id).usage.render_target &&
               texture_cache.GetImage(target_parent_id).IsGpuModified() &&
-              texture_cache.GetImage(depth_id).usage.depth_target &&
               texture_cache.GetImage(depth_id).IsGpuModified() &&
               TextureCacheTestAccess::PendingDownload(texture_cache,
                                                       target_parent_id) &&
@@ -14989,8 +15025,7 @@ public:
       context.GetRenderExecutor().RebindImages(prepared);
       Require(name, "first stencil acquisition",
               prepared.images[0].image_id == sampled_stencil_id &&
-                  prepared.images[0].image_view != nullptr &&
-                  texture_cache.GetImage(sampled_stencil_id).usage.texture,
+                  prepared.images[0].image_view != nullptr,
               "the first sampled-stencil image was not finally acquired");
 
       RenderExecutorTestAccess::ResetBindings(executor);
@@ -15019,8 +15054,7 @@ public:
       context.GetRenderExecutor().RebindImages(redirected);
       Require(name, "second-pass stencil acquisition",
               redirected.images[0].image_id == depth_id &&
-                  redirected.images[0].image_view != nullptr &&
-                  texture_cache.GetImage(depth_id).usage.texture,
+                  redirected.images[0].image_view != nullptr,
               "RebindImages did not acquire the associated depth owner");
       RenderExecutorTestAccess::ResetBindings(executor);
 
