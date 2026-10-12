@@ -12390,7 +12390,7 @@ void TestValuePhiValidation() {
 #endif
 }
 
-void TestWave32MaskProjection() {
+void TestLaneMaskProjection() {
   using namespace ShaderRecompiler::IR;
   for (const uint32_t wave_size : {32u, 64u}) {
     Program program;
@@ -12429,6 +12429,19 @@ void TestWave32MaskProjection() {
           : U32(Value(3u));
       return ir.INotEqual(ir.BitwiseAnd(ir.ShiftRightLogical(word, bit), U32(Value(1u))), zero);
     };
+    const auto low_half = e.ULessThan(U32(e.Emit(ValueOpcode::LaneId)), U32(Value(32u)));
+    const auto mask_bit = [&](uint32_t low, uint32_t high) {
+      const auto word = wave_size == 64u ? e.Select(low_half, U32(Value(low)), U32(Value(high)))
+                                        : U32(Value(low));
+      return thread_bit(e, word);
+    };
+    const auto full = mask_bit(UINT32_MAX, UINT32_MAX);
+    const auto empty = mask_bit(0u, 0u);
+    const auto low_only = mask_bit(UINT32_MAX, 0u);
+    const auto high_only = mask_bit(0u, UINT32_MAX);
+    const auto partial = mask_bit(0x80000000u, 0x80000000u);
+    const auto full_write = e.Select(full, U32(Value(42u)), raw);
+    const auto empty_write = e.Select(empty, U32(Value(42u)), raw);
     const auto active_mask = ballot(e, active);
     const auto direct = thread_bit(e, active_mask);
     const auto arbitrary = thread_bit(e, raw);
@@ -12471,7 +12484,14 @@ void TestWave32MaskProjection() {
     program.blocks[1]->condition = remaining_predicate;
 
     ConstantPropagationPass(program.blocks, wave_size);
+    Check(full.Resolve() == Value(true) && empty.Resolve() == Value(false) &&
+              full_write.Resolve() == Value(42u) && empty_write.Resolve() == raw.Resolve(),
+          "constant EXEC mask retained lane extraction or register predication");
+    Check(partial.Resolve().TryInstruction() != nullptr,
+          "partial mask was incorrectly folded to a constant predicate");
     if (wave_size == 32u) {
+      Check(low_only.Resolve() == Value(true) && high_only.Resolve() == Value(false),
+            "wave32 constant mask incorrectly consumed the high half");
       Check(direct.Resolve() == active.Resolve(), "wave32 ballot round trip lost its predicate");
       Check(EquivalentValue(program, combined, combined_predicate),
             "wave32 OR mask projection changed a lane predicate");
@@ -12491,6 +12511,9 @@ void TestWave32MaskProjection() {
                 projected->PhiBlock(1) == loop,
             "mask projection lost loop Phi type or predecessor order");
     } else {
+      Check(low_only.Resolve().TryInstruction() != nullptr &&
+                high_only.Resolve().TryInstruction() != nullptr,
+            "wave64 mixed halves were incorrectly folded to a constant predicate");
       Check(direct.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
                 live.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
                 combined.Resolve().TryInstruction()->GetOpcode() == ValueOpcode::INotEqual32 &&
@@ -15698,7 +15721,7 @@ int main() {
   TestFinalSsaRejectsRegisterStatePseudos();
 #endif
   TestValuePhiValidation();
-  TestWave32MaskProjection();
+  TestLaneMaskProjection();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
