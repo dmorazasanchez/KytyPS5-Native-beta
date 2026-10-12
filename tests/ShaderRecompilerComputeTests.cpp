@@ -5261,6 +5261,85 @@ public:
     std::printf("[gpu]     %-32s ok\n", name);
   }
 
+  void CheckLargeSparseImageUpload() {
+    constexpr const char *name = "LargeSparseImageUpload";
+    constexpr uint64_t size = 576ull << 20, ring_size = 512ull << 20, page = 0x10000;
+    constexpr uint64_t base = 0x0000000250000000ull;
+    constexpr std::array<uint64_t, 3> mapped_offsets{0, ring_size, size - page};
+    EnsureRuntimeContext();
+    RenderContext context(m_runtime_context);
+    auto &scheduler = context.GetCommandScheduler();
+    HW::Context registers{};
+    HW::UserConfig user_config{};
+    HW::Shader shaders{};
+    scheduler.Begin(registers, user_config, shaders);
+    context.InitializeGpu(nullptr);
+    void *reservation = reinterpret_cast<void *>(base);
+    Require(name, "sparse reservation", LibKernel::Memory::KernelReserveVirtualRange(
+        &reservation, size, 0x10, page) == 0, "large sparse reservation failed");
+    int64_t direct = -1;
+    Require(name, "physical pages", LibKernel::Memory::KernelAllocateDirectMemory(
+        0, LibKernel::Memory::KernelGetDirectMemorySize(), 3u * page, page, 0, &direct) == 0,
+        "sparse physical allocation failed");
+    for (u32 index = 0; index < mapped_offsets.size(); ++index) {
+      void *mapped = reinterpret_cast<void *>(base + mapped_offsets[index]);
+      Require(name, "map sparse page", LibKernel::Memory::KernelMapDirectMemory(
+          &mapped, page, 0x3, 0x10, direct + index * page, page) == 0,
+          "sparse page mapping failed");
+      auto *words = static_cast<u32 *>(mapped);
+      std::fill_n(words, page / sizeof(u32), 0u);
+      words[0] = 0x00020001u + index * 0x100u;
+      words[1] = 0x00040003u + index * 0x100u;
+      words[page / sizeof(u32) - 1u] = 0xabcdef01u;
+      context.MapMemory(base + mapped_offsets[index], page);
+    }
+    auto &cache = context.GetBufferCache();
+    // Exercise the ordinary ring before requesting the captured 576-MiB footprint.
+    const auto small = cache.ObtainBufferForImage(base, page);
+    auto readback = CreateHostBuffer(name, 8u * sizeof(u32),
+        vk::BufferUsageFlagBits::eTransferDst, {});
+    const vk::BufferCopy small_copy{small.second, 0, sizeof(u32)};
+    scheduler.Current().Handle().copyBuffer(small.first->Handle(), readback.buffer, 1, &small_copy);
+    const auto large = cache.ObtainBufferForImage(base, size);
+    Require(name, "temporary image source", large.first != nullptr && large.first != small.first &&
+        large.first->Size() == size && small.first->Size() == ring_size,
+        "oversized image upload resized the ring or truncated its source");
+    constexpr std::array<uint64_t, 5> probes{0, page, ring_size - 4u, ring_size, size - 4u};
+    std::array<vk::BufferCopy, probes.size()> copies{};
+    for (u32 index = 0; index < probes.size(); ++index)
+      copies[index] = {large.second + probes[index], (index + 1u) * sizeof(u32), sizeof(u32)};
+    scheduler.Current().Handle().copyBuffer(large.first->Handle(), readback.buffer,
+                                            copies.size(), copies.data());
+    // A compute consumer requires the same storage-buffer capability as the detiler.
+    const auto converted = TextureCacheTestAccess::Tiler(context.GetTextureCache()).TransformColor(
+        {large.first->Handle(), large.second + ring_size, 8u}, ColorTransform::SwapBgra16, true);
+    const vk::BufferCopy converted_copy{converted.offset, 6u * sizeof(u32), 8u};
+    scheduler.Current().Handle().copyBuffer(converted.buffer, readback.buffer, 1, &converted_copy);
+    vk::BufferMemoryBarrier barrier{};
+    barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+    barrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = readback.buffer;
+    barrier.size = readback.size;
+    scheduler.Current().Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+        vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &barrier, 0, nullptr);
+    scheduler.Finish();
+    Require(name, "sparse upload and deferred lifetime",
+        ReadBuffer(name, readback, 8) == std::vector<u32>{0x00020001u, 0x00020001u, 0u, 0u,
+            0x00020101u, 0xabcdef01u, 0x00020103u, 0x00040101u},
+        "upload lost sparse holes, boundary bytes, compute access, or in-flight lifetime");
+    DestroyBuffer(&readback);
+    for (const auto offset : mapped_offsets) context.UnmapMemory(base + offset, page);
+    scheduler.Finish();
+    context.ShutdownGpu();
+    Require(name, "release mappings", LibKernel::Memory::KernelMunmap(base, size) == 0,
+        "sparse mappings release failed");
+    Require(name, "release physical pages",
+        LibKernel::Memory::KernelReleaseDirectMemory(direct, 3u * page) == 0,
+        "sparse physical release failed");
+    std::printf("[gpu]     %-32s ok\n", name);
+  }
+
   void CheckUnifiedTextureCacheFlow() {
     constexpr const char *name = "UnifiedTextureCacheFlow";
     constexpr uintptr_t base = 0x0000000200600000ull;
@@ -44889,6 +44968,11 @@ int main(int argc, char **argv) {
     CheckPm4RewindResume(vulkan.RuntimeRenderer());
     return 0;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--image-upload-only") == 0) {
+    VulkanHarness vulkan;
+    vulkan.CheckLargeSparseImageUpload();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--image-overlap-only") == 0) {
     CheckDepthAttachmentWrites();
     CheckDepthFeedbackAspects();
@@ -45186,6 +45270,7 @@ int main(int argc, char **argv) {
   vulkan.CheckNativeIndirectDispatch();
   CheckComputeLdsLimit(vulkan);
   vulkan.CheckBdaPageTableUploads();
+  vulkan.CheckLargeSparseImageUpload();
   vulkan.CheckUnifiedTextureCacheFlow();
   vulkan.CheckUnifiedImageViewCache();
   vulkan.CheckPackedTextureComponents();
