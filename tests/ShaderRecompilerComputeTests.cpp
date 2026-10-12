@@ -36176,6 +36176,120 @@ void CheckFiniteInlineSamplerPhi(VulkanHarness &vulkan) {
   std::printf("[compute] %-32s ok\n", test.name);
 }
 
+void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
+  using O = ShaderOpcode;
+  using F = Prospero::BufferFormat;
+  constexpr u32 poison = 0x345d1746u;
+  const auto alignment = static_cast<u32>(vulkan.RuntimeContext().GetPhysicalDeviceProperties()
+                                             .limits.minStorageBufferOffsetAlignment);
+  const auto slot = std::max(256u, alignment);
+  const u32 srt = slot, counts = slot * 2u, keys = slot * 3u, material = slot * 4u;
+  for (const u32 wave : {32u, 64u}) {
+    TestCase test;
+    test.name = wave == 32u ? "CountedRowImageSelector32" : "CountedRowImageSelector64";
+    test.initial.resize((material + 396u * 4u) / 4u, 0u);
+    std::fill_n(test.initial.begin(), 64u, 0xdeadbeefu);
+    const std::array<u32, 12> descriptors{counts, 4u << 16u, 3u, 0x14004u,
+        keys, 4u << 16u, 48u, 0x14004u, material, 396u << 16u, 4u, 0x14004u};
+    std::copy(descriptors.begin(), descriptors.end(), test.initial.begin() + srt / 4u);
+    test.initial[counts / 4u] = 3u;
+    test.initial[counts / 4u + 2u] = 1u;
+    std::fill_n(test.initial.begin() + keys / 4u, 48u, poison);
+    test.initial[keys / 4u] = 2u;
+    test.initial[keys / 4u + 1u] = 0x80000001u;
+    test.initial[keys / 4u + 2u] = 0x1890cedeu; // Dynamic +184 wraps to material byte32.
+    test.initial[keys / 4u + 32u] = 3u;
+    const auto put_image = [&](u32 offset, u32 identity, F format) {
+      auto at = test.initial.begin() + (material + offset) / 4u;
+      at[0] = identity;
+      at[1] = static_cast<u32>(format) << 20u;
+      at[3] = DstSel(4, 5, 6, 7) |
+          (static_cast<u32>(Prospero::ImageType::kColor2D) << 28u);
+    };
+    for (u32 key = 0; key < 4u; ++key)
+      put_image(key * 396u + 184u, 0x100u + key, F::k32_32_32_32Float);
+    put_image(32u, 0x104u, F::k32_32_32_32Float);
+    put_image(256u, 0x200u, F::k8SScaled);
+    test.expected = test.initial;
+    test.expected[0] = 0x3f800002u;
+    test.expected[1] = 0x3f800001u;
+    test.expected[2] = 0x3f800004u;
+    test.expected[32] = 0x3f800003u;
+    test.user_data[0] = srt;
+    test.user_data[50] = 256u;
+    test.user_data[51] = 3u << 28u;
+    test.has_user_data = true;
+    test.has_compute_info = true;
+    test.compute_info.wave_size = wave;
+    test.compute_info.threads_num[0] = test.compute_info.threads_num[1] =
+        test.compute_info.threads_num[2] = 1u;
+    test.compute_info.group_id[0] = true;
+    test.compute_info.workgroup_register = 44u;
+    test.dispatch_x = 3u;
+    auto &code = test.code;
+    code.insert(code.end(), {EncodeSmem0(0x03, 8), EncodeSmem1(0, 125),
+                            EncodeSmem0(0x02, 16), EncodeSmem1(32, 125)});
+    code.push_back(EncodeSop2(0x1e, 22, 44, InlineU32(2)));
+    code.insert(code.end(), {EncodeSmem0(0x08, 21, 4), EncodeSmem1(0, 22)});
+    AppendSMovLiteral(&code, 20, 0u);
+    AppendVMovU32(&code, 0, 0x3f000000u);
+    AppendVMovU32(&code, 1, 0x3f000000u);
+    const auto header = code.size();
+    code.push_back(EncodeSopc(0x0a, 20, 21));
+    const auto exit_branch = code.size();
+    code.push_back(0u);
+    code.push_back(EncodeSop2(0x1e, 22, 44, InlineU32(4)));
+    code.push_back(EncodeSop2(0x02, 22, 22, 20));
+    code.push_back(EncodeSop2(0x1e, 22, 22, InlineU32(2)));
+    code.insert(code.end(), {EncodeSmem0(0x08, 23, 6), EncodeSmem1(0, 22)});
+    code.push_back(EncodeSop2(0x26, 24, 23, 255)); code.push_back(396u);
+    code.push_back(EncodeSop2(0x02, 24, 24, 255)); code.push_back(184u);
+    code.insert(code.end(), {EncodeSmem0(0x0b, 32, 8), EncodeSmem1(0, 24),
+                            EncodeMimg0(0x27, 1), EncodeMimg1(4, 0, 8, 10)});
+    code.push_back(EncodeVop1(0x01, 30, 22));
+    AppendBufferStoreDword(&code, 4, 30);
+    code.push_back(EncodeSop2(0x02, 20, 20, InlineU32(1)));
+    code.push_back(EncodeSopp(0x02, header - code.size() - 1u));
+    code[exit_branch] = EncodeSopp(0x04, code.size() - exit_branch - 1u);
+    AppendEnd(&code);
+    test.opcodes = {O::S_LOAD_DWORDX8, O::S_LOAD_DWORDX4, O::S_BUFFER_LOAD_DWORD,
+        O::S_BUFFER_LOAD_DWORDX8, O::S_MOV_B32, O::S_LSHL_B32, O::S_ADD_I32,
+        O::S_MUL_I32, O::S_CMP_LT_U32, O::S_CBRANCH_SCC0, O::S_BRANCH,
+        O::V_MOV_B32, O::IMAGE_SAMPLE, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+    const auto compiled = CompileCase(test, vulkan.SubgroupSize());
+    Require(test.name, "exact active images", compiled.resources.images.size() == 4u &&
+                std::ranges::all_of(compiled.resources.images, [](const auto &image) {
+                  return image.dwords[0] >= 0x101u && image.dwords[0] <= 0x104u;
+                }), "unused row entries selected malformed material fields");
+    for (u32 word = 0; word < 4u; ++word)
+      Require(test.name, "count descriptor capture",
+              std::ranges::any_of(compiled.resources.specialization_reads, [&](const auto &read) {
+                return read.first <= srt + word * 4u &&
+                    read.first + read.second >= srt + (word + 1u) * 4u;
+              }), "count V# loaded from SRT escaped writable-alias capture");
+    for (const auto &buffer : compiled.resources.buffers) {
+      ShaderBufferResource descriptor{};
+      std::copy_n(buffer.dwords.begin(), 4u, descriptor.fields);
+      test.storage_buffer_ranges.emplace_back(static_cast<u32>(descriptor.Base48()),
+                                              static_cast<u32>(descriptor.GetSize()));
+    }
+    std::vector<VulkanHarness::Image> images;
+    for (const auto &image : compiled.resources.images)
+      images.push_back(vulkan.CreateImageMips(test.name, 1, 1, vk::Format::eR32G32B32A32Sfloat,
+          vk::ImageUsageFlagBits::eSampled, {{0x3f800000u + image.dwords[0] - 0x100u, 0u, 0u, 0u}},
+          4u, vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageType::e2D, vk::ImageViewType::e2D, 1));
+    auto sampler = vulkan.CreateSampler(test.name, 1);
+    auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
+    vulkan.Dispatch(test, compiled, output, nullptr, nullptr, nullptr, nullptr, sampler, images);
+    CompareWords(test, "active row images, wrapped keys and untouched unused slots", test.expected,
+                 vulkan.ReadBuffer(test.name, output, test.expected.size()));
+    vulkan.DestroyBuffer(&output);
+    vulkan.Device().destroySampler(sampler);
+    for (auto &image : images) vulkan.DestroyImage(&image);
+    std::printf("[compute] %-32s ok\n", test.name);
+  }
+}
+
 void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
   constexpr const char *name = "IndirectImageKeySwitch";
   constexpr uint32_t mapping_capacity = 1793u;
@@ -44568,6 +44682,7 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--indirect-image-only") == 0) {
     CheckImageSamplerSpecialization();
     VulkanHarness vulkan;
+    CheckCountedRowImageSelector(vulkan);
     CheckIndirectImageKeySwitch(vulkan);
     CheckFiniteInlineSamplerPhi(vulkan);
     RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
@@ -44733,6 +44848,7 @@ int main(int argc, char **argv) {
   CheckIndirectBufferStore(vulkan);
   CheckRuntimeBufferRecords(vulkan);
   CheckComputeThreadDimensions(vulkan);
+  CheckCountedRowImageSelector(vulkan);
   CheckIndirectImageKeySwitch(vulkan);
   CheckDynamicSampleOffsets(vulkan, 32u);
   CheckDynamicSampleOffsets(vulkan, 64u);

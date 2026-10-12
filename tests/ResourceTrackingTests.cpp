@@ -2052,6 +2052,268 @@ void TestScalarBufferSelectorDomain() {
         "large V# bounds extended the native U32 domain or invented an OOB zero key");
 }
 
+void TestCountedRowImageSelector() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  enum class Variant { Valid, Signed, WrongStep, Bypass, WrongRow, CountStride,
+                       KeyStride, CountImmediate, KeyImmediate };
+  const auto make_plan = [](Variant variant = Variant::Valid, uint32_t capacity = 16u) {
+    Fixture fixture;
+    auto *entry = fixture.block;
+    auto *header = fixture.AddBlock();
+    auto *body = fixture.AddBlock();
+    auto *latch = fixture.AddBlock();
+    auto *exit = fixture.AddBlock();
+    const auto branch = [](Block *from, Block *to) {
+      from->AddBranch(to);
+      from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
+    };
+    branch(entry, header);
+    branch(body, latch);
+    branch(latch, header);
+    const auto keys = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                      fixture.UserData(2), fixture.UserData(3)});
+    const auto counts = fixture.Buffer({fixture.UserData(4), fixture.UserData(5),
+                                        fixture.UserData(6), fixture.UserData(7)});
+    const auto material = fixture.Buffer({fixture.UserData(8), fixture.UserData(9),
+                                          fixture.UserData(10), fixture.UserData(11)});
+    const auto row = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::WorkgroupId)), Value(0u)});
+    auto count_row = row;
+    if (variant == Variant::WrongRow)
+      count_row = fixture.Emit(ValueOpcode::IAdd32, {row, Value(1u)});
+    const auto count_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+        {count_row, Value(variant == Variant::CountStride ? 3u : 2u)});
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarBuffer;
+    scalar.offset = variant == Variant::CountImmediate ? 4u : 0u;
+    const auto count = fixture.Emit(ValueOpcode::ReadConstBuffer,
+        {counts, count_offset}, fixture.AddMemory(scalar, 0x10));
+    auto &induction = header->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    const auto guard = fixture.Emit(variant == Variant::Signed ? ValueOpcode::SLessThan32
+                                                              : ValueOpcode::ULessThan32,
+        {Value(&induction), count}, 0, header);
+    header->AddBranch(body);
+    auto *outside = variant == Variant::Bypass ? latch : exit;
+    header->AddBranch(outside);
+    header->condition = guard;
+    header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                          .true_block = body, .false_block = outside};
+    fixture.block = body;
+    const auto row_start = fixture.Emit(ValueOpcode::IMul32, {row, Value(capacity)});
+    auto index = Value(&induction);
+    if (variant == Variant::KeyStride)
+      index = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {index, Value(1u)});
+    const auto key_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+        {fixture.Emit(ValueOpcode::IAdd32, {row_start, index}), Value(2u)});
+    scalar.offset = variant == Variant::KeyImmediate ? 4u : 0u;
+    const auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
+        {keys, key_offset}, fixture.AddMemory(scalar, 0x20));
+    const auto record = fixture.Emit(ValueOpcode::IAdd32,
+        {fixture.Emit(ValueOpcode::IMul32, {key, Value(396u)}), Value(184u)});
+    std::array<Value, 8> image_words;
+    for (uint32_t word = 0; word < image_words.size(); ++word) {
+      scalar.offset = word * 4u;
+      image_words[word] = fixture.Emit(ValueOpcode::ReadConstBuffer,
+          {material, record}, fixture.AddMemory(scalar, 0x30));
+    }
+    MemoryInfo sample;
+    sample.kind = ResourceKind::Image;
+    sample.image_dimension = Decoder::ImageDimension::Dim2D;
+    fixture.Emit(ValueOpcode::ImageSampleRaw,
+        {fixture.Image(image_words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
+         fixture.ImageAddress(), Value(true)}, fixture.AddMemory(sample, 0x40));
+    const auto step = fixture.Emit(ValueOpcode::IAdd32,
+        {Value(&induction), Value(variant == Variant::WrongStep ? 2u : 1u)}, 0, latch);
+    induction.AddPhiOperand(entry, Value(0u));
+    induction.AddPhiOperand(latch, step);
+    fixture.PlanAndTrack();
+    const auto &source = fixture.program.descriptor_sources[fixture.program.info.images[0].source];
+    Check(source.indirect_descriptor.has_value(), "counted-row image lost its indirect source");
+    const auto &selector = source.indirect_descriptor->selector;
+    Check((selector && selector->rows.has_value()) == (variant == Variant::Valid),
+          "counted-row selector lost its proof or accepted mismatched row/induction bounds");
+    if (variant == Variant::Valid)
+      Check(selector->stride == 4u && selector->offset == 0u &&
+                selector->rows->stride == uint64_t(capacity) * 4u,
+            "counted-row selector changed native row or element byte spacing");
+    return ExtractResourcePlan(fixture.program);
+  };
+  auto plan = make_plan();
+  for (const auto variant : {Variant::Signed, Variant::WrongStep, Variant::Bypass,
+                             Variant::WrongRow, Variant::CountStride, Variant::KeyStride,
+                             Variant::CountImmediate, Variant::KeyImmediate})
+    make_plan(variant);
+
+  constexpr uint32_t CountBase = 0x1000u, KeyBase = 0x2000u, MaterialBase = 0x4000u;
+  // This key wraps 396*key to72, aliasing an unrelated field at material byte256.
+  constexpr uint32_t PoisonKey = 0x345d1746u;
+  LinearTestMemory memory;
+  memory.words.resize((MaterialBase - memory.base + 4u * 396u) / 4u);
+  const auto at = [&](uint32_t address) -> uint32_t& {
+    return memory.words[(address - memory.base) / 4u];
+  };
+  for (uint32_t index = 0; index < 64u; ++index) at(KeyBase + index * 4u) = PoisonKey;
+  for (uint32_t key = 0; key < 4u; ++key) {
+    const auto address = MaterialBase + key * 396u + 184u;
+    at(address) = 0x100u + key;
+    at(address + 4u) = static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    at(address + 12u) = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  }
+  std::copy_n(memory.words.begin() + (MaterialBase + 184u - memory.base) / 4u, 8u,
+              memory.words.begin() + (MaterialBase + 32u - memory.base) / 4u);
+  at(MaterialBase + 32u) = 0x104u;
+  at(MaterialBase + 256u) = 0x200u;
+  at(MaterialBase + 260u) = static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k8SScaled) << 20u;
+  at(MaterialBase + 268u) = at(MaterialBase + 196u);
+  std::array<uint32_t, 12> user_data{KeyBase, 4u << 16u, 64u, 0x14004u,
+      CountBase, 4u << 16u, 4u, 0x14004u, MaterialBase, 396u << 16u, 4u, 0x14004u};
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const auto captured = [&](uint64_t address, uint64_t size) {
+    return std::ranges::any_of(snapshot.specialization_reads, [&](const auto &span) {
+      return span.first <= address && address - span.first <= span.second &&
+          size <= span.second - (address - span.first);
+    });
+  };
+  const auto check = [&](std::initializer_list<uint32_t> selected) {
+    memory.watched_address = KeyBase;
+    memory.watched_reads = 0u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization),
+          "counted-row selector interpreted an unused slot or failed coherent discovery");
+    Check(captured(CountBase, user_data[6] * 4u),
+          "row counts escaped writable-overlap capture");
+    std::vector<uint32_t> expected(selected);
+    std::ranges::sort(expected);
+    expected.erase(std::unique(expected.begin(), expected.end()), expected.end());
+    if (expected.empty()) {
+      Check(memory.watched_reads == 0u && snapshot.images.size() == 1u &&
+                std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t word) { return word == 0u; }),
+            "empty row counts read unused keys or retained stale image candidates");
+      return;
+    }
+    if (expected.size() > 1u) {
+      const auto map = specialization.images[0].indirect_mapping_offset;
+      Check(snapshot.flattened_srt[map] == expected.size(), "counted-row mapping lost selected keys");
+      for (uint32_t index = 0; index < expected.size(); ++index)
+        Check(snapshot.flattened_srt[map + 1u + index * 2u] == expected[index],
+              "counted-row mapping changed an unsigned key or retained an unused slot");
+    }
+    std::vector<uint32_t> image_addresses;
+    for (const auto key : expected) {
+      const auto offset = uint32_t(key * 396u) + 184u;
+      image_addresses.push_back(at(MaterialBase + offset));
+    }
+    std::ranges::sort(image_addresses);
+    image_addresses.erase(std::unique(image_addresses.begin(), image_addresses.end()), image_addresses.end());
+    Check(snapshot.images.size() == image_addresses.size() &&
+              std::ranges::all_of(snapshot.images, [&](const DescriptorValue &image) {
+                return std::ranges::find(image_addresses, image.dwords[0]) != image_addresses.end();
+              }), "counted rows lost a selected image or retained an unrelated descriptor");
+  };
+  check({});
+  at(CountBase) = 2u; at(CountBase + 8u) = 1u;
+  at(KeyBase) = 2u; at(KeyBase + 4u) = 1u; at(KeyBase + 128u) = 3u;
+  check({1u, 2u, 3u});
+  Check(captured(KeyBase, 8u) && captured(KeyBase + 128u, 4u),
+        "active row keys escaped writable-overlap capture");
+  at(KeyBase) = 0x80000001u;
+  check({1u, 3u, 0x80000001u});
+  at(KeyBase) = 0x1890cedeu; // 396*key +184 wraps to material byte32.
+  check({1u, 3u, 0x1890cedeu});
+  at(CountBase) = 0u;
+  user_data[2] = 1u; // The selected second row reads beyond the index V# and supplies key0.
+  check({0u});
+  user_data[2] = 64u;
+  at(CountBase + 8u) = 0u;
+  check({});
+  at(CountBase) = 1u;
+  at(KeyBase) = PoisonKey;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
+        "an actively selected malformed material descriptor was suppressed");
+  at(KeyBase) = 2u;
+  check({2u});
+  for (const auto fail : {CountBase, KeyBase}) {
+    memory.fail_address = fail;
+    Check(!MaterializeResources(plan, runtime, snapshot, specialization),
+          "failed count/key discovery reused stale selector data");
+  }
+  memory.fail_address = UINT64_MAX;
+  for (uint32_t index = 0; index < 17u; ++index) at(KeyBase + index * 4u) = 1u;
+  at(CountBase) = 17u;
+  check({1u}); // Native counts can spill past the row spacing into the next row's slots.
+  at(CountBase + 4u) = 1u;
+  check({1u}); // Overlapping nonempty prefixes preserve the union without duplicating images.
+  at(CountBase + 4u) = 0u;
+  for (uint32_t index = 0; index < 64u; ++index) at(KeyBase + index * 4u) = 1u;
+  at(CountBase) = MaxIndirectDescriptorProbes;
+  check({0u, 1u}); // The exact cap is valid; selected OOB scalar entries contribute key0.
+  for (const auto count : {65537u, 0x80000000u, UINT32_MAX}) {
+    at(CountBase) = count;
+    memory.watched_reads = 0u;
+    Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.watched_reads == 0u,
+          "unsigned row count exceeded the probe cap or wrapped before index discovery");
+  }
+  at(CountBase) = 0u;
+  user_data[6] = MaxIndirectDescriptorProbes + 1u;
+  memory.reads = 0u;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.reads == 0u,
+        "counted-row discovery exceeded the existing row probe cap");
+  user_data[6] = 0u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) && memory.reads == 0u &&
+            snapshot.images.size() == 1u && snapshot.images[0].dwords[0] == 0u,
+        "empty count V# manufactured a selector key or retained stale images");
+
+  user_data[6] = 5u;
+  at(CountBase + 16u) = 1u;
+  auto wrap_plan = make_plan(Variant::Valid, 1u << 28u);
+  memory.watched_reads = 0u;
+  Check(!MaterializeResources(wrap_plan, runtime, snapshot, specialization) && memory.watched_reads == 0u,
+        "row address multiplication wrapped before the active prefix was validated");
+
+  struct OverflowMemory { uint32_t count_reads = 0, other_reads = 0; } overflow;
+  user_data[6] = MaxIndirectDescriptorProbes / 16u + 1u;
+  const auto read_overflow = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<OverflowMemory *>(data);
+    if (address == CountBase && words.size() == MaxIndirectDescriptorProbes / 16u + 1u) {
+      ++memory.count_reads;
+      std::ranges::fill(words, 16u);
+      return true;
+    }
+    ++memory.other_reads;
+    return false;
+  };
+  Check(!MaterializeResources(plan,
+            {.user_data = user_data, .userdata = &overflow, .read_specialization_memory = read_overflow},
+            snapshot, specialization) && overflow.count_reads == 1u && overflow.other_reads == 0u,
+        "sum of active row prefixes exceeded the probe cap or read keys before validation");
+
+  auto sparse_plan = make_plan(Variant::Valid, 1u << 16u);
+  user_data[2] = 2u * (1u << 16u) + 1u;
+  user_data[6] = 3u;
+  struct SparseRows { LinearTestMemory *material; uint32_t key_reads = 0u; } sparse{&memory};
+  const auto read_sparse = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<SparseRows *>(data);
+    if (address == CountBase && words.size() == 3u) {
+      words[0] = words[2] = 1u; words[1] = 0u;
+      return true;
+    }
+    if (address == KeyBase || address == KeyBase + 0x80000u) {
+      if (words.size() != 1u) return false;
+      ++memory.key_reads;
+      words[0] = address == KeyBase ? 2u : 3u;
+      return true;
+    }
+    return ReadLinearTestMemory(memory.material, address, words);
+  };
+  Check(MaterializeResources(sparse_plan,
+            {.user_data = user_data, .userdata = &sparse, .read_specialization_memory = read_sparse},
+            snapshot, specialization) && sparse.key_reads == 2u && snapshot.images.size() == 2u,
+        "sparse rows exceeded the batch cap or read unselected gaps");
+}
+
 void TestSharedAppendSelectorBounds() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   enum class Variant {
@@ -4702,6 +4964,7 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
+    Run("counted row image selector", TestCountedRowImageSelector);
     Run("shared append selector bounds", TestSharedAppendSelectorBounds);
     Run("descending image range", TestDescendingImageRange);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
