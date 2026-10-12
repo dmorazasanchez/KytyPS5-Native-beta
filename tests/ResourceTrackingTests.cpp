@@ -434,8 +434,18 @@ void TestBoundedImageViewEligibility() {
     plan.descriptor_sources.push_back(source);
   }
   plan.descriptor_sources[image_source].indirect_descriptor->sources = std::move(selected);
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 2u &&
+            snapshot.images[0].dwords == descriptor(0x30u, Type::kColor2D) &&
+            snapshot.images[1].dwords == descriptor(0x30u, Type::kColor3D) &&
+            specialization.images[0].dimension == Decoder::ImageDimension::Dim2D &&
+            specialization.images[1].dimension == Decoder::ImageDimension::Dim3D,
+        "explicitly selected image dimensions were discarded before operand validation");
+  const auto converted = plan.descriptor_sources[image_source].indirect_descriptor->sources.back();
+  plan.descriptor_sources[converted].dwords[1] = Value(
+      static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k11_11_10UInt) << 20u);
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "explicitly selected incompatible descriptor was silently normalized to null");
+        "explicitly selected incompatible conversion was silently normalized to null");
 }
 
 void TestWaterfallImageTable() {

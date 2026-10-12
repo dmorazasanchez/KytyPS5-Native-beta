@@ -14258,6 +14258,7 @@ void TestBoundedScalarMaterialImageKeys() {
     bool clean = true;
     bool mixed = false;
     bool mixed_dimension = false;
+    bool mixed_conversion = false;
     bool same_key = false;
     uint32_t keys = 0;
     uint32_t images = 0;
@@ -14286,8 +14287,10 @@ void TestBoundedScalarMaterialImageKeys() {
       std::ranges::fill(words, 0u);
       words[0] = key;
       const bool integer = key == 5573u || key == 5588u;
-      words[1] = static_cast<uint32_t>(integer && !(m.mixed && key == 5573u)
-          ? Prospero::BufferFormat::k32UInt : Prospero::BufferFormat::k32Float) << 20u;
+      words[1] = static_cast<uint32_t>(m.mixed_conversion && key == 5573u
+          ? Prospero::BufferFormat::k11_11_10UInt
+          : integer && !(m.mixed && key == 5573u)
+              ? Prospero::BufferFormat::k32UInt : Prospero::BufferFormat::k32Float) << 20u;
       words[3] = DstSel(4, 5, 6, 7) |
           (static_cast<uint32_t>(m.mixed_dimension && key == 5573u
               ? Prospero::ImageType::kColor2D : Prospero::ImageType::kColor3D) << 28u);
@@ -14344,8 +14347,15 @@ void TestBoundedScalarMaterialImageKeys() {
             }) == 1,
         "selected material fields lost their mixed float/uint image classes");
   memory = {.mixed_dimension = true};
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 4u &&
+            std::ranges::count_if(specialization.images, [](const auto& image) {
+              return image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D;
+            }) == 1,
+        "selected material fields lost their per-candidate image dimensions");
+  memory = {.mixed_conversion = true};
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "selected material fields bypassed image coordinate compatibility");
+        "selected material fields bypassed image conversion compatibility");
   memory = {};
   Check(MaterializeResources(plan, runtime, snapshot, specialization),
         "native scalar material image selection did not recover after rejected candidates");
