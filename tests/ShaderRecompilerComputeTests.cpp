@@ -34419,7 +34419,7 @@ TestCase ImageLoadR32SintUsesSignedSampledImage() {
   test.user_data = MakeSampledTextureData(Prospero::BufferFormat::k32SInt);
   test.has_user_data = true;
   test.required_spirv = {"image_17", "OpTypeImage %int", "OpImageFetch %v4int",
-                         "OpBitcast %uint"};
+                         "OpBitcast %v4uint"};
   return test;
 }
 
@@ -36113,49 +36113,102 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
         resource == 4u ? vk::ImageViewType::e2DArray : vk::ImageViewType::e2D, layers));
   }
   const auto native_sampler = vulkan.CreateSampler(test.name);
-  enum class Access { Sample, Gather, GatherHomogeneous, Fetch };
+  constexpr u32 uint_texel = 0x80000106u;
+  auto uint_texture = vulkan.CreateImageMips(
+      test.name, 2, 2, vk::Format::eR32G32B32A32Uint, vk::ImageUsageFlagBits::eSampled,
+      {std::vector<u32>(16u, uint_texel), std::vector<u32>(4u, uint_texel + 10u)}, 4u,
+      vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageType::e2D, vk::ImageViewType::e2D, 1u);
+  vk::SamplerCreateInfo integer_sampler_info{};
+  integer_sampler_info.addressModeU = integer_sampler_info.addressModeV =
+      integer_sampler_info.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+  integer_sampler_info.borderColor = vk::BorderColor::eIntOpaqueWhite;
+  vk::Sampler integer_sampler;
+  RequireVk(test.name, "integer sampler", vulkan.Device().createSampler(
+      &integer_sampler_info, nullptr, &integer_sampler), "vkCreateSampler");
+  integer_sampler_info.addressModeU = integer_sampler_info.addressModeV =
+      integer_sampler_info.addressModeW = vk::SamplerAddressMode::eClampToBorder;
+  vk::Sampler integer_border_sampler;
+  RequireVk(test.name, "integer border sampler", vulkan.Device().createSampler(
+      &integer_sampler_info, nullptr, &integer_border_sampler), "vkCreateSampler");
+  const std::array native_samplers{native_sampler, native_sampler, native_sampler,
+                                   integer_sampler, integer_sampler, integer_border_sampler};
+  enum class Access { Sample, Gather, GatherHomogeneous, MixedSample, MixedGather, MixedFetch, Fetch };
   auto *access = &sample;
+  bool uint_bound = false;
   for (const auto mode : {Access::Sample, Access::Gather,
-                          Access::GatherHomogeneous, Access::Fetch}) {
-    const bool fetch = mode == Access::Fetch;
-    const bool gather = mode == Access::Gather || mode == Access::GatherHomogeneous;
+                          Access::GatherHomogeneous, Access::MixedSample,
+                          Access::MixedGather, Access::MixedFetch, Access::Fetch}) {
+    const bool mixed = mode == Access::MixedSample || mode == Access::MixedGather || mode == Access::MixedFetch;
+    const bool fetch = mode == Access::Fetch || mode == Access::MixedFetch;
+    const bool gather = mode == Access::Gather || mode == Access::GatherHomogeneous || mode == Access::MixedGather;
     const bool homogeneous = mode == Access::GatherHomogeneous;
-    if (mode == Access::Gather) {
-      test.name = "IndirectImageGatherContiguousRuns";
+    test.name = mixed ? (fetch ? "IndirectImageMixedFetch" : gather ? "IndirectImageMixedGather"
+                                                                    : "IndirectImageMixedSample")
+                     : fetch ? "IndirectImageFetchContiguousRuns"
+                     : homogeneous ? "IndirectImageGatherHomogeneous"
+                     : gather ? "IndirectImageGatherContiguousRuns" : "IndirectImageContiguousRuns";
+    if (uint_bound != mixed) {
+      std::swap(textures[6], uint_texture);
+      compiled.program.info.images[6].numeric_class = mixed ? Prospero::TextureNumericClass::Uint
+                                                           : Prospero::TextureNumericClass::Float;
+      uint_bound = mixed;
+    }
+    if (mode == Access::MixedSample) {
+      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) { return &inst == &sampler; });
+      const auto sampler_key = block->PrependNewInst(position, ValueOpcode::BitwiseAnd32,
+                                                     {Value(&key), Value(1u)});
+      sampler.SetArg(0, Value(&*sampler_key));
+      compiled.program.info.samplers.resize(6);
+      for (u32 index = 0; index < 6u; ++index) {
+        auto &resource = compiled.program.info.samplers[index];
+        resource.snapshot_index = index % 3u;
+        resource.force_point_filtering = index >= 3u;
+        resource.integer_border = index >= 3u;
+      }
+      compiled.program.info.samplers[0].indirect_resources = {1u, 2u};
+      compiled.program.info.samplers[3].indirect_resources = {4u, 5u};
+      compiled.program.info.sampled_pairs.push_back({6u, 3u, 0x10f0u});
+    }
+    const auto opcode = fetch ? ValueOpcode::ImageRead : gather ? ValueOpcode::ImageGatherRaw
+                                                              : ValueOpcode::ImageSampleRaw;
+    if (access->GetOpcode() != opcode) {
       const auto position = std::ranges::find_if(*block, [&](const Inst &inst) {
         return &inst == access;
       });
-      auto &read = *block->PrependNewInst(
-          position, ValueOpcode::ImageGatherRaw,
-          {Value(&image), Value(&sampler), Value(&address), Value(0u), Value(0u),
-           Value(0u), Value(0u), Value(true)}, memory_flag_bits);
+      const auto read_at = fetch ? block->PrependNewInst(position, opcode,
+          {Value(&image), Value(&address), Value(true)}, memory_flag_bits)
+          : gather ? block->PrependNewInst(position, opcode,
+              {Value(&image), Value(&sampler), Value(&address), Value(0u), Value(0u),
+               Value(0u), Value(0u), Value(true)}, memory_flag_bits)
+          : block->PrependNewInst(position, opcode,
+              {Value(&image), Value(&sampler), Value(&address), Value(true)}, memory_flag_bits);
+      auto &read = *read_at;
       access->ReplaceUsesWith(Value(&read), false);
       access = &read;
+    }
+    if (gather) {
       compiled.program.info.images[4].cube = false;
       auto &gather_memory = compiled.program.memory_info[0];
       gather_memory.dmask = 1;
       gather_memory.image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagLevelZero |
-          ShaderRecompiler::Decoder::ImageSampleFlagOffset;
-      // GATHER4_LZ_O places its packed signed offset before the coordinates.
-      address.SetArg(0, Value(0x3fu));
-      address.SetArg(1, Value(std::bit_cast<u32>(0.75f)));
-      address.SetArg(2, Value(std::bit_cast<u32>(0.25f)));
+          (mixed ? 0u : ShaderRecompiler::Decoder::ImageSampleFlagOffset);
+      // Nonmixed GATHER4_LZ_O places its packed signed offset before the coordinates.
+      address.SetArg(0, Value(mixed ? std::bit_cast<u32>(1.5f) : 0x3fu));
+      address.SetArg(1, Value(std::bit_cast<u32>(mixed ? 1.5f : 0.75f)));
+      address.SetArg(2, Value(mixed ? 0u : std::bit_cast<u32>(0.25f)));
       address.SetArg(3, Value(0u));
+    } else if (mode == Access::MixedSample) {
+      compiled.program.memory_info[0].dmask = 0xf;
+      compiled.program.memory_info[0].image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagLod;
+      for (u32 component = 0; component < 4u; ++component)
+        address.SetArg(component, Value(component < 2u ? std::bit_cast<u32>(1.5f) : 0u));
     }
     auto &selected_resources = compiled.program.info.images[0].indirect_resources;
     selected_resources = homogeneous ? std::vector<u32>{0u, 2u, 3u, 5u, 6u}
                                      : root.indirect_resources;
-    if (homogeneous) test.name = "IndirectImageGatherHomogeneous";
     compiled.resources.flattened_srt[6] = homogeneous ? 4u : ordinals[5];
+    compiled.resources.flattened_srt[7] = mixed ? 5u : ordinals[6];
     if (fetch) {
-      test.name = "IndirectImageFetchContiguousRuns";
-      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) {
-        return &inst == access;
-      });
-      auto &read = *block->PrependNewInst(
-          position, ValueOpcode::ImageRead,
-          {Value(&image), Value(&address), Value(true)}, memory_flag_bits);
-      access->ReplaceUsesWith(Value(&read), false);
       sampler.Invalidate();
       compiled.program.info.samplers.clear();
       compiled.program.info.sampled_pairs.clear();
@@ -36183,7 +36236,7 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
       const auto image_opcode = fetch ? "OpImageFetch" : gather ? "OpImageGather"
                                                           : "OpImageSampleExplicitLod";
       Require(test.name, "native array image runs", tools.Disassemble(compiled.spirv, &text) &&
-                  CountText(text, image_opcode) == (homogeneous ? 1u : 3u) * halves,
+                  CountText(text, image_opcode) == (homogeneous ? 1u : mixed ? 4u : 3u) * halves,
               "mixed runs expanded into per-image accesses");
       if (homogeneous) {
         Require(test.name, "homogeneous gather array", text.find("OpSwitch") == std::string::npos,
@@ -36205,25 +36258,31 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
         Require(test.name, "nonuniform image operands",
                 std::ranges::count_if(image_operands, [&](u32 operand) {
                   return std::ranges::find(decorated, operand) != decorated.end();
-                }) == (homogeneous ? 1u : 2u) * halves,
+                }) == (homogeneous ? 1u : mixed ? (fetch ? 1u : 4u) : 2u) * halves,
                 "a dynamically selected image operand lacks its nonuniform decoration");
       }
       test.initial.assign(wave_size, 0xdeadbeefu);
       test.expected.assign(wave_size, 0u);
       for (u32 lane = 0; lane < ordinals.size(); ++lane) {
         const auto resource = selected_resources[compiled.resources.flattened_srt[1u + lane]];
-        test.expected[lane] = std::bit_cast<u32>(float(resource + (fetch && resource != 0u ? 10u : 0u)));
+        test.expected[lane] = mixed && resource == 6u
+            ? (fetch ? uint_texel + 10u : (lane & 1u) ? 1u : uint_texel)
+            : std::bit_cast<u32>(float(resource + (fetch && resource != 0u ? 10u : 0u)));
       }
       auto buffer = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
       vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, nullptr, nullptr,
-                      fetch ? vk::Sampler{} : native_sampler, textures);
+                      fetch ? vk::Sampler{} : native_sampler, textures,
+                      mixed && !fetch ? std::span<const vk::Sampler>(native_samplers) : std::span<const vk::Sampler>{});
       const auto actual = vulkan.ReadBuffer(test.name, buffer, test.expected.size());
       vulkan.DestroyBuffer(&buffer);
       CompareWords(test, "root, native slots, array runs and mapping bounds", test.expected, actual);
     }
     std::printf("[compute] %-32s ok\n", test.name);
   }
+  vulkan.Device().destroySampler(integer_sampler);
+  vulkan.Device().destroySampler(integer_border_sampler);
   vulkan.Device().destroySampler(native_sampler);
+  vulkan.DestroyImage(&uint_texture);
   for (auto &texture : textures) vulkan.DestroyImage(&texture);
 }
 
@@ -40533,18 +40592,16 @@ void CheckImageSamplerSpecialization() {
   ShaderRecompiler::IR::ApplyResourceSpecialization(
       mixed_sampler_program, mixed_sampler_specialization);
   Require("ImageSamplerSpecialization", "mixed sampler variant",
-          mixed_sampler_program.info.samplers.size() == 3u &&
+          mixed_sampler_program.info.samplers.size() == 2u &&
               !mixed_sampler_program.info.samplers[0].force_point_filtering &&
               !mixed_sampler_program.info.samplers[0].integer_border &&
-              !mixed_sampler_program.info.samplers[1].force_point_filtering &&
+              mixed_sampler_program.info.samplers[1].force_point_filtering &&
               mixed_sampler_program.info.samplers[1].integer_border &&
-              mixed_sampler_program.info.samplers[2].force_point_filtering &&
-              mixed_sampler_program.info.samplers[2].integer_border &&
               mixed_sampler_program.info.sampled_pairs[0].sampler == 0u &&
-              mixed_sampler_program.info.sampled_pairs[1].sampler == 2u &&
-              mixed_sampler_program.info.sampled_pairs[2].sampler == 2u &&
+              mixed_sampler_program.info.sampled_pairs[1].sampler == 1u &&
+              mixed_sampler_program.info.sampled_pairs[2].sampler == 1u &&
               mixed_sampler_program.info.sampled_pairs[3].sampler == 1u &&
-              mixed_sampler_program.memory_info[0].sampler == 2u &&
+              mixed_sampler_program.memory_info[0].sampler == 1u &&
               mixed_sampler_snapshot.samplers.size() == 1u &&
               std::ranges::all_of(mixed_sampler_program.info.samplers,
                   [](const auto& sampler) {

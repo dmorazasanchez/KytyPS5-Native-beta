@@ -14257,6 +14257,7 @@ void TestBoundedScalarMaterialImageKeys() {
     uint64_t unavailable = 0;
     bool clean = true;
     bool mixed = false;
+    bool mixed_dimension = false;
     bool same_key = false;
     uint32_t keys = 0;
     uint32_t images = 0;
@@ -14288,7 +14289,8 @@ void TestBoundedScalarMaterialImageKeys() {
       words[1] = static_cast<uint32_t>(integer && !(m.mixed && key == 5573u)
           ? Prospero::BufferFormat::k32UInt : Prospero::BufferFormat::k32Float) << 20u;
       words[3] = DstSel(4, 5, 6, 7) |
-          (static_cast<uint32_t>(Prospero::ImageType::kColor3D) << 28u);
+          (static_cast<uint32_t>(m.mixed_dimension && key == 5573u
+              ? Prospero::ImageType::kColor2D : Prospero::ImageType::kColor3D) << 28u);
       return true;
     }
     return false;
@@ -14335,8 +14337,15 @@ void TestBoundedScalarMaterialImageKeys() {
   Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.keys == 0,
         "scalar material byte range escaped V# bounds");
   memory = {.mixed = true};
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 4u &&
+            std::ranges::count_if(specialization.images, [](const auto& image) {
+              return image.numeric_class == Prospero::TextureNumericClass::Uint;
+            }) == 1,
+        "selected material fields lost their mixed float/uint image classes");
+  memory = {.mixed_dimension = true};
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "selected material fields bypassed image compatibility");
+        "selected material fields bypassed image coordinate compatibility");
   memory = {};
   Check(MaterializeResources(plan, runtime, snapshot, specialization),
         "native scalar material image selection did not recover after rejected candidates");
