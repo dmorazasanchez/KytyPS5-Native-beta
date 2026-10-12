@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -3137,6 +3138,158 @@ void TestWritableDescriptorPhi() {
         "control-dependent writable descriptor phi was not rejected transactionally");
 }
 
+void TestBoundedFormattedBufferStore() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  namespace Prospero = Libs::Graphics::Prospero;
+  const auto make = [](uint32_t step = 1u, bool bypass = false, bool byte_offset = false,
+                       bool signed_count = false) {
+    auto fixture = std::make_unique<Fixture>();
+    auto& f = *fixture;
+    auto* entry = f.block;
+    auto* header = f.AddBlock();
+    auto* body = f.AddBlock();
+    auto* latch = f.AddBlock();
+    auto* exit = f.AddBlock();
+    const auto branch = [](Block* from, Block* to) {
+      from->AddBranch(to);
+      from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
+    };
+    branch(entry, header);
+    branch(body, latch);
+    branch(latch, header);
+    header->AddBranch(body);
+    header->AddBranch(bypass ? latch : exit);
+    header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                         .true_block = body, .false_block = bypass ? latch : exit};
+    exit->terminator.kind = CFG::TerminatorKind::Return;
+    const auto table = f.Address(f.UserData(0), f.UserData(1));
+    const auto count = f.Emit(ValueOpcode::LoadAddressU32,
+        {table, Value(0u), Value(0u), Value(true)},
+        f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = 288u}, 16u));
+    const auto lane = f.Emit(ValueOpcode::LaneId);
+    auto& phi = header->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    phi.AddPhiOperand(entry, Value(0u));
+    phi.AddPhiOperand(latch, f.Emit(ValueOpcode::IAdd32, {Value(&phi), Value(step)}, 0, latch));
+    header->condition = f.Emit(signed_count ? ValueOpcode::SLessThan32 : ValueOpcode::ULessThan32,
+                               {Value(&phi), count}, 0, header);
+    f.block = body;
+    const auto offset = f.Emit(ValueOpcode::ShiftLeftLogical32, {Value(&phi), Value(4u)});
+    std::array<Value, 4> words;
+    for (uint32_t component = 0; component < 4u; ++component)
+      words[component] = f.Emit(ValueOpcode::LoadAddressU32,
+          {table, offset, Value(0u), Value(true)},
+          f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = 128u + component * 4u,
+                       .component_index = component, .component_count = 4u}, 88u));
+    f.Emit(ValueOpcode::StoreBufferU32,
+        {f.Buffer(words), lane, Value(0u), Value(0u), Value(0x80000001u), Value(true)},
+        f.AddMemory({.kind = ResourceKind::Buffer, .offset = byte_offset ? 4u : 0u,
+                     .formatted = true, .idxen = true}, 100u));
+    f.PlanAndTrack();
+    return fixture;
+  };
+  auto fixture = make();
+  auto plan = ExtractResourcePlan(fixture->program);
+  const auto& source = plan.descriptor_sources[plan.info.buffers[0].source];
+  Check(source.indirect_descriptor && source.indirect_descriptor->indexed_store &&
+            !source.indirect_descriptor->signed_count &&
+            !source.indirect_descriptor->selector &&
+            !source.indirect_descriptor->key_count.IsEmpty() &&
+            source.indirect_descriptor->table_stride == 16u &&
+            source.indirect_descriptor->table_immediate == 128u,
+        "bounded formatted store lost its uniform loop and descriptor layout");
+  LinearTestMemory memory;
+  constexpr std::array<uint32_t, 8> lengths{16, 1, 4, 32, 48, 4, 32, 48};
+  for (uint32_t key = 0; key < 8u; ++key) {
+    const auto word = 32u + key * 4u;
+    memory.words[word] = 0x100000u + key * 0x1000u;
+    memory.words[word + 1u] = 4u << 16u;
+    memory.words[word + 2u] = lengths[key];
+    memory.words[word + 3u] = static_cast<uint32_t>(Prospero::BufferFormat::k32UInt) << 12u | 4u;
+  }
+  std::array<uint32_t, 2> user_data{static_cast<uint32_t>(memory.base), 0u};
+  SrtRuntime runtime{.user_data = user_data, .read_memory = ReadLinearTestMemory,
+                     .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const auto materialize = [&] { return MaterializeResources(plan, runtime, snapshot, specialization); };
+  for (const uint32_t count : {0u, 1u, 8u, 3u, 0u, 8u}) {
+    memory.words[72] = count;
+    memory.reads = memory.watched_reads = 0;
+    memory.watched_address = memory.base + 128u;
+    Check(materialize() && snapshot.buffers.size() == std::max(1u, count),
+          "uniform buffer table count did not refresh or left stale descriptors");
+    Check(count != 0u || memory.watched_reads == 0u,
+          "an empty loop probed its unreachable descriptor table");
+    Check(std::ranges::find(snapshot.specialization_reads,
+                std::pair{memory.base + 288u, uint64_t{4u}}) != snapshot.specialization_reads.end(),
+          "writable descriptor loop count escaped same-dispatch overlap capture");
+    for (uint32_t key = 0; key < count; ++key) {
+      Check(snapshot.buffers[key].dwords[0] == memory.words[32u + key * 4u] &&
+                snapshot.buffers[key].dwords[2] == lengths[key],
+            "finite formatted store lost a destination or its record bound");
+      Check(std::ranges::find(snapshot.specialization_reads,
+                  std::pair{memory.base + 128u + key * 16u, uint64_t{16u}}) !=
+                snapshot.specialization_reads.end(),
+            "writable descriptor table escaped same-dispatch overlap capture");
+    }
+  }
+  const auto original = specialization;
+  memory.words[32] += 0x100u;
+  Check(materialize() && specialization == original &&
+            snapshot.buffers[0].dwords[0] == memory.words[32],
+        "destination address refresh was frozen or caused needless specialization");
+  for (const auto [word, replacement] : std::array<std::pair<uint32_t, uint32_t>, 9>{
+           {{35u, static_cast<uint32_t>(Prospero::BufferFormat::k32Float) << 12u | 4u},
+            {35u, static_cast<uint32_t>(Prospero::BufferFormat::k16UInt) << 12u | 4u},
+            {35u, memory.words[35] & ~7u}, {35u, memory.words[35] | (4u << 3u)},
+            {32u, memory.words[32] + 1u},
+            {33u, 8u << 16u}, {33u, (4u << 16u) | (1u << 31u)},
+            {35u, memory.words[35] | (1u << 23u)}, {35u, memory.words[35] | (3u << 28u)}}}) {
+    const auto saved = memory.words[word];
+    memory.words[word] = replacement;
+    Check(!materialize(), "formatted finite store accepted an unproved format or bounds mode");
+    memory.words[word] = saved;
+  }
+  for (const uint32_t count : {MaxIndirectDescriptorProbes + 1u, 0x80000000u, UINT32_MAX}) {
+    memory.words[72] = count;
+    memory.watched_reads = 0;
+    Check(!materialize() && memory.watched_reads == 0u,
+          "oversized unsigned descriptor count became empty or probed an unbounded table");
+  }
+  auto signed_fixture = make(1u, false, false, true);
+  const auto signed_plan = ExtractResourcePlan(signed_fixture->program);
+  Check(signed_plan.descriptor_sources[signed_plan.info.buffers[0].source]
+            .indirect_descriptor->signed_count,
+        "signed loop comparison lost its count semantics");
+  for (const uint32_t count : {0x80000000u, UINT32_MAX, 3u}) {
+    memory.words[72] = count;
+    memory.watched_reads = 0;
+    const bool negative = count != 3u;
+    Check(MaterializeResources(signed_plan, runtime, snapshot, specialization) &&
+              snapshot.buffers.size() == (negative ? 1u : count) &&
+              (!negative || memory.watched_reads == 0u),
+          "signed loop bound did not preserve empty negative and populated positive domains");
+  }
+  memory.words[72] = 8u;
+  memory.fail_address = memory.base + 128u;
+  Check(!materialize(), "formatted destination bypassed failed coherent descriptor reads");
+  memory.fail_address = UINT64_MAX;
+  Check(materialize(), "valid uniform descriptor table did not recover after a failed refresh");
+  ApplyResourceSpecialization(fixture->program, specialization);
+  bool lowered = false;
+  for (auto* block : fixture->program.blocks)
+    for (auto& inst : *block)
+      if (inst.GetOpcode() == ValueOpcode::StoreBufferU32) {
+        const auto& info = fixture->program.memory_info[inst.Flags<MemoryFlags>().index];
+        lowered = !info.formatted && info.idxen;
+      }
+  Check(lowered, "proven UInt32 formatted store did not reuse the raw DWORD store");
+  for (const auto [step, bypass, offset] :
+       {std::tuple{2u, false, false}, std::tuple{1u, true, false}, std::tuple{1u, false, true}})
+    CheckFatal([&] { make(step, bypass, offset); }, "not a valid runtime value",
+               "finite store accepted an unproved induction or indexed byte offset");
+}
+
 void TestPackedScalarBufferSelection() {
   const auto make = [](uint32_t shift_mask = 24u, bool cycle = false, uint32_t store_offset = 0u,
                        bool byte_store = false) {
@@ -4554,6 +4707,7 @@ int main() {
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
+    Run("bounded formatted buffer store", TestBoundedFormattedBufferStore);
     Run("packed scalar buffer selection", TestPackedScalarBufferSelection);
     Run("conditional sampler phi", TestConditionalSamplerPhi);
     Run("finite image phi cycle", TestFiniteImagePhiCycle);

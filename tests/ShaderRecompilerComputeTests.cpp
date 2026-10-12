@@ -89,6 +89,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
@@ -1353,6 +1354,7 @@ struct TestCase {
   bool compile_only = false;
   size_t storage_buffer_range_bytes = 0;
   std::vector<u32> storage_buffer_offsets;
+  std::vector<std::pair<u32, u32>> storage_buffer_ranges;
   std::vector<BdaMapping> bda_mappings;
   bool expand_shader_data_storage = false;
   bool expected_force_point_sampler = false;
@@ -15861,7 +15863,13 @@ public:
         info.buffer = buffer.buffer;
         info.offset = 0;
         info.range = buffer.size;
-        if (test.storage_buffer_range_bytes != 0) {
+        if (resource < test.storage_buffer_ranges.size()) {
+          const auto [offset, size] = test.storage_buffer_ranges[resource];
+          info.offset = offset;
+          info.range = size;
+          Require(test.name, "dispatch", uint64_t{offset} + size <= buffer.size,
+                  "storage buffer view exceeds its backing buffer");
+        } else if (test.storage_buffer_range_bytes != 0) {
           const auto offset = resource < test.storage_buffer_offsets.size()
                                   ? test.storage_buffer_offsets[resource]
                                   : 0u;
@@ -35712,6 +35720,100 @@ void CheckRuntimeBufferRecords(VulkanHarness &vulkan) {
   std::printf("[compute] %-32s ok\n", test.name);
 }
 
+void CheckBoundedFormattedBufferCopy(VulkanHarness &vulkan) {
+  using namespace ShaderRecompiler::IR;
+  constexpr std::array<u32, 8> lengths{16, 1, 4, 32, 48, 4, 32, 48};
+  constexpr std::array<u32, 8> source_records{16, 1, 2, 32, 40, 0, 32, 48};
+  constexpr std::array<u32, 8> destination_records{16, 1, 4, 24, 48, 4, 32, 44};
+  const auto alignment = static_cast<u32>(vulkan.RuntimeContext().GetPhysicalDeviceProperties()
+                                             .limits.minStorageBufferOffsetAlignment);
+  const auto slot_bytes = (512u + alignment - 1u) / alignment * alignment;
+  for (const u32 wave : {32u, 64u}) {
+    for (const u32 count : {0u, 1u, 8u}) {
+      TestCase test;
+      test.name = wave == 32 ? "BoundedFormattedBufferCopy32" : "BoundedFormattedBufferCopy64";
+      // Captured b3ade16b0485b3bd: uniform loop over two V# arrays; copy only lanes
+      // below each row's count. Scalar+vector guards and register reuse are intact.
+      test.code = {0xbfa00001u, 0xd7460000u, 0x04010c02u, 0xbeeb0380u,
+          0xf4000080u, 0xfa000120u, 0xbf8cc07fu, 0xbf0a026bu, 0xbf840015u,
+          0x97eaff6bu, 0x00000100u, 0xf40000c0u, 0xd4000000u, 0xbf8cc07fu,
+          0x7da80003u, 0xbf88000bu, 0x8f6a846bu, 0xf4080100u, 0xd4000000u,
+          0xbf8cc07fu, 0xe0002000u, 0x80010100u, 0xf4080200u, 0xd4000080u,
+          0xbf8c0070u, 0xe0102000u, 0x80020100u, 0x816b816bu, 0xbefe04c1u,
+          0xbf82ffe8u, 0xbf810000u};
+      constexpr u32 table_base = 256u;
+      test.initial.assign(slot_bytes * 19u / 4u, 0xdeadbeefu);
+      test.user_data[0] = table_base;
+      test.has_user_data = true;
+      test.has_compute_info = true;
+      test.compute_info.wave_size = wave;
+      test.compute_info.threads_num[0] = wave;
+      test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+      test.compute_info.lds_size_dwords = 0;
+      test.compute_info.group_id[0] = true;
+      test.compute_info.workgroup_register = 2;
+      test.compute_info.thread_ids_num = 1;
+      test.bda_mappings = {{0u, 0u}};
+      for (u32 key = 0; key < 8u; ++key) {
+        const auto src = slot_bytes * (key + 2u);
+        const auto dst = slot_bytes * (key + 10u);
+        for (const auto [row, address, records] :
+             {std::tuple{key * 4u, src, source_records[key]},
+              std::tuple{32u + key * 4u, dst, destination_records[key]}}) {
+          const auto word = table_base / 4u + row;
+          test.initial[word] = address;
+          test.initial[word + 1u] = 4u << 16u;
+          test.initial[word + 2u] = records;
+          test.initial[word + 3u] =
+              static_cast<u32>(Prospero::BufferFormat::k32UInt) << 12u | 4u;
+        }
+        test.initial[table_base / 4u + 64u + key] = lengths[key];
+        for (u32 lane = 0; lane < 64u; ++lane)
+          test.initial[src / 4u + lane] = 0x80000001u + key * 0x10000u + lane;
+      }
+      test.initial[table_base / 4u + 72u] = count;
+      test.expected = test.initial;
+      for (u32 key = 0; key < count; ++key)
+        for (u32 lane = 0; lane < std::min({wave, lengths[key], destination_records[key]}); ++lane)
+          test.expected[slot_bytes * (key + 10u) / 4u + lane] =
+              lane < source_records[key] ? 0x80000001u + key * 0x10000u + lane : 0u;
+      auto compiled = CompileCase(test, vulkan.SubgroupSize());
+      Require(test.name, "finite writable descriptors",
+              compiled.resources.buffers.size() == std::max(1u, count),
+              "the bounded loop lost or overprobed a destination");
+      test.storage_buffer_ranges.resize(compiled.resources.buffers.size());
+      for (u32 resource = 0; resource < compiled.resources.buffers.size(); ++resource) {
+        const auto& descriptor = compiled.resources.buffers[resource].dwords;
+        test.storage_buffer_ranges[resource] =
+            {descriptor[0], std::max(4u, descriptor[2] * 4u)};
+      }
+      if (count == 8u) {
+        std::set<u32> nonuniform;
+        std::vector<u32> stores;
+        for (size_t offset = 5; offset < compiled.spirv.size();) {
+          const auto words = std::span(compiled.spirv).subspan(offset, compiled.spirv[offset] >> 16u);
+          const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
+          if (opcode == spv::OpDecorate && words[2] == spv::DecorationNonUniform)
+            nonuniform.insert(words[1]);
+          if (opcode == spv::OpStore) stores.push_back(words[1]);
+          offset += words.size();
+        }
+        Require(test.name, "one shared indirect store per virtual half",
+                std::ranges::count_if(stores, [&](u32 pointer) { return nonuniform.contains(pointer); }) ==
+                    (wave > vulkan.SubgroupSize() ? 2 : 1),
+                "formatted identity lowering duplicated the store per descriptor");
+      }
+      auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size(), true);
+      vulkan.Dispatch(test, compiled, output);
+      const auto actual = vulkan.ReadBuffer(test.name, output, test.expected.size());
+      vulkan.DestroyBuffer(&output);
+      CompareWords(test, "bounded rows, formatted raw bits, source OOB zero and destination canaries",
+                   test.expected, actual);
+    }
+  }
+  std::printf("[compute] %-32s ok\n", "BoundedFormattedBufferCopy");
+}
+
 void CheckIndirectBufferStore(VulkanHarness &vulkan) {
   using namespace ShaderRecompiler::IR;
   TestCase test;
@@ -43859,6 +43961,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     RunCase(&vulkan, ScalarBufferFromLoopReadlane(32));
     RunCase(&vulkan, ScalarBufferFromLoopReadlane(64));
+    CheckBoundedFormattedBufferCopy(vulkan);
     CheckIndirectBufferStore(vulkan);
     CheckRuntimeBufferRecords(vulkan);
     RunCase(&vulkan, BufferLoadsGpuSelectedDescriptors());
@@ -44543,6 +44646,7 @@ int main(int argc, char **argv) {
   CheckTessellationPrograms();
   CheckPixelParameterAliases();
   CheckRectListShaders();
+  CheckBoundedFormattedBufferCopy(vulkan);
   CheckIndirectBufferStore(vulkan);
   CheckRuntimeBufferRecords(vulkan);
   CheckComputeThreadDimensions(vulkan);
