@@ -36568,7 +36568,14 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     code.insert(code.end(), {EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
                             EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
                             EncodeVop2(0x03, 0, Vgpr(4), 0)});
-    if (!bitset) {
+    if (bitset) {
+      // An optional second sample reuses the dominating descriptor load.
+      code.push_back(EncodeSopc(0x0d, 22, InlineU32(0)));
+      const auto skip_second = code.size(); code.push_back(0u);
+      code.insert(code.end(), {EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
+                              EncodeVop2(0x03, 0, Vgpr(4), 0)});
+      code[skip_second] = EncodeSopp(0x05, code.size() - skip_second - 1u);
+    } else {
       code[skip_first] = EncodeSopp(0x05, code.size() - skip_first - 1u);
       // Both sides of the optional first sample reach the second descriptor.
       code.insert(code.end(), {EncodeSop2(0x02, 23, 23, InlineU32(32)),
@@ -36593,7 +36600,8 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
         O::S_MUL_I32, O::S_ADD_I32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
         O::V_ADD_F32, O::S_LSHL_B32, O::S_ANDN2_B32, O::S_BRANCH,
         O::IMAGE_STORE, O::S_ENDPGM};
-    if (bitset) test.opcodes.insert(test.opcodes.end(), {O::S_AND_B32, O::S_BFE_U32});
+    if (bitset) test.opcodes.insert(test.opcodes.end(), {O::S_AND_B32, O::S_BFE_U32,
+        O::S_BITCMP1_B32, O::S_CBRANCH_SCC1});
     else test.opcodes.insert(test.opcodes.end(), {O::S_CMP_GE_U32, O::S_CBRANCH_SCC1,
                                                 O::S_BITCMP1_B32});
     if (masked) test.opcodes.insert(test.opcodes.end(), {O::S_CSELECT_B64,
@@ -36624,10 +36632,10 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, &storage, nullptr, sampler, images);
     std::vector<u32> expected(4u * lanes, 0u);
     if (count != 0u) {
-      expected[0] = std::bit_cast<u32>(bitset ? (count == 3 ? 4.0f : 1.0f)
+      expected[0] = std::bit_cast<u32>(bitset ? (count == 3 ? 8.0f : 2.0f)
                                                     : (count == 3 ? 44.0f : 11.0f));
       expected[lanes] = std::bit_cast<u32>(bitset ? 2.0f : 20.0f);
-      expected[2u * lanes] = std::bit_cast<u32>(bitset ? 1.0f : 11.0f);
+      expected[2u * lanes] = std::bit_cast<u32>(bitset ? 2.0f : 11.0f);
     }
     CompareWords(test, "GPU worklist, guarded count and image writes", expected,
                  vulkan.ReadImage(test.name, &storage));

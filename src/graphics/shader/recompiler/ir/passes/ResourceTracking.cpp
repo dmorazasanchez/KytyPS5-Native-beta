@@ -1596,7 +1596,7 @@ private:
 		return false;
 	}
 
-	bool InitializedBefore(const Inst& initial, const Inst& use, Value witness) const {
+	bool AvailableBefore(const Inst& initial, const Inst& use, Value witness = {}) const {
 		if (initial.Parent() == use.Parent()) return BeforeInBlock(initial, use);
 		std::vector<const Block*> pending {use.Parent()};
 		for (size_t index = 0; index < pending.size(); ++index) {
@@ -1604,10 +1604,12 @@ private:
 			if (current == initial.Parent()) continue;
 			if (current->ImmPredecessors().empty()) return false;
 			for (const auto* previous: current->ImmPredecessors()) {
-				const auto edge = ConditionalEdge(previous, current);
-				// The proven local-zero invocation makes an all-inactive bypass impossible.
-				if (edge && edge->lanes == LaneQuantifier::All && !edge->positive &&
-				    Implies(witness, edge->condition)) continue;
+				if (!witness.IsEmpty()) {
+					const auto edge = ConditionalEdge(previous, current);
+					// The proven local-zero invocation makes an all-inactive bypass impossible.
+					if (edge && edge->lanes == LaneQuantifier::All && !edge->positive &&
+					    Implies(witness, edge->condition)) continue;
+				}
 				if (std::ranges::find(pending, previous) == pending.end()) pending.push_back(previous);
 			}
 		}
@@ -1817,8 +1819,8 @@ private:
 			uint32_t initialized = 0;
 			for (const auto& initial: initializers) {
 				const auto witness = initial.inst->Arg(initial.inst->NumArgs() - 1u);
-				if (!InitializedBefore(*initial.inst, *append.atomic, witness) ||
-				    !InitializedBefore(*initial.inst, *counter_read, witness)) return {};
+				if (!AvailableBefore(*initial.inst, *append.atomic, witness) ||
+				    !AvailableBefore(*initial.inst, *counter_read, witness)) return {};
 				if (append.counter >= initial.address &&
 				    uint64_t {append.counter} < uint64_t {initial.address} + initial.words * 4u) ++initialized;
 			}
@@ -2382,7 +2384,7 @@ private:
 			    current_handle->GetOpcode() != (memory->kind == ResourceKind::ScalarAddress
 			                                      ? ValueOpcode::GetAddressResource
 			                                      : ValueOpcode::GetBufferResource) ||
-			    (memory->kind == ResourceKind::ScalarAddress && read->Parent() != handle.Parent()) ||
+			    (memory->kind == ResourceKind::ScalarAddress && !AvailableBefore(*read, handle)) ||
 			    (table_handle != nullptr &&
 			     !EquivalentValue(m_program, Value(table_handle), Value(current_handle))) ||
 			    (!indexed && !MatchTableOffset(read->Arg(1), current_key, offset, stride))) {

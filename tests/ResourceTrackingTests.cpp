@@ -566,12 +566,14 @@ void TestGuardedDirectImageTable() {
     Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane,
     BoundDiamond, BoundBranchSpecific, BoundMismatched,
     BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive,
-    Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor
+    Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor,
+    FiniteShared, FiniteSharedBypass, FiniteLate
   };
   const auto make_plan = [](Guard guard) {
     const bool finite = guard >= Guard::Finite;
     const bool bounded = guard >= Guard::Bounded && !finite;
     const bool exec_bound = bounded && guard >= Guard::BoundExec;
+    const bool shared = guard == Guard::FiniteShared || guard == Guard::FiniteSharedBypass;
     const bool bypass = guard == Guard::Bypass || guard == Guard::BoundBypass;
     const uint32_t table_offset = finite ? 3344u : exec_bound ? 672u : bounded ? 3696u : 344u;
     const uint32_t table_stride = exec_bound ? 784u : bounded ? 272u : 32u;
@@ -582,6 +584,8 @@ void TestGuardedDirectImageTable() {
     auto *before_sample = fixture.AddBlock();
     auto *sample = fixture.AddBlock();
     auto *exit = fixture.AddBlock();
+    auto *descriptor_block = guard == Guard::FiniteSharedBypass ? fixture.AddBlock()
+                              : shared ? before_sample : sample;
     const auto varying = bounded || finite
         ? fixture.Emit(ValueOpcode::GetBuiltin,
             {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)})
@@ -689,6 +693,11 @@ void TestGuardedDirectImageTable() {
           .true_block = sample, .false_block = latch};
       sample->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = latch};
       latch->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = middle};
+      if (guard == Guard::FiniteSharedBypass) {
+        before_sample->terminator.true_block = descriptor_block;
+        before_sample->terminator.false_block = sample;
+        descriptor_block->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = sample};
+      }
     }
     if (guard == Guard::BoundDiamond || exec_bound) {
       middle->condition = fixture.Emit(ValueOpcode::IEqual32,
@@ -729,7 +738,7 @@ void TestGuardedDirectImageTable() {
           ValueOpcode::LoadAddressU32, {srt, Value(0u), Value(0u), Value(true)},
           fixture.AddMemory(memory, 0x20));
     }
-    fixture.block = sample;
+    fixture.block = descriptor_block;
     if (!bounded && !finite) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
         {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(table_stride)})
@@ -752,12 +761,26 @@ void TestGuardedDirectImageTable() {
       }
     }
     const auto image = fixture.Image(words, 0x128);
+    if (guard == Guard::FiniteLate) {
+      auto &instructions = fixture.block->Instructions();
+      const auto at = [&](Value value) {
+        return std::ranges::find_if(instructions,
+            [&](const Inst &inst) { return &inst == value.Instruction(); });
+      };
+      instructions.splice(at(words[0]), instructions, at(image));
+    }
     const auto sampler = fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)});
     MemoryInfo memory;
     memory.kind = ResourceKind::Image;
     memory.image_dimension = Decoder::ImageDimension::Dim2D;
     fixture.Emit(ValueOpcode::ImageSampleRaw, {image, sampler, fixture.ImageAddress(), active},
                  fixture.AddMemory(memory, 0x128));
+    if (shared) {
+      fixture.block = sample;
+      fixture.Emit(ValueOpcode::ImageSampleRaw,
+          {fixture.Image(words, 0x12c), sampler, fixture.ImageAddress(), active},
+          fixture.AddMemory(memory, 0x12c));
+    }
     if (guard == Guard::BoundExecUnguarded || guard == Guard::BoundExecMismatched) {
       const auto other_active = guard == Guard::BoundExecUnguarded ? Value(true)
           : fixture.Emit(ValueOpcode::ULessThan32, {key, fixture.UserData(2)});
@@ -812,7 +835,8 @@ void TestGuardedDirectImageTable() {
                            Guard::BoundBranchSpecific, Guard::BoundMismatched,
                            Guard::BoundExecUnguarded, Guard::BoundExecMismatched,
                            Guard::BoundExecAnd, Guard::BoundExecUnprovenActive,
-                           Guard::FiniteMissing, Guard::FiniteWrong, Guard::FiniteSigned}) {
+                           Guard::FiniteMissing, Guard::FiniteWrong, Guard::FiniteSigned,
+                           Guard::FiniteSharedBypass, Guard::FiniteLate}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
                "direct table accepted a selector without a dominating range guard");
   }
@@ -939,12 +963,14 @@ void TestGuardedDirectImageTable() {
               records.descriptor_reads == 0u,
           "unrepresentable table span was read before validating its count");
   }
-  for (const auto guard : {Guard::Finite, Guard::FiniteZero, Guard::FiniteAdd, Guard::FiniteXor}) {
+  for (const auto guard : {Guard::Finite, Guard::FiniteZero, Guard::FiniteAdd,
+                           Guard::FiniteXor, Guard::FiniteShared}) {
     const auto finite = make_plan(guard);
     Check(finite.capture_specialization_reads && finite.info.images[1].written,
           "finite bit table with image writes omitted specialization read capture");
     LinearTestMemory records;
-    const uint32_t count = guard == Guard::FiniteZero ? 0u : guard == Guard::Finite ? 12u : 32u;
+    const uint32_t count = guard == Guard::FiniteZero ? 0u
+        : guard == Guard::FiniteAdd || guard == Guard::FiniteXor ? 32u : 12u;
     const uint64_t first = records.base + 3344u;
     fill_table(records, first);
     // The GPU may select no bits or a sparse subset. Null rows remain valid candidates.
