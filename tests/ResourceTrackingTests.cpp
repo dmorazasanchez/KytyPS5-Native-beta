@@ -561,9 +561,14 @@ void TestWaterfallImageTable() {
 
 void TestGuardedDirectImageTable() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
-  enum class Guard { Nonzero, SccNonZero, Plain, Zero, Unrelated, Bypass, ExecZero, VccZero };
+  enum class Guard {
+    Nonzero, SccNonZero, Plain, Zero, Unrelated, Bypass, ExecZero, VccZero,
+    Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane
+  };
   const auto make_plan = [](Guard guard) {
-    Fixture fixture(ShaderType::Pixel);
+    const bool bounded = guard >= Guard::Bounded;
+    const bool bypass = guard == Guard::Bypass || guard == Guard::BoundBypass;
+    Fixture fixture(bounded ? ShaderType::Compute : ShaderType::Pixel);
     fixture.program.wave_size = 64u;
     auto *entry = fixture.block;
     auto *middle = fixture.AddBlock();
@@ -575,21 +580,41 @@ void TestGuardedDirectImageTable() {
     middle->AddBranch(before_sample);
     before_sample->AddBranch(sample);
     sample->AddBranch(exit);
-    if (guard == Guard::Bypass) exit->AddBranch(sample);
-    const auto mask = fixture.Emit(ValueOpcode::ReadFirstLane,
-        {fixture.Emit(ValueOpcode::GetAttribute, {Value(0u), Value(0u)}), Value(true)});
-    const auto nonzero = fixture.Emit(
-        ValueOpcode::INotEqual32,
-        {Value(0u), guard == Guard::Unrelated ? fixture.UserData(2) : mask});
-    const auto kind = guard == Guard::ExecZero ? CFG::BranchCondition::ExecZero
+    if (bypass) exit->AddBranch(sample);
+    const auto varying = bounded
+        ? fixture.Emit(ValueOpcode::GetBuiltin,
+            {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)})
+        : fixture.Emit(ValueOpcode::GetAttribute, {Value(0u), Value(0u)});
+    const auto mask = fixture.Emit(ValueOpcode::ReadFirstLane, {varying, Value(true)});
+    const auto srt = fixture.Address(fixture.UserData(0), fixture.UserData(1));
+    Value key;
+    Value limit;
+    if (bounded) {
+      key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
+      MemoryInfo memory;
+      memory.kind = ResourceKind::ScalarAddress;
+      memory.offset = 4u;
+      limit = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {srt, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(memory, 0x10));
+    }
+    const auto kind = guard == Guard::ExecZero || guard == Guard::BoundAnyLane
+                        ? CFG::BranchCondition::ExecZero
                     : guard == Guard::VccZero ? CFG::BranchCondition::VccZero
                                              : CFG::BranchCondition::SccZero;
-    auto condition = nonzero;
-    if (guard == Guard::SccNonZero) {
-      condition = fixture.Emit(ValueOpcode::ConditionRef, {condition},
-                               CFG::BranchCondition::SccNonZero);
+    Value condition;
+    if (bounded) {
+      condition = guard == Guard::BoundMissing ? Value(false) : fixture.Emit(
+          ValueOpcode::UGreaterThanEqual32,
+          {guard == Guard::BoundUnrelated ? fixture.UserData(2) : key, limit});
+    } else {
+      condition = fixture.Emit(ValueOpcode::INotEqual32,
+          {Value(0u), guard == Guard::Unrelated ? fixture.UserData(2) : mask});
+      if (guard == Guard::SccNonZero) {
+        condition = fixture.Emit(ValueOpcode::ConditionRef, {condition},
+                                 CFG::BranchCondition::SccNonZero);
+      }
+      condition = fixture.Emit(ValueOpcode::LogicalNot, {condition});
     }
-    condition = fixture.Emit(ValueOpcode::LogicalNot, {condition});
     if (guard != Guard::Plain && guard != Guard::SccNonZero) {
       condition = fixture.Emit(ValueOpcode::ConditionRef, {condition}, kind);
     }
@@ -604,12 +629,14 @@ void TestGuardedDirectImageTable() {
           .true_block = fixture.program.blocks[block + 1u]};
     }
     fixture.program.blocks[4]->terminator = {
-        .kind = guard == Guard::Bypass ? CFG::TerminatorKind::Branch
-                                       : CFG::TerminatorKind::Return,
+        .kind = bypass ? CFG::TerminatorKind::Branch : CFG::TerminatorKind::Return,
         .true_block = fixture.program.blocks[3u]};
-    const auto srt = fixture.Address(fixture.UserData(0), fixture.UserData(1));
     std::array<Value, 2> pointer;
     for (uint32_t word = 0; word < pointer.size(); ++word) {
+      if (bounded) {
+        pointer[word] = srt.Instruction()->Arg(word);
+        continue;
+      }
       MemoryInfo memory;
       memory.kind = ResourceKind::ScalarAddress;
       memory.offset = word * 4u;
@@ -618,10 +645,11 @@ void TestGuardedDirectImageTable() {
           fixture.AddMemory(memory, 0x20));
     }
     fixture.block = sample;
-    const auto key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
+    if (!bounded) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
-        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
-         Value(344u)});
+        {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(272u)})
+                 : fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
+         Value(bounded ? 3696u : 344u)});
     std::array<Value, 8> words;
     for (uint32_t group = 0; group < 2u; ++group) {
       // Separate equivalent pointer handles mirror the two scalar x4 loads.
@@ -645,13 +673,25 @@ void TestGuardedDirectImageTable() {
     memory.image_dimension = Decoder::ImageDimension::Dim2D;
     fixture.Emit(ValueOpcode::ImageSampleRaw, {image, sampler, fixture.ImageAddress(), Value(true)},
                  fixture.AddMemory(memory, 0x128));
+    if (bounded) {
+      const auto output = fixture.Image({Value(0x8000u),
+          Value(static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u),
+          Value(0u), Value((static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u) |
+                          Libs::Graphics::DstSel(4, 5, 6, 7)),
+          Value(0u), Value(0u), Value(0u), Value(0u)}, 0x130);
+      const auto texel = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
+          {Value(0u), Value(0u), Value(0u), Value(0u)});
+      fixture.Emit(ValueOpcode::ImageWrite, {output, fixture.ImageAddress(), texel, Value(true)},
+                   fixture.AddMemory(memory, 0x130));
+    }
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
     Check(indirect && !indirect->selector.has_value() &&
-              indirect->table_offset == 344u &&
-              indirect->key_count.Resolve().IsImmediate() &&
-              indirect->key_count.Resolve().U32() == 32u &&
+              indirect->table_offset == (bounded ? 3696u : 344u) &&
+              indirect->table_stride == (bounded ? 272u : 32u) &&
+              (bounded ? !indirect->key_count.IsEmpty()
+                       : indirect->key_count.Resolve() == Value(32u)) &&
               fixture.program.descriptor_sources[indirect->table_source].dword_count == 2u,
           "guarded direct image table lost its pointer or proven selector range");
     return ExtractResourcePlan(fixture.program);
@@ -661,9 +701,10 @@ void TestGuardedDirectImageTable() {
   make_plan(Guard::SccNonZero);
   make_plan(Guard::Plain);
   for (const auto guard : {Guard::Zero, Guard::Unrelated, Guard::Bypass,
-                           Guard::ExecZero, Guard::VccZero}) {
+                           Guard::ExecZero, Guard::VccZero, Guard::BoundMissing,
+                           Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
-               "direct table accepted a selector without a dominating nonzero guard");
+               "direct table accepted a selector without a dominating range guard");
   }
   LinearTestMemory memory;
   constexpr uint64_t table = 0x1800u + 344u;
@@ -737,6 +778,53 @@ void TestGuardedDirectImageTable() {
   Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
             endpoint.watched_reads == 0u,
         "batched descriptor read crossed the 48-bit endpoint");
+
+  auto bounded = make_plan(Guard::Bounded);
+  Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
+        "bounded table with image writes omitted specialization read capture");
+  LinearTestMemory records;
+  constexpr uint32_t record_offset = 3696u, record_stride = 272u;
+  for (uint32_t key = 0; key < 2u; ++key) {
+    const auto word = (record_offset + key * record_stride) / 4u;
+    records.words[word] = 0x500u + key;
+    records.words[word + 1u] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    records.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  }
+  user_data = {static_cast<uint32_t>(records.base), 0u};
+  runtime.userdata = &records;
+  records.fail_address = records.base + record_offset;
+  Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 2u && records.descriptor_reads == 0u &&
+            std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t word) { return word == 0u; }),
+        "zero runtime count probed an unreachable descriptor row");
+  records.fail_address = UINT64_MAX;
+  records.words[1] = 2u;
+  records.descriptor_reads = 0u;
+  Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 3u && records.descriptor_reads == 2u &&
+            snapshot.images[0].dwords[0] == 0x500u && snapshot.images[2].dwords[0] == 0x501u,
+        "bounded interleaved table did not read precisely its two descriptor rows");
+  const auto captured = [&](uint64_t address, uint64_t size) {
+    return std::ranges::any_of(snapshot.specialization_reads, [&](const auto &read) {
+      return read.first <= address && address - read.first <= read.second &&
+             size <= read.second - (address - read.first);
+    });
+  };
+  Check(captured(records.base + 4u, 4u) &&
+            captured(records.base + record_offset, 32u) &&
+            captured(records.base + record_offset + record_stride, 32u),
+        "bounded table omitted count or descriptor bytes from writable-alias validation");
+  records.fail_address = records.base + record_offset + record_stride + 28u;
+  Check(!MaterializeResources(bounded, runtime, snapshot, specialization),
+        "bounded interleaved table accepted an unreadable final descriptor word");
+  records.fail_address = UINT64_MAX;
+  records.words[1] = UINT32_MAX;
+  records.descriptor_reads = 0u;
+  Check(!MaterializeResources(bounded, runtime, snapshot, specialization) &&
+            records.descriptor_reads == 0u,
+        "unrepresentable table span was read before validating its count");
 }
 
 void TestBoundedComputeImageLoop() {

@@ -1030,32 +1030,35 @@ private:
 		LaneQuantifier lanes = LaneQuantifier::All;
 	};
 
-	bool NonzeroOnEntry(Value value, const Block* block) const {
-		// Each unique predecessor must execute before this use. Stop at joins: an
-		// unrelated comparison is not a bound on FindILsb's zero-input sentinel.
+	bool HasEntryGuard(const Block* block, const auto& accepts, const Block* definition = nullptr) const {
+		// Each unique predecessor must execute before this use. Stop at joins and
+		// definitions so a guard from an earlier iteration cannot bound a new value.
 		for (size_t depth = 0; block != nullptr && depth < m_program.blocks.size(); ++depth) {
-			if (block->ImmPredecessors().size() != 1u) {
+			if (block == definition || block->ImmPredecessors().size() != 1u) {
 				return false;
 			}
 			const auto* previous = block->ImmPredecessors()[0];
 			const auto edge = ConditionalEdge(previous, block);
-			if (edge && edge->lanes == LaneQuantifier::All) {
-				const auto* test = edge->condition.TryInstruction();
-				if (test != nullptr && test->NumArgs() == 2u &&
-				    ((test->GetOpcode() == ValueOpcode::INotEqual32 && edge->positive) ||
-				     (test->GetOpcode() == ValueOpcode::IEqual32 && !edge->positive))) {
-					for (uint32_t arg = 0; arg < 2u; ++arg) {
-						uint32_t immediate;
-						if (ImmediateU32(test->Arg(arg), immediate) && immediate == 0u &&
-						    EquivalentValue(m_program, test->Arg(arg ^ 1u), value)) {
-							return true;
-						}
-					}
-				}
-			}
+			if (edge && edge->lanes == LaneQuantifier::All && accepts(*edge)) return true;
 			block = previous;
 		}
 		return false;
+	}
+
+	bool NonzeroOnEntry(Value value, const Block* block) const {
+		return HasEntryGuard(block, [&](const EdgePredicate& edge) {
+			const auto* test = edge.condition.TryInstruction();
+			if (test != nullptr && test->NumArgs() == 2u &&
+			    ((test->GetOpcode() == ValueOpcode::INotEqual32 && edge.positive) ||
+			     (test->GetOpcode() == ValueOpcode::IEqual32 && !edge.positive))) {
+				for (uint32_t arg = 0; arg < 2u; ++arg) {
+					uint32_t immediate;
+					if (ImmediateU32(test->Arg(arg), immediate) && immediate == 0u &&
+					    EquivalentValue(m_program, test->Arg(arg ^ 1u), value)) return true;
+				}
+			}
+			return false;
+		});
 	}
 
 	uint32_t WorkgroupAxis(Value key) const {
@@ -1656,21 +1659,31 @@ private:
 		return false;
 	}
 
-	Value UnsignedBound(Value guard, Value value) const {
+	Value UnsignedBound(Value guard, Value value, bool positive = true) const {
 		const auto* test = SimplifyGuard(guard).TryInstruction();
 		if (test == nullptr) return {};
-		if (test->GetOpcode() == ValueOpcode::LogicalAnd) {
+		const auto op = test->GetOpcode();
+		if (op == ValueOpcode::LogicalNot)
+			return UnsignedBound(test->Arg(0), value, !positive);
+		if (op == ValueOpcode::LogicalAnd && positive) {
 			const auto left = UnsignedBound(test->Arg(0), value);
 			return left.IsEmpty() ? UnsignedBound(test->Arg(1), value) : left;
 		}
-		if (test->GetOpcode() == ValueOpcode::ULessThan32 &&
+		if ((positive ? op == ValueOpcode::ULessThan32 : op == ValueOpcode::UGreaterThanEqual32) &&
 		    EquivalentValue(m_program, test->Arg(0), value)) return test->Arg(1);
-		if (test->GetOpcode() == ValueOpcode::LogicalNot) {
-			const auto* inverse = test->Arg(0).Resolve().TryInstruction();
-			if (inverse != nullptr && inverse->GetOpcode() == ValueOpcode::ULessThanEqual32 &&
-			    EquivalentValue(m_program, inverse->Arg(1), value)) return inverse->Arg(0);
-		}
+		if (!positive && op == ValueOpcode::ULessThanEqual32 &&
+		    EquivalentValue(m_program, test->Arg(1), value)) return test->Arg(0);
 		return {};
+	}
+
+	Value UnsignedBoundOnEntry(Value key, const Block* block) const {
+		const auto* definition = key.Resolve().TryInstruction();
+		Value bound;
+		const bool found = HasEntryGuard(block, [&](const EdgePredicate& edge) {
+			bound = UnsignedBound(edge.condition, key, edge.positive);
+			return !bound.IsEmpty() && ValidateRuntimeValue(m_program, bound, RuntimeValueType::Integer);
+		}, definition != nullptr ? definition->Parent() : nullptr);
+		return found ? bound : Value {};
 	}
 
 	Value SharedLoadBound(Value value, Value active) {
@@ -2406,12 +2419,20 @@ private:
 			// the GPU key using the same plan as other indirect image reads.
 			plan.retain_reads |= table_source.dword_count == 4u;
 		} else if (table_source.dword_count == 2u) {
-			if (table_stride != 32u) return false;
+			const auto guarded_count = UnsignedBoundOnEntry(key, handle.Parent());
 			const auto* selector = key.Resolve().TryInstruction();
-			const bool bitscan = selector != nullptr && selector->GetOpcode() == ValueOpcode::FindILsb32 &&
+			const bool bitscan = guarded_count.IsEmpty() && selector != nullptr &&
+			    selector->GetOpcode() == ValueOpcode::FindILsb32 &&
 			    selector->NumArgs() == 1u && !m_shader_writes &&
 			    NonzeroOnEntry(selector->Arg(0), handle.Parent());
-			if (bitscan) {
+			if (!guarded_count.IsEmpty()) {
+				if (table_stride < 32u || (table_stride & 3u) != 0u) return false;
+				// Materialization captures the count and descriptor reads; renderer alias
+				// checks reject writes to those ranges while unrelated stores remain valid.
+				indirect.key_count = guarded_count;
+			} else if (table_stride != 32u) {
+				return false;
+			} else if (bitscan) {
 				indirect.key_count = Value(32u);
 			} else if (!m_shader_writes) {
 				if (const auto* bound = BoundedLoop(key, handle.Parent())) {

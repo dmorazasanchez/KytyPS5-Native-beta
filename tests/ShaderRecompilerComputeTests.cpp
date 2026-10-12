@@ -36410,6 +36410,102 @@ void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
   }
 }
 
+void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
+  using O = ShaderOpcode;
+  constexpr u32 table = 256u, stride = 272u, offset = 3696u;
+  for (const u32 wave : {32u, 64u})
+  for (const u32 count : {0u, 2u, 3u}) {
+    TestCase test;
+    test.name = wave == 32u ? "GuardedRecordImageTable32" : "GuardedRecordImageTable64";
+    test.initial.resize((table + offset + stride * count) / 4u, 0xdeadbeefu);
+    test.initial[table / 4u + 1u] = count;
+    for (u32 row = 0; row < count; ++row) {
+      auto image = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
+      image[0] = row + 1u;
+      image[3] = DstSel(4, 0, 0, 1) |
+          (static_cast<u32>(Prospero::ImageType::kColor2D) << 28u);
+      std::copy_n(image.begin(), 8, test.initial.begin() + (table + offset + row * stride) / 4u);
+    }
+    test.user_data[0] = table;
+    auto destination = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
+    destination[0] = 0x10000u;
+    destination[1] |= 3u << 30u;
+    destination[3] = DstSel(4, 0, 0, 1) |
+        (static_cast<u32>(Prospero::ImageType::kColor2D) << 28u);
+    std::copy_n(destination.begin(), 8, test.user_data.begin() + 32);
+    test.has_user_data = test.has_compute_info = true;
+    test.compute_info.wave_size = wave;
+    test.compute_info.threads_num[0] = test.compute_info.threads_num[1] =
+        test.compute_info.threads_num[2] = 1u;
+    test.compute_info.group_id[0] = true;
+    test.compute_info.workgroup_register = 44u;
+    test.dispatch_x = 4u;
+    auto &code = test.code;
+    code.insert(code.end(), {EncodeSop2(0x20, 20, InlineU32(5), 44),
+                            EncodeSmem0(0x00, 21), EncodeSmem1(4, 125)});
+    AppendVMovLiteral(&code, 0, 0u);
+    AppendVMovLiteral(&code, 20, 0x3f000000u);
+    AppendVMovLiteral(&code, 21, 0x3f000000u);
+    const auto loop = code.size();
+    code.push_back(EncodeSop1(0x13, 22, 20)); // Find the next set bit in the GPU worklist.
+    code.push_back(EncodeSopc(0x07, 22, 193));
+    const auto empty_exit = code.size(); code.push_back(0u);
+    code.push_back(EncodeSopc(0x09, 22, 21));
+    const auto range_exit = code.size(); code.push_back(0u);
+    code.insert(code.end(), {EncodeSop2(0x26, 23, 22, 255), stride,
+                            EncodeSop2(0x02, 23, 23, 255), offset,
+                            EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
+                            EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
+                            EncodeVop2(0x03, 0, Vgpr(4), 0),
+                            EncodeSop2(0x1e, 24, InlineU32(1), 22),
+                            EncodeSop2(0x14, 20, 20, 24)});
+    code.push_back(EncodeSopp(0x02, loop - code.size() - 1u));
+    code[empty_exit] = EncodeSopp(0x04, code.size() - empty_exit - 1u);
+    code[range_exit] = EncodeSopp(0x05, code.size() - range_exit - 1u);
+    code.push_back(EncodeVop1(0x01, 30, 44));
+    AppendVMovLiteral(&code, 31, 0u);
+    code.insert(code.end(), {EncodeMimg0(0x08, 1), EncodeMimg1(0, 30, 8, 0)});
+    AppendEnd(&code);
+    test.opcodes = {O::S_LSHR_B32, O::S_LOAD_DWORD, O::V_MOV_B32, O::S_FF1_I32_B32,
+        O::S_CMP_LG_U32, O::S_CMP_GE_U32, O::S_CBRANCH_SCC0, O::S_CBRANCH_SCC1,
+        O::S_MUL_I32, O::S_ADD_I32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
+        O::V_ADD_F32, O::S_LSHL_B32, O::S_ANDN2_B32, O::S_BRANCH,
+        O::IMAGE_STORE, O::S_ENDPGM};
+    auto compiled = CompileCase(test, vulkan.SubgroupSize());
+    const auto sampled_count = std::ranges::count_if(compiled.program.info.images,
+        [](const auto &image) {
+          return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
+        });
+    Require(test.name, "bounded descriptor rows", sampled_count == std::max(1u, count),
+            "the runtime count lost a row or probed record padding");
+    std::vector<VulkanHarness::Image> images(compiled.program.info.images.size());
+    for (u32 resource = 0; resource < images.size(); ++resource) {
+      if (compiled.program.info.images[resource].resource_class !=
+          ShaderRecompiler::IR::ImageResourceClass::Sampled) continue;
+      const auto value = static_cast<float>(compiled.resources.images[resource].dwords[0]);
+      images[resource] = vulkan.CreateImage2D(test.name, 1, 1, vk::Format::eR32Sfloat,
+          vk::ImageUsageFlagBits::eSampled, {std::bit_cast<u32>(value)}, 1,
+          vk::ImageLayout::eShaderReadOnlyOptimal);
+    }
+    auto storage = vulkan.CreateImage2D(test.name, 4, 1, vk::Format::eR32Sfloat,
+        vk::ImageUsageFlagBits::eStorage, std::vector<u32>(4, 0xdeadbeefu), 1,
+        vk::ImageLayout::eGeneral);
+    auto buffer = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
+    auto sampler = vulkan.CreateSampler(test.name, 1);
+    vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, &storage, nullptr, sampler, images);
+    const std::vector<u32> expected = count == 0 ? std::vector<u32>(4, 0u) :
+        std::vector<u32>{std::bit_cast<u32>(count == 3 ? 4.0f : 1.0f),
+                        std::bit_cast<u32>(2.0f), std::bit_cast<u32>(1.0f), 0u};
+    CompareWords(test, "GPU worklist, guarded count and image writes", expected,
+                 vulkan.ReadImage(test.name, &storage));
+    vulkan.DestroyBuffer(&buffer);
+    vulkan.DestroyImage(&storage);
+    vulkan.Device().destroySampler(sampler);
+    for (auto &image : images) if (image.image != nullptr) vulkan.DestroyImage(&image);
+    std::printf("[compute] %s count=%u ok\n", test.name, count);
+  }
+}
+
 void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
   constexpr const char *name = "IndirectImageKeySwitch";
   constexpr uint32_t mapping_capacity = 1793u;
@@ -44872,6 +44968,7 @@ int main(int argc, char **argv) {
     CheckImageSamplerSpecialization();
     VulkanHarness vulkan;
     CheckCountedRowImageSelector(vulkan);
+    CheckGuardedRecordImageTable(vulkan);
     CheckIndirectImageKeySwitch(vulkan);
     CheckFiniteInlineSamplerPhi(vulkan);
     RunCase(&vulkan, ImageCubeGradientsPreserveDerivatives());
@@ -45038,6 +45135,7 @@ int main(int argc, char **argv) {
   CheckRuntimeBufferRecords(vulkan);
   CheckComputeThreadDimensions(vulkan);
   CheckCountedRowImageSelector(vulkan);
+  CheckGuardedRecordImageTable(vulkan);
   CheckIndirectImageKeySwitch(vulkan);
   CheckDynamicSampleOffsets(vulkan, 32u);
   CheckDynamicSampleOffsets(vulkan, 64u);
