@@ -570,7 +570,7 @@ void TestGuardedDirectImageTable() {
     Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor,
     FiniteShared, FiniteSharedBypass, FiniteLate
   };
-  const auto make_plan = [](Guard guard, uint32_t operand_order = 0u) {
+  const auto make_plan = [](Guard guard, uint32_t operand_order = 0u, bool packed_key = false) {
     const bool finite = guard >= Guard::Finite;
     const bool bounded = guard >= Guard::Bounded && !finite;
     const bool exec_bound = bounded && guard >= Guard::BoundExec;
@@ -751,11 +751,15 @@ void TestGuardedDirectImageTable() {
           fixture.AddMemory(memory, 0x20));
     }
     fixture.block = descriptor_block;
-    if (!bounded && !finite) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
+    if (!bounded && !finite) key = fixture.Emit(packed_key ? ValueOpcode::ShiftRightLogical32
+                                                        : ValueOpcode::FindILsb32,
+        packed_key ? std::initializer_list<Value>{mask, Value(12u)}
+                   : std::initializer_list<Value>{mask});
+    auto scaled = bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(table_stride)})
+                          : fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
+    if (packed_key) scaled = fixture.Emit(ValueOpcode::BitwiseAnd32, {scaled, Value(992u)});
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
-        {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(table_stride)})
-                 : fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
-         Value(table_offset)});
+        {scaled, Value(table_offset)});
     std::array<Value, 8> words;
     for (uint32_t group = 0; group < 2u; ++group) {
       // Separate equivalent pointer handles mirror the two scalar x4 loads.
@@ -810,7 +814,7 @@ void TestGuardedDirectImageTable() {
       fixture.Emit(ValueOpcode::ImageWrite, {output, fixture.ImageAddress(), texel, Value(true)},
                    fixture.AddMemory(memory, 0x130));
     }
-    if (exec_bound) ConstantPropagationPass(fixture.program.blocks);
+    if (exec_bound || packed_key) ConstantPropagationPass(fixture.program.blocks);
     if (guard == Guard::BoundExec || guard == Guard::BoundExecFactored) {
       std::vector<const Inst *> pending{active.ResolveInstruction()};
       uint32_t conjunctions = 0;
@@ -876,6 +880,23 @@ void TestGuardedDirectImageTable() {
                      .read_specialization_memory = ReadLinearTestMemory};
   ResourceSnapshot snapshot;
   ResourceSpecialization specialization;
+  auto packed = make_plan(Guard::Plain, 0u, true);
+  memory.fail_address = table + 32u * 32u;
+  Check(MaterializeResources(packed, runtime, snapshot, specialization) &&
+            memory.descriptor_reads == 32u && snapshot.images.size() == 32u,
+        "packed five-bit selector did not enumerate exactly its finite domain");
+  for (uint32_t key = 0; key < 32u; ++key)
+    memory.words[(table - memory.base) / 4u + key * 8u] = 0x100u;
+  memory.descriptor_reads = 0u;
+  Check(MaterializeResources(packed, runtime, snapshot, specialization) &&
+            memory.descriptor_reads == 32u && snapshot.images.size() == 1u &&
+            specialization.images[0].indirect_root == ImageResource::NoIndirectImage &&
+            specialization.images[0].indirect_search_iterations == 0u,
+        "packed five-bit selector retained duplicate image bindings or lost keys");
+  memory.fail_address = UINT64_MAX;
+  memory.reads = 0u;
+  memory.descriptor_reads = 0u;
+  fill_table(memory, table);
   Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
             snapshot.images.size() == 32u && specialization.images.size() == 32u &&
             snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] == 32u &&
@@ -1026,7 +1047,7 @@ void TestBoundedComputeImageLoop() {
     Masked, MaskedWrongGuard, MaskResurrection, StatusOverwrite,
     GuardedDiamond, GuardedDiamondBypass
   };
-  const auto make_plan = [](Variant variant) {
+  const auto make_plan = [](Variant variant, bool material = false) {
     const bool diamond = variant >= Variant::GuardedDiamond;
     Fixture fixture(diamond ? ShaderType::Vertex : ShaderType::Compute);
     fixture.program.wave_size = 64u;
@@ -1102,7 +1123,7 @@ void TestBoundedComputeImageLoop() {
         {Value(static_cast<uint32_t>(diamond ? StageInputKind::VertexIndex
                                             : StageInputKind::LocalInvocationId)), Value(0u)});
     const auto count = variant == Variant::DivergentBound ? local : fixture.UserData(2);
-    const auto in_range = fixture.Emit(ValueOpcode::SLessThan32,
+    const auto in_range = fixture.Emit(material ? ValueOpcode::ULessThan32 : ValueOpcode::SLessThan32,
                                        {variant == Variant::WrongGuard
                                             ? Value(0u) : key,
                                         count}, 0, compare);
@@ -1249,8 +1270,17 @@ void TestBoundedComputeImageLoop() {
 
     fixture.block = variant == Variant::GuardBlock ? header : body;
     const auto table = fixture.Address(fixture.UserData(0), fixture.UserData(1));
+    auto image_key = key;
+    if (material) {
+      MemoryInfo memory;
+      memory.kind = ResourceKind::ScalarAddress;
+      memory.offset = 2756u;
+      image_key = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {table, fixture.Emit(ValueOpcode::IMul32, {key, Value(48u)}), Value(0u), Value(true)},
+          fixture.AddMemory(memory, 0x2ff0));
+    }
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
-        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
+        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {image_key, Value(5u)}),
          Value(0x6b0u)});
     std::array<Value, 8> words;
     for (uint32_t word = 0; word < words.size(); ++word) {
@@ -1273,10 +1303,14 @@ void TestBoundedComputeImageLoop() {
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
-    Check(indirect && !indirect->selector.has_value() &&
+    Check(indirect && indirect->selector.has_value() == material &&
               indirect->table_offset == 0x6b0u &&
               indirect->key_count.Resolve() == count.Resolve(),
           "bounded compute loop lost its runtime image count");
+    if (material) Check(indirect->selector->stride == 48u &&
+                            indirect->selector->offset == 2756u &&
+                            fixture.program.descriptor_sources[indirect->selector->source].dword_count == 2u,
+                        "bounded scalar selector lost its pointer or record layout");
     return ExtractResourcePlan(fixture.program);
   };
 
@@ -1360,6 +1394,34 @@ void TestBoundedComputeImageLoop() {
   user_data[2] = 65537u;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "oversized compute loop bound was accepted for image enumeration");
+
+  auto material = make_plan(Variant::Bounded, true);
+  for (const auto variant : {Variant::WrongGuard, Variant::EntryBypass, Variant::WrongStep})
+    CheckFatal([&] { make_plan(variant, true); }, "not a valid runtime value",
+               "raw pointer selector accepted an unbounded source");
+  const auto first_key = uint64_t{user_data[0]} + 2756u;
+  memory.words[(first_key - memory.base) / 4u] = 0u;
+  memory.words[(first_key + 48u - memory.base) / 4u] = 2u;
+  user_data[2] = 0u;
+  memory.reads = 0u;
+  memory.fail_address = first_key;
+  Check(MaterializeResources(material, runtime, snapshot, specialization) && memory.reads == 0u &&
+            snapshot.images.size() == 1u && snapshot.images[0].dwords[0] == 0u,
+        "empty raw pointer selector read an unreachable record");
+  user_data[2] = 2u;
+  memory.fail_address = first_key + 96u;
+  memory.descriptor_reads = 0u;
+  Check(MaterializeResources(material, runtime, snapshot, specialization) &&
+            memory.descriptor_reads == 2u && snapshot.images.size() == 2u &&
+            snapshot.images[0].dwords[0] == 0x100u && snapshot.images[1].dwords[0] == 0x102u,
+        "bounded raw pointer selector lost sparse keys or read an extra record");
+  memory.fail_address = first_key + 48u;
+  Check(!MaterializeResources(material, runtime, snapshot, specialization),
+        "raw pointer selector accepted an unreadable selected record");
+  memory.fail_address = UINT64_MAX;
+  memory.words[(first_key - memory.base) / 4u] = UINT32_MAX - 1000u;
+  Check(!MaterializeResources(material, runtime, snapshot, specialization),
+        "raw pointer selector silently discarded an invalid negative key");
 }
 
 void TestDescendingImageRange() {
