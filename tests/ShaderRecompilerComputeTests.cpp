@@ -34625,6 +34625,83 @@ TestCase ImageSamplePackedUintConvertsSampleAndGather() {
   return test;
 }
 
+template <bool sparse> TestCase ImageSamplePackedUnormBilinear() {
+  using O = ShaderOpcode;
+  namespace D = ShaderRecompiler::Decoder;
+  const std::vector<u32> unnormalized = {EncodeMimg0(0x27, 0x7) | (1u << 12u),
+                                          EncodeMimg1(0, 20, 0, 2)};
+  D::Instruction decoded;
+  D::DecodeInstruction(unnormalized, 0, decoded);
+  Require("ImageSamplePackedUnormBilinear", "coordinate mode",
+          decoded.image_sample_flags ==
+              (D::ImageSampleFlagLevelZero | D::ImageSampleFlagUnnormalized),
+          "unnormalized instruction coordinates lost their sampling restriction");
+  constexpr u32 channels[4][3] = {{0, 0, 0}, {2047, 0, 512},
+                                  {0, 2047, 1023}, {2047, 2047, 256}};
+  constexpr float coordinates[][2] = {{0.5f, 0.5f}, {0.375f, 0.625f},
+                                      {-0.25f, 1.25f}, {0.25f, 0.25f},
+                                      {0.75f, 0.25f}, {0.0f, 0.5f}};
+  TestCase test;
+  test.name = sparse ? "ImageSamplePackedUnormBilinearSparse" : "ImageSamplePackedUnormBilinear";
+  test.image_width = test.image_height = 2;
+  test.sampled_image_format = vk::Format::eR32Uint;
+  test.sampled_image_dwords_per_pixel = 1;
+  for (const auto &pixel : channels) {
+    test.sampled_image_rgba.push_back(pixel[0] | (pixel[1] << 11u) | (pixel[2] << 22u));
+  }
+  test.user_data = MakeSampledTextureData(Prospero::BufferFormat::k11_11_10UNorm);
+  test.user_data[1] |= 1u << 30u;
+  test.user_data[2] = 1u << 14u;
+  test.user_data[8] = 0x92u;
+  test.user_data[9] = 0x00fff000u;
+  test.user_data[10] = 0x0a500000u; // Captured linear guest sampler; gather uses integer texels.
+  test.has_user_data = true;
+  test.image_descriptor_swizzle = DstSel(6, 4, 5, 1);
+  test.expected_force_point_sampler = true;
+  test.expected_float_tolerance = 0.000005f;
+  auto &code = test.code;
+  code.push_back(EncodeSop1(0x04, 12, 126));
+  for (const auto &uv : coordinates) {
+    AppendVMovLiteral(&code, 20, std::bit_cast<u32>(uv[0]));
+    AppendVMovLiteral(&code, 21, std::bit_cast<u32>(uv[1]));
+    code.push_back(EncodeMimg0(0x27, sparse ? 0x5 : 0xf));
+    code.push_back(EncodeMimg1(0, 20, 0, 2));
+    const float x = uv[0] * 2.0f - 0.5f, y = uv[1] * 2.0f - 0.5f;
+    const int ix = static_cast<int>(std::floor(x)), iy = static_cast<int>(std::floor(y));
+    const float fx = x - std::floor(x), fy = y - std::floor(y);
+    float rgba[4] = {0, 0, 0, 1};
+    for (u32 channel = 0; channel < 3; ++channel) {
+      for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+        const auto pixel = std::clamp(iy + dy, 0, 1) * 2 + std::clamp(ix + dx, 0, 1);
+        rgba[channel] += channels[pixel][channel] / (channel == 2 ? 1023.0f : 2047.0f) *
+                         (dx ? fx : 1.0f - fx) * (dy ? fy : 1.0f - fy);
+      }
+    }
+    constexpr u32 swizzle[4] = {2, 0, 1, 3};
+    u32 reg = 0;
+    for (u32 component = 0; component < 4; ++component) {
+      if (sparse && component != 0 && component != 2) continue;
+      AppendStoreVgpr(&code, reg++, test.expected.size());
+      test.expected.push_back(std::bit_cast<u32>(rgba[swizzle[component]]));
+    }
+  }
+  AppendVMovLiteral(&code, 0, 0x3f400000u);
+  code.push_back(EncodeSop1(0x04, 126, InlineU32(0)));
+  code.push_back(EncodeMimg0(0x27, 0x1));
+  code.push_back(EncodeMimg1(0, 20, 0, 2));
+  code.push_back(EncodeSop1(0x04, 126, 12));
+  AppendStoreVgpr(&code, 0, test.expected.size());
+  test.expected.push_back(0x3f400000u);
+  AppendEnd(&code);
+  test.user_data[50] = test.expected.size() * sizeof(u32);
+  test.user_data[51] = 3u << 28u;
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::IMAGE_SAMPLE,
+                  O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.required_spirv = {"OpImageGather", "OpBitFieldUExtract", "OpConvertUToF"};
+  test.forbidden_spirv = {"OpImageFetch", "OpImageSample", "OpImageRead", "OpImageWrite"};
+  return test;
+}
+
 template <bool rg, bool snorm = false> TestCase ImageSamplePacked8() {
   using O = ShaderOpcode;
   TestCase test;
@@ -38570,6 +38647,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageLoadR32SintUsesSignedSampledImage);
   AddCase(ImageLoadPackedUintUnpacksAndSwizzles);
   AddCase(ImageSamplePackedUintConvertsSampleAndGather);
+  AddCase(ImageSamplePackedUnormBilinear<false>);
+  AddCase(ImageSamplePackedUnormBilinear<true>);
   AddCase(ImageSamplePacked8<false>);
   AddCase(ImageSamplePacked8<true>);
   AddCase(ImageSamplePacked8<false, true>);
@@ -44197,6 +44276,8 @@ int main(int argc, char **argv) {
     vulkan.CheckBgra16Readback();
     RunCase(&vulkan, ImageLoadPackedUintUnpacksAndSwizzles());
     RunCase(&vulkan, ImageSamplePackedUintConvertsSampleAndGather());
+    RunCase(&vulkan, ImageSamplePackedUnormBilinear<false>());
+    RunCase(&vulkan, ImageSamplePackedUnormBilinear<true>());
     RunCase(&vulkan, ImageStorePackedUintSaturatesChannels());
     RunCase(&vulkan, ImageStorePackedUintHonorsSparseDmask());
     RunCase(&vulkan, ImageStorePackedUnorm<false>());
