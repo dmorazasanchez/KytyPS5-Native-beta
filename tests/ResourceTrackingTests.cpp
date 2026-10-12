@@ -567,6 +567,7 @@ void TestGuardedDirectImageTable() {
     BoundDiamond, BoundBranchSpecific, BoundMismatched,
     BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive,
     BoundExecFactored,
+    BoundExecBranch, BoundExecBranchUnproven, BoundExecBranchUnguarded, BoundExecBranchMismatched,
     Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor,
     FiniteShared, FiniteSharedBypass, FiniteLate
   };
@@ -574,6 +575,7 @@ void TestGuardedDirectImageTable() {
     const bool finite = guard >= Guard::Finite;
     const bool bounded = guard >= Guard::Bounded && !finite;
     const bool exec_bound = bounded && guard >= Guard::BoundExec;
+    const bool entry_bound = exec_bound && guard >= Guard::BoundExecBranch;
     const bool shared = guard == Guard::FiniteShared || guard == Guard::FiniteSharedBypass;
     const bool bypass = guard == Guard::Bypass || guard == Guard::BoundBypass;
     const uint32_t table_offset = finite ? 3344u : exec_bound ? 672u : bounded ? 3696u : 344u;
@@ -627,7 +629,8 @@ void TestGuardedDirectImageTable() {
       phi.AddPhiOperand(entry, initial);
       phi.AddPhiOperand(latch, next);
     }
-    const auto kind = guard == Guard::ExecZero || guard == Guard::BoundAnyLane || exec_bound
+    const auto kind = entry_bound ? CFG::BranchCondition::VccNonZero
+                    : guard == Guard::ExecZero || guard == Guard::BoundAnyLane || exec_bound
                         ? CFG::BranchCondition::ExecZero
                     : guard == Guard::VccZero ? CFG::BranchCondition::VccZero
                                              : CFG::BranchCondition::SccZero;
@@ -646,28 +649,38 @@ void TestGuardedDirectImageTable() {
           {guard == Guard::BoundUnrelated ? fixture.UserData(2) : key, limit});
       if (exec_bound) {
         const auto previous = fixture.Emit(ValueOpcode::INotEqual32, {varying, Value(2u)});
-        const auto encoded = fixture.Emit(ValueOpcode::SelectU32, {condition, Value(1u), Value(0u)});
-        const auto stopped = fixture.Emit(guard == Guard::BoundExecAnd
-            ? ValueOpcode::BitwiseAnd32 : ValueOpcode::BitwiseOr32, {encoded, varying});
-        const auto retained = fixture.Emit(ValueOpcode::SelectU32,
-            {previous, stopped, Value(0u)});
-        const auto stopped_lane = fixture.Emit(ValueOpcode::INotEqual32, {retained, Value(0u)});
-        auto vcc = fixture.Emit(ValueOpcode::LogicalAnd,
-            operand_order & 1u ? std::initializer_list<Value>{stopped_lane, previous}
-                               : std::initializer_list<Value>{previous, stopped_lane});
-        if (guard == Guard::BoundExecFactored) {
-          const auto empty = fixture.Emit(ValueOpcode::IEqual32, {key, Value(UINT32_MAX)});
-          const auto sentinel = fixture.Emit(ValueOpcode::LogicalAnd,
-              operand_order & 2u ? std::initializer_list<Value>{empty, previous}
-                                 : std::initializer_list<Value>{previous, empty});
-          vcc = fixture.Emit(ValueOpcode::LogicalOr,
-              operand_order & 4u ? std::initializer_list<Value>{sentinel, vcc}
-                                 : std::initializer_list<Value>{vcc, sentinel});
+        if (entry_bound) {
+          condition = fixture.Emit(ValueOpcode::LogicalOr,
+              {fixture.Emit(ValueOpcode::LogicalAnd, {previous, condition}),
+               fixture.Emit(ValueOpcode::LogicalAnd,
+                   {previous, fixture.Emit(ValueOpcode::IEqual32, {key, Value(UINT32_MAX)})})});
+          const auto extra = fixture.Emit(ValueOpcode::INotEqual32, {varying, Value(3u)});
+          active = guard == Guard::BoundExecBranchUnproven ? extra
+              : fixture.Emit(ValueOpcode::LogicalAnd, {previous, extra});
+        } else {
+          const auto encoded = fixture.Emit(ValueOpcode::SelectU32, {condition, Value(1u), Value(0u)});
+          const auto stopped = fixture.Emit(guard == Guard::BoundExecAnd
+              ? ValueOpcode::BitwiseAnd32 : ValueOpcode::BitwiseOr32, {encoded, varying});
+          const auto retained = fixture.Emit(ValueOpcode::SelectU32,
+              {previous, stopped, Value(0u)});
+          const auto stopped_lane = fixture.Emit(ValueOpcode::INotEqual32, {retained, Value(0u)});
+          auto vcc = fixture.Emit(ValueOpcode::LogicalAnd,
+              operand_order & 1u ? std::initializer_list<Value>{stopped_lane, previous}
+                                 : std::initializer_list<Value>{previous, stopped_lane});
+          if (guard == Guard::BoundExecFactored) {
+            const auto empty = fixture.Emit(ValueOpcode::IEqual32, {key, Value(UINT32_MAX)});
+            const auto sentinel = fixture.Emit(ValueOpcode::LogicalAnd,
+                operand_order & 2u ? std::initializer_list<Value>{empty, previous}
+                                   : std::initializer_list<Value>{previous, empty});
+            vcc = fixture.Emit(ValueOpcode::LogicalOr,
+                operand_order & 4u ? std::initializer_list<Value>{sentinel, vcc}
+                                   : std::initializer_list<Value>{vcc, sentinel});
+          }
+          const auto remaining = fixture.Emit(ValueOpcode::LogicalNot, {vcc});
+          active = guard == Guard::BoundExecUnprovenActive ? remaining
+              : fixture.Emit(ValueOpcode::LogicalAnd, {previous, remaining});
+          condition = fixture.Emit(ValueOpcode::LogicalNot, {active});
         }
-        const auto remaining = fixture.Emit(ValueOpcode::LogicalNot, {vcc});
-        active = guard == Guard::BoundExecUnprovenActive ? remaining
-            : fixture.Emit(ValueOpcode::LogicalAnd, {previous, remaining});
-        condition = fixture.Emit(ValueOpcode::LogicalNot, {active});
       }
     } else {
       condition = fixture.Emit(ValueOpcode::INotEqual32,
@@ -797,8 +810,10 @@ void TestGuardedDirectImageTable() {
           {fixture.Image(words, 0x12c), sampler, fixture.ImageAddress(), active},
           fixture.AddMemory(memory, 0x12c));
     }
-    if (guard == Guard::BoundExecUnguarded || guard == Guard::BoundExecMismatched) {
-      const auto other_active = guard == Guard::BoundExecUnguarded ? Value(true)
+    if (guard == Guard::BoundExecUnguarded || guard == Guard::BoundExecMismatched ||
+        guard == Guard::BoundExecBranchUnguarded || guard == Guard::BoundExecBranchMismatched) {
+      const auto other_active = guard == Guard::BoundExecUnguarded ||
+                                guard == Guard::BoundExecBranchUnguarded ? Value(true)
           : fixture.Emit(ValueOpcode::ULessThan32, {key, fixture.UserData(2)});
       fixture.Emit(ValueOpcode::ImageSampleRaw,
           {image, sampler, fixture.ImageAddress(), other_active}, fixture.AddMemory(memory, 0x12c));
@@ -855,6 +870,8 @@ void TestGuardedDirectImageTable() {
                            Guard::BoundBranchSpecific, Guard::BoundMismatched,
                            Guard::BoundExecUnguarded, Guard::BoundExecMismatched,
                            Guard::BoundExecAnd, Guard::BoundExecUnprovenActive,
+                           Guard::BoundExecBranchUnproven, Guard::BoundExecBranchUnguarded,
+                           Guard::BoundExecBranchMismatched,
                            Guard::FiniteMissing, Guard::FiniteWrong, Guard::FiniteSigned,
                            Guard::FiniteSharedBypass, Guard::FiniteLate}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
@@ -951,7 +968,8 @@ void TestGuardedDirectImageTable() {
         "batched descriptor read crossed the 48-bit endpoint");
 
   make_plan(Guard::Bounded);
-  for (const auto guard : {Guard::BoundDiamond, Guard::BoundExec, Guard::BoundExecFactored}) {
+  for (const auto guard : {Guard::BoundDiamond, Guard::BoundExec, Guard::BoundExecFactored,
+                           Guard::BoundExecBranch}) {
     auto bounded = make_plan(guard);
     Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
           "bounded table with image writes omitted specialization read capture");

@@ -36615,20 +36615,22 @@ void CheckPointerImageTable(VulkanHarness &vulkan) {
 void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
   using O = ShaderOpcode;
   constexpr u32 table = 256u;
-  for (const u32 variant : {0u, 1u, 2u})
+  for (const u32 variant : {0u, 1u, 2u, 3u})
   for (const u32 wave : {32u, 64u})
   for (const u32 count : {0u, 2u, 3u}) {
-    const bool masked = variant == 1u, bitset = variant == 2u;
+    const bool masked = variant == 1u, bitset = variant == 2u, witnessed = variant == 3u;
     const u32 stride = bitset ? 32u : masked ? 784u : 272u;
-    const u32 offset = bitset ? 3344u : masked ? 672u : 3696u;
+    const u32 offset = bitset ? 3344u : masked ? 672u : witnessed ? 32856u : 3696u;
+    const u32 count_offset = witnessed ? 35948u : masked ? 0u : 4u;
     const u32 rows = bitset ? 12u : count, members = bitset ? 1u : 2u;
-    const u32 lanes = masked ? 2u : 1u;
+    const u32 lanes = masked || witnessed ? 2u : 1u;
     TestCase test;
-    test.name = bitset ? (wave == 32u ? "BitsetRecordTable32" : "BitsetRecordTable64")
+    test.name = witnessed ? (wave == 32u ? "WitnessedRecordTable32" : "WitnessedRecordTable64")
+                         : bitset ? (wave == 32u ? "BitsetRecordTable32" : "BitsetRecordTable64")
                        : masked ? (wave == 32u ? "ExecGuardedRecordTable32" : "ExecGuardedRecordTable64")
                        : (wave == 32u ? "GuardedRecordImageTable32" : "GuardedRecordImageTable64");
-    test.initial.resize((table + offset + stride * rows) / 4u, 0xdeadbeefu);
-    test.initial[table / 4u + (masked ? 0u : 1u)] = bitset ? (1u << count) - 1u : count;
+    test.initial.resize((table + std::max(offset + stride * rows, count_offset + 4u)) / 4u, 0xdeadbeefu);
+    test.initial[(table + count_offset) / 4u] = bitset ? (1u << count) - 1u : count;
     for (u32 row = 0; row < rows; ++row)
     for (u32 member = 0; member < members; ++member) {
       auto image = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
@@ -36656,7 +36658,7 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     test.dispatch_x = 4u;
     auto &code = test.code;
     code.insert(code.end(), {EncodeSop2(0x20, 20, InlineU32(5), 44),
-                            EncodeSmem0(0x00, 21), EncodeSmem1(masked ? 0u : 4u, 125)});
+                            EncodeSmem0(0x00, 21), EncodeSmem1(count_offset, 125)});
     if (bitset) code.insert(code.end(), {
         EncodeSop2(0x0e, 20, 20, 21),
         EncodeSop2(0x27, 20, 20, 255), 12u << 16u});
@@ -36666,15 +36668,24 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     AppendVMovLiteral(&code, 0, 0u);
     AppendVMovLiteral(&code, 20, 0x3f000000u);
     AppendVMovLiteral(&code, 21, 0x3f000000u);
+    if (witnessed) code.push_back(EncodeVopc(0xd2, InlineU32(0), 13));
     const auto loop = code.size();
     code.push_back(EncodeSop1(0x13, 22, 20)); // Find the next set bit in the GPU worklist.
-    code.push_back(EncodeSopc(0x07, 22, 193));
-    const auto empty_exit = code.size(); code.push_back(0u);
+    size_t empty_exit = 0;
+    if (!witnessed) {
+      code.push_back(EncodeSopc(0x07, 22, 193));
+      empty_exit = code.size(); code.push_back(0u);
+    }
     size_t range_exit = 0;
     if (!bitset) {
       if (masked) code.insert(code.end(), {EncodeSop2(0x0b, 28, 126, InlineU32(0)),
                                           EncodeSop1(0x04, 126, 28)});
       code.push_back(EncodeSopc(0x09, 22, 21));
+      if (witnessed) code.insert(code.end(), {
+          EncodeSop2(0x0b, 4, 126, InlineU32(0)),
+          EncodeSopc(0x06, 193, 22),
+          EncodeSop2(0x0b, 106, 126, InlineU32(0)),
+          EncodeSop2(0x11, 106, 4, 106)});
       if (masked) code.insert(code.end(), {
           EncodeVopc(0xc2, 249, 22), // Mask the FF1 sentinel into s2:s3.
           EncodeVopcSdwa(193, 2, 1, 6, 6, 0, 0, 0, 0, 0, 0, 1, 1),
@@ -36712,9 +36723,9 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     code.insert(code.end(), {EncodeSop2(0x1e, 24, InlineU32(1), 22),
                             EncodeSop2(0x14, 20, 20, 24)});
     code.push_back(EncodeSopp(0x02, loop - code.size() - 1u));
-    code[empty_exit] = EncodeSopp(0x04, code.size() - empty_exit - 1u);
+    if (!witnessed) code[empty_exit] = EncodeSopp(0x04, code.size() - empty_exit - 1u);
     if (!bitset) code[range_exit] =
-        EncodeSopp(masked ? 0x08 : 0x05, code.size() - range_exit - 1u);
+        EncodeSopp(witnessed ? 0x07 : masked ? 0x08 : 0x05, code.size() - range_exit - 1u);
     code.push_back(EncodeSop1(0x04, 126, 30));
     code.push_back(EncodeSop2(0x26, 25, 44, InlineU32(lanes)));
     code.push_back(EncodeVop2(0x25, 30, 25, 13));
@@ -36722,10 +36733,12 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     code.insert(code.end(), {EncodeMimg0(0x08, 1), EncodeMimg1(0, 30, 8, 0)});
     AppendEnd(&code);
     test.opcodes = {O::S_LSHR_B32, O::S_LOAD_DWORD, O::V_MOV_B32, O::S_FF1_I32_B32,
-        O::S_CMP_LG_U32, O::S_CBRANCH_SCC0,
         O::S_MUL_I32, O::S_ADD_I32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
         O::V_ADD_F32, O::S_LSHL_B32, O::S_ANDN2_B32, O::S_BRANCH,
         O::IMAGE_STORE, O::S_ENDPGM};
+    if (witnessed) test.opcodes.insert(test.opcodes.end(), {O::V_CMPX_EQ_U32,
+        O::S_CSELECT_B64, O::S_CMP_EQ_U32, O::S_OR_B64, O::S_CBRANCH_VCCNZ});
+    else test.opcodes.insert(test.opcodes.end(), {O::S_CMP_LG_U32, O::S_CBRANCH_SCC0});
     if (bitset) test.opcodes.insert(test.opcodes.end(), {O::S_AND_B32, O::S_BFE_U32,
         O::S_BITCMP1_B32, O::S_CBRANCH_SCC1});
     else test.opcodes.insert(test.opcodes.end(), {O::S_CMP_GE_U32, O::S_CBRANCH_SCC1,
