@@ -36983,8 +36983,7 @@ TestCase ImageStorePackedUintSaturatesChannels() {
   test.storage_image_r32ui = std::vector<u32>(16, 0);
   test.expected_storage_image_r32ui = std::move(expected_image);
   test.required_spirv = {"OpCapability StorageImageWriteWithoutFormat",
-                         StorageUint2DImageBindingName(false), "OpULessThan",
-                         "OpSelect"};
+                         StorageUint2DImageBindingName(false), "UMin"};
   test.forbidden_spirv = {"R32ui"};
   return test;
 }
@@ -37018,6 +37017,54 @@ TestCase ImageStorePackedUintHonorsSparseDmask() {
   test.required_spirv = {"OpCapability StorageImageWriteWithoutFormat",
                          StorageUint2DImageBindingName(false)};
   test.forbidden_spirv = {"R32ui"};
+  return test;
+}
+
+template <bool sparse> TestCase ImageStorePackedUnorm() {
+  using O = ShaderOpcode;
+  // Float inputs and exact packed UNorm components, including ties to even.
+  constexpr float values[][3] = {
+      {-1.0f, 0.5f, 2.0f}, {0.0f, 1.0f, 0.5f},
+      {std::bit_cast<float>(0x7fc00000u), std::bit_cast<float>(0x7f800000u),
+       std::bit_cast<float>(0xff800000u)},
+      {0.25f, 0.75f, 0.25f}, {2.5f / 2047.0f, 3.5f / 2047.0f, 2.5f / 1023.0f}};
+  constexpr u32 converted[][3] = {
+      {0, 1024, 1023}, {0, 2047, 512}, {0, 2047, 0}, {512, 1535, 256}, {2, 4, 2}};
+  TestCase test;
+  test.name = sparse ? "ImageStorePackedUnormSparseDmask" : "ImageStorePackedUnormBoundaries";
+  test.user_data = MakeStorageTextureData(Prospero::BufferFormat::k11_11_10UNorm);
+  test.has_user_data = true;
+  test.image_descriptor_swizzle = DstSel(4, 5, 6, 0);
+  test.storage_image_r32ui.assign(16, 0xabcdef01u);
+  test.expected_storage_image_r32ui = test.storage_image_r32ui;
+  auto &code = test.code;
+  code.push_back(EncodeSop1(0x04, 12, 126));
+  for (u32 i = 0; i < std::size(values); ++i) {
+    AppendVMovU32(&code, 20, i & 3u);
+    AppendVMovU32(&code, 21, i >> 2u);
+    AppendVMovLiteral(&code, 0, std::bit_cast<u32>(values[i][0]));
+    if constexpr (sparse) {
+      AppendVMovLiteral(&code, 1, std::bit_cast<u32>(values[i][2]));
+    } else {
+      AppendVMovLiteral(&code, 1, std::bit_cast<u32>(values[i][1]));
+      AppendVMovLiteral(&code, 2, std::bit_cast<u32>(values[i][2]));
+    }
+    code.push_back(EncodeMimg0(0x08, sparse ? 0x5 : 0x7));
+    code.push_back(EncodeMimg1(0, 20));
+    test.expected_storage_image_r32ui[i] = converted[i][0] |
+        (sparse ? 0u : converted[i][1] << 11u) | (converted[i][2] << 22u);
+  }
+  AppendVMovU32(&code, 20, 3);
+  AppendVMovU32(&code, 21, 3);
+  code.push_back(EncodeSop1(0x04, 126, InlineU32(0)));
+  code.push_back(EncodeMimg0(0x08, 0x7));
+  code.push_back(EncodeMimg1(0, 20));
+  code.push_back(EncodeSop1(0x04, 126, 12));
+  AppendEnd(&code);
+  test.opcodes = {O::V_MOV_B32, O::S_MOV_B64, O::IMAGE_STORE, O::S_ENDPGM};
+  test.required_spirv = {"OpImageWrite", "RoundEven", "OpConvertFToU",
+                         StorageUint2DImageBindingName(false)};
+  test.forbidden_spirv = {"OpImageRead", "OpAtomic", "OpTypeSampler", "R32ui"};
   return test;
 }
 
@@ -38572,6 +38619,8 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageStoreR32UintUsesFormatlessStorageImage);
   AddCase(ImageStorePackedUintSaturatesChannels);
   AddCase(ImageStorePackedUintHonorsSparseDmask);
+  AddCase(ImageStorePackedUnorm<false>);
+  AddCase(ImageStorePackedUnorm<true>);
   AddCase(ComputeTgSizeSgprUsesWaveMetadata);
   AddCase(ImageStoreAndAtomicShareTypedBinding);
   AddCase(ImageAtomicCompareSwapGlcAndExec);
@@ -44148,6 +44197,10 @@ int main(int argc, char **argv) {
     vulkan.CheckBgra16Readback();
     RunCase(&vulkan, ImageLoadPackedUintUnpacksAndSwizzles());
     RunCase(&vulkan, ImageSamplePackedUintConvertsSampleAndGather());
+    RunCase(&vulkan, ImageStorePackedUintSaturatesChannels());
+    RunCase(&vulkan, ImageStorePackedUintHonorsSparseDmask());
+    RunCase(&vulkan, ImageStorePackedUnorm<false>());
+    RunCase(&vulkan, ImageStorePackedUnorm<true>());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--system-dialog-only") == 0) {

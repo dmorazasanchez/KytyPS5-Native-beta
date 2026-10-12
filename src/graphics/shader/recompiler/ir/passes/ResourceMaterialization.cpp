@@ -652,7 +652,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		}
 		const bool raw_sint_storage = storage && format == Prospero::BufferFormat::k32SInt &&
 		                              base.written && (base.atomic ? !base.atomic64 : !base.read);
-		image.numeric_class         = Prospero::SampledTextureNumericClass(format);
+		image.numeric_class = Prospero::SampledTextureNumericClass(
+		    storage ? Prospero::RemapTextureFormat(format) : format);
 		if (storage) {
 			if ((!raw_sint_storage && image.numeric_class == Prospero::TextureNumericClass::Sint) ||
 			    image.numeric_class == Prospero::TextureNumericClass::Unsupported) {

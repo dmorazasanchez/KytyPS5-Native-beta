@@ -311,7 +311,8 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	const bool raw_sint_storage = format == Prospero::BufferFormat::k32SInt && uint_resource &&
 	                              resource.written &&
 	                              (resource.atomic ? !resource.atomic64 : !resource.read);
-	const auto numeric_class = Prospero::SampledTextureNumericClass(format);
+	const auto numeric_class =
+	    Prospero::SampledTextureNumericClass(Prospero::RemapTextureFormat(format));
 	const bool raw_float_atomic = format == Prospero::BufferFormat::k32Float && uint_resource &&
 	                              resource.atomic && !resource.atomic64;
 	const bool format_ok =
