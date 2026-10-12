@@ -565,26 +565,28 @@ void TestGuardedDirectImageTable() {
     Nonzero, SccNonZero, Plain, Zero, Unrelated, Bypass, ExecZero, VccZero,
     Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane,
     BoundDiamond, BoundBranchSpecific, BoundMismatched,
-    BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive
+    BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive,
+    Finite, FiniteZero, FiniteMissing, FiniteWrong, FiniteSigned, FiniteAdd, FiniteXor
   };
   const auto make_plan = [](Guard guard) {
-    const bool bounded = guard >= Guard::Bounded;
-    const bool exec_bound = guard >= Guard::BoundExec;
+    const bool finite = guard >= Guard::Finite;
+    const bool bounded = guard >= Guard::Bounded && !finite;
+    const bool exec_bound = bounded && guard >= Guard::BoundExec;
     const bool bypass = guard == Guard::Bypass || guard == Guard::BoundBypass;
-    const uint32_t table_offset = exec_bound ? 672u : bounded ? 3696u : 344u;
+    const uint32_t table_offset = finite ? 3344u : exec_bound ? 672u : bounded ? 3696u : 344u;
     const uint32_t table_stride = exec_bound ? 784u : bounded ? 272u : 32u;
-    Fixture fixture(bounded ? ShaderType::Compute : ShaderType::Pixel);
+    Fixture fixture(bounded || finite ? ShaderType::Compute : ShaderType::Pixel);
     fixture.program.wave_size = 64u;
     auto *entry = fixture.block;
     auto *middle = fixture.AddBlock();
     auto *before_sample = fixture.AddBlock();
     auto *sample = fixture.AddBlock();
     auto *exit = fixture.AddBlock();
-    const auto varying = bounded
+    const auto varying = bounded || finite
         ? fixture.Emit(ValueOpcode::GetBuiltin,
             {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)})
         : fixture.Emit(ValueOpcode::GetAttribute, {Value(0u), Value(0u)});
-    const auto mask = fixture.Emit(ValueOpcode::ReadFirstLane, {varying, Value(true)});
+    auto mask = fixture.Emit(ValueOpcode::ReadFirstLane, {varying, Value(true)});
     const auto srt = fixture.Address(fixture.UserData(0), fixture.UserData(1));
     Value key;
     Value limit;
@@ -596,13 +598,44 @@ void TestGuardedDirectImageTable() {
       limit = fixture.Emit(ValueOpcode::LoadAddressU32,
           {srt, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(memory, 0x10));
     }
+    Block *latch = nullptr;
+    if (finite) {
+      latch = fixture.AddBlock();
+      MemoryInfo memory;
+      memory.kind = ResourceKind::ScalarBuffer;
+      const auto input = fixture.Buffer({Value(0x900000u), Value(0u), Value(4096u), Value(0u)});
+      const auto loaded = fixture.Emit(ValueOpcode::ReadConstBuffer, {input, mask},
+          fixture.AddMemory(memory, 0x2ecu));
+      const auto initial = fixture.Emit(ValueOpcode::BitFieldUExtract,
+          {loaded, Value(0u), Value(guard == Guard::FiniteZero ? 0u : 12u)});
+      auto &phi = middle->AppendNewInst(ValueOpcode::Phi, {}, static_cast<uint64_t>(Type::U32));
+      mask = Value(&phi);
+      key = fixture.Emit(ValueOpcode::FindILsb32, {mask}, 0, middle);
+      const auto bit = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+          {Value(1u), fixture.Emit(ValueOpcode::BitwiseAnd32, {key, Value(31u)}, 0, latch)}, 0, latch);
+      const auto next = guard == Guard::FiniteAdd
+          ? fixture.Emit(ValueOpcode::BitwiseOr32, {mask, Value(1u << 31u)}, 0, latch)
+          : guard == Guard::FiniteXor
+              ? fixture.Emit(ValueOpcode::BitwiseXor32, {mask, bit}, 0, latch)
+              : fixture.Emit(ValueOpcode::BitwiseAnd32,
+                  {mask, fixture.Emit(ValueOpcode::BitwiseNot32, {bit}, 0, latch)}, 0, latch);
+      phi.AddPhiOperand(entry, initial);
+      phi.AddPhiOperand(latch, next);
+    }
     const auto kind = guard == Guard::ExecZero || guard == Guard::BoundAnyLane || exec_bound
                         ? CFG::BranchCondition::ExecZero
                     : guard == Guard::VccZero ? CFG::BranchCondition::VccZero
                                              : CFG::BranchCondition::SccZero;
     Value condition;
     Value active(true);
-    if (bounded) {
+    if (finite) {
+      condition = guard == Guard::FiniteMissing ? Value(false)
+          : guard == Guard::FiniteSigned
+              ? fixture.Emit(ValueOpcode::LogicalNot,
+                  {fixture.Emit(ValueOpcode::SLessThan32, {key, Value(12u)}, 0, middle)}, 0, middle)
+              : fixture.Emit(ValueOpcode::IEqual32,
+                  {key, Value(guard == Guard::FiniteWrong ? 31u : UINT32_MAX)}, 0, middle);
+    } else if (bounded) {
       condition = guard == Guard::BoundMissing ? Value(false) : fixture.Emit(
           ValueOpcode::UGreaterThanEqual32,
           {guard == Guard::BoundUnrelated ? fixture.UserData(2) : key, limit});
@@ -630,7 +663,7 @@ void TestGuardedDirectImageTable() {
       condition = fixture.Emit(ValueOpcode::LogicalNot, {condition});
     }
     if (guard != Guard::Plain && guard != Guard::SccNonZero) {
-      condition = fixture.Emit(ValueOpcode::ConditionRef, {condition}, kind);
+      condition = fixture.Emit(ValueOpcode::ConditionRef, {condition}, kind, finite ? middle : entry);
     }
     fixture.program.blocks[0]->condition = condition;
     fixture.program.blocks[0]->terminator = {
@@ -645,6 +678,18 @@ void TestGuardedDirectImageTable() {
     fixture.program.blocks[4]->terminator = {
         .kind = bypass ? CFG::TerminatorKind::Branch : CFG::TerminatorKind::Return,
         .true_block = fixture.program.blocks[3u]};
+    if (finite) {
+      entry->condition = {};
+      entry->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = middle};
+      middle->condition = condition;
+      middle->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+          .true_block = guard == Guard::FiniteXor ? latch : exit, .false_block = before_sample};
+      before_sample->condition = fixture.Emit(ValueOpcode::IEqual32, {varying, Value(0u)}, 0, before_sample);
+      before_sample->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+          .true_block = sample, .false_block = latch};
+      sample->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = latch};
+      latch->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = middle};
+    }
     if (guard == Guard::BoundDiamond || exec_bound) {
       middle->condition = fixture.Emit(ValueOpcode::IEqual32,
           {mask, Value(1u)});
@@ -673,7 +718,7 @@ void TestGuardedDirectImageTable() {
     }
     std::array<Value, 2> pointer;
     for (uint32_t word = 0; word < pointer.size(); ++word) {
-      if (bounded) {
+      if (bounded || finite) {
         pointer[word] = srt.Instruction()->Arg(word);
         continue;
       }
@@ -685,7 +730,7 @@ void TestGuardedDirectImageTable() {
           fixture.AddMemory(memory, 0x20));
     }
     fixture.block = sample;
-    if (!bounded) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
+    if (!bounded && !finite) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
         {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(table_stride)})
                  : fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
@@ -719,7 +764,7 @@ void TestGuardedDirectImageTable() {
       fixture.Emit(ValueOpcode::ImageSampleRaw,
           {image, sampler, fixture.ImageAddress(), other_active}, fixture.AddMemory(memory, 0x12c));
     }
-    if (bounded) {
+    if (bounded || finite) {
       const auto output = fixture.Image({Value(0x8000u),
           Value(static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u),
           Value(0u), Value((static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u) |
@@ -751,7 +796,8 @@ void TestGuardedDirectImageTable() {
     Check(indirect && !indirect->selector.has_value() &&
               indirect->table_offset == table_offset && indirect->table_stride == table_stride &&
               (bounded ? !indirect->key_count.IsEmpty()
-                       : indirect->key_count.Resolve() == Value(32u)) &&
+                       : indirect->key_count.Resolve() == Value(guard == Guard::FiniteZero ? 0u :
+                           finite && guard != Guard::FiniteAdd && guard != Guard::FiniteXor ? 12u : 32u)) &&
               fixture.program.descriptor_sources[indirect->table_source].dword_count == 2u,
           "guarded direct image table lost its pointer or proven selector range");
     return ExtractResourcePlan(fixture.program);
@@ -765,7 +811,8 @@ void TestGuardedDirectImageTable() {
                            Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane,
                            Guard::BoundBranchSpecific, Guard::BoundMismatched,
                            Guard::BoundExecUnguarded, Guard::BoundExecMismatched,
-                           Guard::BoundExecAnd, Guard::BoundExecUnprovenActive}) {
+                           Guard::BoundExecAnd, Guard::BoundExecUnprovenActive,
+                           Guard::FiniteMissing, Guard::FiniteWrong, Guard::FiniteSigned}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
                "direct table accepted a selector without a dominating range guard");
   }
@@ -891,6 +938,38 @@ void TestGuardedDirectImageTable() {
     Check(!MaterializeResources(bounded, runtime, snapshot, specialization) &&
               records.descriptor_reads == 0u,
           "unrepresentable table span was read before validating its count");
+  }
+  for (const auto guard : {Guard::Finite, Guard::FiniteZero, Guard::FiniteAdd, Guard::FiniteXor}) {
+    const auto finite = make_plan(guard);
+    Check(finite.capture_specialization_reads && finite.info.images[1].written,
+          "finite bit table with image writes omitted specialization read capture");
+    LinearTestMemory records;
+    const uint32_t count = guard == Guard::FiniteZero ? 0u : guard == Guard::Finite ? 12u : 32u;
+    const uint64_t first = records.base + 3344u;
+    fill_table(records, first);
+    // The GPU may select no bits or a sparse subset. Null rows remain valid candidates.
+    std::fill_n(records.words.begin() + (first - records.base) / 4u + 5u * 8u, 8u, 0u);
+    records.fail_address = first + count * 32u;
+    user_data = {static_cast<uint32_t>(records.base), 0u};
+    runtime.userdata = &records;
+    Check(MaterializeResources(finite, runtime, snapshot, specialization) &&
+              records.descriptor_reads == count && snapshot.images.size() == std::max(count, 1u) + 1u,
+          "finite bit table probed beyond its mask bound or lost a null row");
+    if (count == 0u) {
+      Check(std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t word) { return word == 0u; }),
+            "empty bit loop retained a reachable image");
+      continue;
+    }
+    Check(snapshot.flattened_srt[specialization.images[0].indirect_mapping_offset] == count,
+          "finite bit table lost its candidate count");
+    for (uint32_t key = 0; key < count; ++key) {
+      Check(std::ranges::any_of(snapshot.specialization_reads, [&](const auto &read) {
+        return read.first == first + key * 32u && read.second == 32u;
+      }), "finite bit table omitted a descriptor from writable-alias validation");
+    }
+    records.fail_address = first + (count - 1u) * 32u + 28u;
+    Check(!MaterializeResources(finite, runtime, snapshot, specialization),
+          "finite bit table accepted an unreadable last candidate");
   }
 }
 

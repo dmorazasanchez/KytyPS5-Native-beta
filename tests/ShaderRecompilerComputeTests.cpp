@@ -36492,18 +36492,22 @@ void CheckCountedRowImageSelector(VulkanHarness &vulkan) {
 void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
   using O = ShaderOpcode;
   constexpr u32 table = 256u;
-  for (const bool masked : {false, true})
+  for (const u32 variant : {0u, 1u, 2u})
   for (const u32 wave : {32u, 64u})
   for (const u32 count : {0u, 2u, 3u}) {
-    const u32 stride = masked ? 784u : 272u, offset = masked ? 672u : 3696u;
+    const bool masked = variant == 1u, bitset = variant == 2u;
+    const u32 stride = bitset ? 32u : masked ? 784u : 272u;
+    const u32 offset = bitset ? 3344u : masked ? 672u : 3696u;
+    const u32 rows = bitset ? 12u : count, members = bitset ? 1u : 2u;
     const u32 lanes = masked ? 2u : 1u;
     TestCase test;
-    test.name = masked ? (wave == 32u ? "ExecGuardedRecordTable32" : "ExecGuardedRecordTable64")
+    test.name = bitset ? (wave == 32u ? "BitsetRecordTable32" : "BitsetRecordTable64")
+                       : masked ? (wave == 32u ? "ExecGuardedRecordTable32" : "ExecGuardedRecordTable64")
                        : (wave == 32u ? "GuardedRecordImageTable32" : "GuardedRecordImageTable64");
-    test.initial.resize((table + offset + stride * count) / 4u, 0xdeadbeefu);
-    test.initial[table / 4u + (masked ? 0u : 1u)] = count;
-    for (u32 row = 0; row < count; ++row)
-    for (const u32 member : {0u, 1u}) {
+    test.initial.resize((table + offset + stride * rows) / 4u, 0xdeadbeefu);
+    test.initial[table / 4u + (masked ? 0u : 1u)] = bitset ? (1u << count) - 1u : count;
+    for (u32 row = 0; row < rows; ++row)
+    for (u32 member = 0; member < members; ++member) {
       auto image = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
       image[0] = (row + 1u) * (member == 0u ? 1u : 10u);
       image[3] = DstSel(4, 0, 0, 1) |
@@ -36530,6 +36534,9 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     auto &code = test.code;
     code.insert(code.end(), {EncodeSop2(0x20, 20, InlineU32(5), 44),
                             EncodeSmem0(0x00, 21), EncodeSmem1(masked ? 0u : 4u, 125)});
+    if (bitset) code.insert(code.end(), {
+        EncodeSop2(0x0e, 20, 20, 21),
+        EncodeSop2(0x27, 20, 20, 255), 12u << 16u});
     code.push_back(EncodeSop1(0x04, 30, 126)); // Preserve EXEC for the final write.
     code.push_back(EncodeVop1(0x01, 13, Vgpr(0))); // Odd lane is already done.
     AppendVMovLiteral(&code, 10, 0xdeadbeefu);
@@ -36540,33 +36547,41 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     code.push_back(EncodeSop1(0x13, 22, 20)); // Find the next set bit in the GPU worklist.
     code.push_back(EncodeSopc(0x07, 22, 193));
     const auto empty_exit = code.size(); code.push_back(0u);
-    if (masked) code.insert(code.end(), {EncodeSop2(0x0b, 28, 126, InlineU32(0)),
-                                        EncodeSop1(0x04, 126, 28)});
-    code.push_back(EncodeSopc(0x09, 22, 21));
-    if (masked) code.insert(code.end(), {
-        EncodeVop2(0x1c, 10, 253, 13), // SCC encoded as 0/1, OR per-lane done.
-        EncodeVopc(0xc5, InlineU32(0), 10),
-        EncodeSop2(0x15, 126, 28, 106)});
-    const auto range_exit = code.size(); code.push_back(0u);
+    size_t range_exit = 0;
+    if (!bitset) {
+      if (masked) code.insert(code.end(), {EncodeSop2(0x0b, 28, 126, InlineU32(0)),
+                                          EncodeSop1(0x04, 126, 28)});
+      code.push_back(EncodeSopc(0x09, 22, 21));
+      if (masked) code.insert(code.end(), {
+          EncodeVop2(0x1c, 10, 253, 13), // SCC encoded as 0/1, OR per-lane done.
+          EncodeVopc(0xc5, InlineU32(0), 10),
+          EncodeSop2(0x15, 126, 28, 106)});
+      range_exit = code.size(); code.push_back(0u);
+    }
     code.insert(code.end(), {EncodeSop2(0x26, 23, 22, 255), stride,
-                            EncodeSop2(0x02, 23, 23, 255), offset,
-                            EncodeSopc(0x0d, 22, InlineU32(0))});
-    const auto skip_first = code.size(); code.push_back(0u);
-    code.insert(code.end(), {
-                            EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
+                            EncodeSop2(0x02, 23, 23, 255), offset});
+    size_t skip_first = 0;
+    if (!bitset) {
+      code.push_back(EncodeSopc(0x0d, 22, InlineU32(0)));
+      skip_first = code.size(); code.push_back(0u);
+    }
+    code.insert(code.end(), {EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
                             EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
                             EncodeVop2(0x03, 0, Vgpr(4), 0)});
-    code[skip_first] = EncodeSopp(0x05, code.size() - skip_first - 1u);
-    // The second descriptor is reached through both sides of the optional first sample.
-    code.insert(code.end(), {EncodeSop2(0x02, 23, 23, InlineU32(32)),
-                            EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
-                            EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
-                            EncodeVop2(0x03, 0, Vgpr(4), 0),
-                            EncodeSop2(0x1e, 24, InlineU32(1), 22),
+    if (!bitset) {
+      code[skip_first] = EncodeSopp(0x05, code.size() - skip_first - 1u);
+      // Both sides of the optional first sample reach the second descriptor.
+      code.insert(code.end(), {EncodeSop2(0x02, 23, 23, InlineU32(32)),
+                              EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
+                              EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
+                              EncodeVop2(0x03, 0, Vgpr(4), 0)});
+    }
+    code.insert(code.end(), {EncodeSop2(0x1e, 24, InlineU32(1), 22),
                             EncodeSop2(0x14, 20, 20, 24)});
     code.push_back(EncodeSopp(0x02, loop - code.size() - 1u));
     code[empty_exit] = EncodeSopp(0x04, code.size() - empty_exit - 1u);
-    code[range_exit] = EncodeSopp(masked ? 0x08 : 0x05, code.size() - range_exit - 1u);
+    if (!bitset) code[range_exit] =
+        EncodeSopp(masked ? 0x08 : 0x05, code.size() - range_exit - 1u);
     code.push_back(EncodeSop1(0x04, 126, 30));
     code.push_back(EncodeSop2(0x26, 25, 44, InlineU32(lanes)));
     code.push_back(EncodeVop2(0x25, 30, 25, 13));
@@ -36574,10 +36589,13 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     code.insert(code.end(), {EncodeMimg0(0x08, 1), EncodeMimg1(0, 30, 8, 0)});
     AppendEnd(&code);
     test.opcodes = {O::S_LSHR_B32, O::S_LOAD_DWORD, O::V_MOV_B32, O::S_FF1_I32_B32,
-        O::S_CMP_LG_U32, O::S_CMP_GE_U32, O::S_CBRANCH_SCC0, O::S_CBRANCH_SCC1,
-        O::S_MUL_I32, O::S_ADD_I32, O::S_BITCMP1_B32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
+        O::S_CMP_LG_U32, O::S_CBRANCH_SCC0,
+        O::S_MUL_I32, O::S_ADD_I32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
         O::V_ADD_F32, O::S_LSHL_B32, O::S_ANDN2_B32, O::S_BRANCH,
         O::IMAGE_STORE, O::S_ENDPGM};
+    if (bitset) test.opcodes.insert(test.opcodes.end(), {O::S_AND_B32, O::S_BFE_U32});
+    else test.opcodes.insert(test.opcodes.end(), {O::S_CMP_GE_U32, O::S_CBRANCH_SCC1,
+                                                O::S_BITCMP1_B32});
     if (masked) test.opcodes.insert(test.opcodes.end(), {O::S_CSELECT_B64,
         O::V_OR_B32, O::V_CMP_NE_U32, O::S_ANDN2_B64, O::S_CBRANCH_EXECZ});
     test.opcodes.insert(test.opcodes.end(), {O::S_MOV_B64, O::V_ADD_NC_U32});
@@ -36587,7 +36605,7 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
           return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
         });
     Require(test.name, "bounded descriptor rows",
-            count == 0u ? sampled_count <= 2u : sampled_count == count * 2u,
+            rows == 0u ? sampled_count <= members : sampled_count == rows * members,
             "the runtime count lost a row or probed record padding");
     std::vector<VulkanHarness::Image> images(compiled.program.info.images.size());
     for (u32 resource = 0; resource < images.size(); ++resource) {
@@ -36606,9 +36624,10 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, &storage, nullptr, sampler, images);
     std::vector<u32> expected(4u * lanes, 0u);
     if (count != 0u) {
-      expected[0] = std::bit_cast<u32>(count == 3 ? 44.0f : 11.0f);
-      expected[lanes] = std::bit_cast<u32>(20.0f);
-      expected[2u * lanes] = std::bit_cast<u32>(11.0f);
+      expected[0] = std::bit_cast<u32>(bitset ? (count == 3 ? 4.0f : 1.0f)
+                                                    : (count == 3 ? 44.0f : 11.0f));
+      expected[lanes] = std::bit_cast<u32>(bitset ? 2.0f : 20.0f);
+      expected[2u * lanes] = std::bit_cast<u32>(bitset ? 1.0f : 11.0f);
     }
     CompareWords(test, "GPU worklist, guarded count and image writes", expected,
                  vulkan.ReadImage(test.name, &storage));
