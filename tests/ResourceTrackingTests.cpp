@@ -564,11 +564,15 @@ void TestGuardedDirectImageTable() {
   enum class Guard {
     Nonzero, SccNonZero, Plain, Zero, Unrelated, Bypass, ExecZero, VccZero,
     Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane,
-    BoundDiamond, BoundBranchSpecific, BoundMismatched
+    BoundDiamond, BoundBranchSpecific, BoundMismatched,
+    BoundExec, BoundExecUnguarded, BoundExecMismatched, BoundExecAnd, BoundExecUnprovenActive
   };
   const auto make_plan = [](Guard guard) {
     const bool bounded = guard >= Guard::Bounded;
+    const bool exec_bound = guard >= Guard::BoundExec;
     const bool bypass = guard == Guard::Bypass || guard == Guard::BoundBypass;
+    const uint32_t table_offset = exec_bound ? 672u : bounded ? 3696u : 344u;
+    const uint32_t table_stride = exec_bound ? 784u : bounded ? 272u : 32u;
     Fixture fixture(bounded ? ShaderType::Compute : ShaderType::Pixel);
     fixture.program.wave_size = 64u;
     auto *entry = fixture.block;
@@ -592,15 +596,30 @@ void TestGuardedDirectImageTable() {
       limit = fixture.Emit(ValueOpcode::LoadAddressU32,
           {srt, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(memory, 0x10));
     }
-    const auto kind = guard == Guard::ExecZero || guard == Guard::BoundAnyLane
+    const auto kind = guard == Guard::ExecZero || guard == Guard::BoundAnyLane || exec_bound
                         ? CFG::BranchCondition::ExecZero
                     : guard == Guard::VccZero ? CFG::BranchCondition::VccZero
                                              : CFG::BranchCondition::SccZero;
     Value condition;
+    Value active(true);
     if (bounded) {
       condition = guard == Guard::BoundMissing ? Value(false) : fixture.Emit(
           ValueOpcode::UGreaterThanEqual32,
           {guard == Guard::BoundUnrelated ? fixture.UserData(2) : key, limit});
+      if (exec_bound) {
+        const auto previous = fixture.Emit(ValueOpcode::INotEqual32, {varying, Value(2u)});
+        const auto encoded = fixture.Emit(ValueOpcode::SelectU32, {condition, Value(1u), Value(0u)});
+        const auto stopped = fixture.Emit(guard == Guard::BoundExecAnd
+            ? ValueOpcode::BitwiseAnd32 : ValueOpcode::BitwiseOr32, {encoded, varying});
+        const auto retained = fixture.Emit(ValueOpcode::SelectU32,
+            {previous, stopped, Value(0u)});
+        const auto vcc = fixture.Emit(ValueOpcode::LogicalAnd, {previous,
+            fixture.Emit(ValueOpcode::INotEqual32, {retained, Value(0u)})});
+        const auto remaining = fixture.Emit(ValueOpcode::LogicalNot, {vcc});
+        active = guard == Guard::BoundExecUnprovenActive ? remaining
+            : fixture.Emit(ValueOpcode::LogicalAnd, {previous, remaining});
+        condition = fixture.Emit(ValueOpcode::LogicalNot, {active});
+      }
     } else {
       condition = fixture.Emit(ValueOpcode::INotEqual32,
           {Value(0u), guard == Guard::Unrelated ? fixture.UserData(2) : mask});
@@ -626,7 +645,7 @@ void TestGuardedDirectImageTable() {
     fixture.program.blocks[4]->terminator = {
         .kind = bypass ? CFG::TerminatorKind::Branch : CFG::TerminatorKind::Return,
         .true_block = fixture.program.blocks[3u]};
-    if (guard == Guard::BoundDiamond) {
+    if (guard == Guard::BoundDiamond || exec_bound) {
       middle->condition = fixture.Emit(ValueOpcode::IEqual32,
           {mask, Value(1u)});
       middle->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
@@ -668,9 +687,9 @@ void TestGuardedDirectImageTable() {
     fixture.block = sample;
     if (!bounded) key = fixture.Emit(ValueOpcode::FindILsb32, {mask});
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
-        {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(272u)})
+        {bounded ? fixture.Emit(ValueOpcode::IMul32, {key, Value(table_stride)})
                  : fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}),
-         Value(bounded ? 3696u : 344u)});
+         Value(table_offset)});
     std::array<Value, 8> words;
     for (uint32_t group = 0; group < 2u; ++group) {
       // Separate equivalent pointer handles mirror the two scalar x4 loads.
@@ -692,8 +711,14 @@ void TestGuardedDirectImageTable() {
     MemoryInfo memory;
     memory.kind = ResourceKind::Image;
     memory.image_dimension = Decoder::ImageDimension::Dim2D;
-    fixture.Emit(ValueOpcode::ImageSampleRaw, {image, sampler, fixture.ImageAddress(), Value(true)},
+    fixture.Emit(ValueOpcode::ImageSampleRaw, {image, sampler, fixture.ImageAddress(), active},
                  fixture.AddMemory(memory, 0x128));
+    if (guard == Guard::BoundExecUnguarded || guard == Guard::BoundExecMismatched) {
+      const auto other_active = guard == Guard::BoundExecUnguarded ? Value(true)
+          : fixture.Emit(ValueOpcode::ULessThan32, {key, fixture.UserData(2)});
+      fixture.Emit(ValueOpcode::ImageSampleRaw,
+          {image, sampler, fixture.ImageAddress(), other_active}, fixture.AddMemory(memory, 0x12c));
+    }
     if (bounded) {
       const auto output = fixture.Image({Value(0x8000u),
           Value(static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u),
@@ -705,12 +730,26 @@ void TestGuardedDirectImageTable() {
       fixture.Emit(ValueOpcode::ImageWrite, {output, fixture.ImageAddress(), texel, Value(true)},
                    fixture.AddMemory(memory, 0x130));
     }
+    if (exec_bound) ConstantPropagationPass(fixture.program.blocks);
+    if (guard == Guard::BoundExec) {
+      std::vector<const Inst *> pending{active.ResolveInstruction()};
+      for (size_t index = 0; index < pending.size(); ++index) {
+        const auto *inst = pending[index];
+        Check(inst->GetOpcode() != ValueOpcode::SelectU32 &&
+                  inst->GetOpcode() != ValueOpcode::BitwiseOr32,
+              "EXEC bound retained its integer Boolean encoding");
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+          const auto *operand = inst->Arg(arg).Resolve().TryInstruction();
+          if (operand != nullptr && std::ranges::find(pending, operand) == pending.end())
+            pending.push_back(operand);
+        }
+      }
+    }
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
     Check(indirect && !indirect->selector.has_value() &&
-              indirect->table_offset == (bounded ? 3696u : 344u) &&
-              indirect->table_stride == (bounded ? 272u : 32u) &&
+              indirect->table_offset == table_offset && indirect->table_stride == table_stride &&
               (bounded ? !indirect->key_count.IsEmpty()
                        : indirect->key_count.Resolve() == Value(32u)) &&
               fixture.program.descriptor_sources[indirect->table_source].dword_count == 2u,
@@ -724,7 +763,9 @@ void TestGuardedDirectImageTable() {
   for (const auto guard : {Guard::Zero, Guard::Unrelated, Guard::Bypass,
                            Guard::ExecZero, Guard::VccZero, Guard::BoundMissing,
                            Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane,
-                           Guard::BoundBranchSpecific, Guard::BoundMismatched}) {
+                           Guard::BoundBranchSpecific, Guard::BoundMismatched,
+                           Guard::BoundExecUnguarded, Guard::BoundExecMismatched,
+                           Guard::BoundExecAnd, Guard::BoundExecUnprovenActive}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
                "direct table accepted a selector without a dominating range guard");
   }
@@ -802,52 +843,55 @@ void TestGuardedDirectImageTable() {
         "batched descriptor read crossed the 48-bit endpoint");
 
   make_plan(Guard::Bounded);
-  auto bounded = make_plan(Guard::BoundDiamond);
-  Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
-        "bounded table with image writes omitted specialization read capture");
-  LinearTestMemory records;
-  constexpr uint32_t record_offset = 3696u, record_stride = 272u;
-  for (uint32_t key = 0; key < 2u; ++key) {
-    const auto word = (record_offset + key * record_stride) / 4u;
-    records.words[word] = 0x500u + key;
-    records.words[word + 1u] = static_cast<uint32_t>(
-        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
-    records.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
-        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  for (const auto guard : {Guard::BoundDiamond, Guard::BoundExec}) {
+    auto bounded = make_plan(guard);
+    Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
+          "bounded table with image writes omitted specialization read capture");
+    LinearTestMemory records;
+    const uint32_t record_offset = guard == Guard::BoundExec ? 672u : 3696u;
+    const uint32_t record_stride = guard == Guard::BoundExec ? 784u : 272u;
+    for (uint32_t key = 0; key < 2u; ++key) {
+      const auto word = (record_offset + key * record_stride) / 4u;
+      records.words[word] = 0x500u + key;
+      records.words[word + 1u] = static_cast<uint32_t>(
+          Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+      records.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+          (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+    }
+    user_data = {static_cast<uint32_t>(records.base), 0u};
+    runtime.userdata = &records;
+    records.fail_address = records.base + record_offset;
+    Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
+              snapshot.images.size() == 2u && records.descriptor_reads == 0u &&
+              std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t word) { return word == 0u; }),
+          "zero runtime count probed an unreachable descriptor row");
+    records.fail_address = UINT64_MAX;
+    records.words[1] = 2u;
+    records.descriptor_reads = 0u;
+    Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
+              snapshot.images.size() == 3u && records.descriptor_reads == 2u &&
+              snapshot.images[0].dwords[0] == 0x500u && snapshot.images[2].dwords[0] == 0x501u,
+          "bounded interleaved table did not read precisely its two descriptor rows");
+    const auto captured = [&](uint64_t address, uint64_t size) {
+      return std::ranges::any_of(snapshot.specialization_reads, [&](const auto &read) {
+        return read.first <= address && address - read.first <= read.second &&
+               size <= read.second - (address - read.first);
+      });
+    };
+    Check(captured(records.base + 4u, 4u) &&
+              captured(records.base + record_offset, 32u) &&
+              captured(records.base + record_offset + record_stride, 32u),
+          "bounded table omitted count or descriptor bytes from writable-alias validation");
+    records.fail_address = records.base + record_offset + record_stride + 28u;
+    Check(!MaterializeResources(bounded, runtime, snapshot, specialization),
+          "bounded interleaved table accepted an unreadable final descriptor word");
+    records.fail_address = UINT64_MAX;
+    records.words[1] = UINT32_MAX;
+    records.descriptor_reads = 0u;
+    Check(!MaterializeResources(bounded, runtime, snapshot, specialization) &&
+              records.descriptor_reads == 0u,
+          "unrepresentable table span was read before validating its count");
   }
-  user_data = {static_cast<uint32_t>(records.base), 0u};
-  runtime.userdata = &records;
-  records.fail_address = records.base + record_offset;
-  Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
-            snapshot.images.size() == 2u && records.descriptor_reads == 0u &&
-            std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t word) { return word == 0u; }),
-        "zero runtime count probed an unreachable descriptor row");
-  records.fail_address = UINT64_MAX;
-  records.words[1] = 2u;
-  records.descriptor_reads = 0u;
-  Check(MaterializeResources(bounded, runtime, snapshot, specialization) &&
-            snapshot.images.size() == 3u && records.descriptor_reads == 2u &&
-            snapshot.images[0].dwords[0] == 0x500u && snapshot.images[2].dwords[0] == 0x501u,
-        "bounded interleaved table did not read precisely its two descriptor rows");
-  const auto captured = [&](uint64_t address, uint64_t size) {
-    return std::ranges::any_of(snapshot.specialization_reads, [&](const auto &read) {
-      return read.first <= address && address - read.first <= read.second &&
-             size <= read.second - (address - read.first);
-    });
-  };
-  Check(captured(records.base + 4u, 4u) &&
-            captured(records.base + record_offset, 32u) &&
-            captured(records.base + record_offset + record_stride, 32u),
-        "bounded table omitted count or descriptor bytes from writable-alias validation");
-  records.fail_address = records.base + record_offset + record_stride + 28u;
-  Check(!MaterializeResources(bounded, runtime, snapshot, specialization),
-        "bounded interleaved table accepted an unreadable final descriptor word");
-  records.fail_address = UINT64_MAX;
-  records.words[1] = UINT32_MAX;
-  records.descriptor_reads = 0u;
-  Check(!MaterializeResources(bounded, runtime, snapshot, specialization) &&
-            records.descriptor_reads == 0u,
-        "unrepresentable table span was read before validating its count");
 }
 
 void TestBoundedComputeImageLoop() {

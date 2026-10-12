@@ -1656,9 +1656,10 @@ private:
 		const auto op = test->GetOpcode();
 		if (op == ValueOpcode::LogicalNot)
 			return UnsignedBound(test->Arg(0), value, !positive);
-		if (op == ValueOpcode::LogicalAnd && positive) {
-			const auto left = UnsignedBound(test->Arg(0), value);
-			return left.IsEmpty() ? UnsignedBound(test->Arg(1), value) : left;
+		if ((op == ValueOpcode::LogicalAnd && positive) ||
+		    (op == ValueOpcode::LogicalOr && !positive)) {
+			const auto left = UnsignedBound(test->Arg(0), value, positive);
+			return left.IsEmpty() ? UnsignedBound(test->Arg(1), value, positive) : left;
 		}
 		if ((positive ? op == ValueOpcode::ULessThan32 : op == ValueOpcode::UGreaterThanEqual32) &&
 		    EquivalentValue(m_program, test->Arg(0), value)) return test->Arg(1);
@@ -1682,6 +1683,24 @@ private:
 			return EquivalentValue(m_program, candidate, bound);
 		});
 		return guarded ? bound : Value {};
+	}
+
+	Value UnsignedImageBound(Value key, const Inst& handle) const {
+		Value bound;
+		for (const auto& use: handle.Uses()) {
+			const auto& image = *use.user;
+			const auto op = image.GetOpcode();
+			if (use.operand != 0u || (op != ValueOpcode::ImageSampleRaw &&
+			    op != ValueOpcode::ImageGatherRaw && op != ValueOpcode::ImageRead)) return {};
+			// The image's own EXEC predicate proves the range for every accessing lane;
+			// an EXEC-nonzero branch alone only proves that some lane is active.
+			const auto candidate = UnsignedBound(image.Arg(image.NumArgs() - 1u), key);
+			if (candidate.IsEmpty() ||
+			    !ValidateRuntimeValue(m_program, candidate, RuntimeValueType::Integer)) return {};
+			if (bound.IsEmpty()) bound = candidate;
+			else if (!EquivalentValue(m_program, candidate, bound)) return {};
+		}
+		return bound;
 	}
 
 	Value SharedLoadBound(Value value, Value active) {
@@ -2417,7 +2436,8 @@ private:
 			// the GPU key using the same plan as other indirect image reads.
 			plan.retain_reads |= table_source.dword_count == 4u;
 		} else if (table_source.dword_count == 2u) {
-			const auto guarded_count = UnsignedBoundOnEntry(key, handle.Parent());
+			auto guarded_count = UnsignedBoundOnEntry(key, handle.Parent());
+			if (guarded_count.IsEmpty()) guarded_count = UnsignedImageBound(key, handle);
 			const auto* selector = key.Resolve().TryInstruction();
 			const bool bitscan = guarded_count.IsEmpty() && selector != nullptr &&
 			    selector->GetOpcode() == ValueOpcode::FindILsb32 &&
