@@ -8240,9 +8240,11 @@ public:
       texture_cache.UnmapMemory(ms_depth_desc.info.data.address,
                                 ms_depth_desc.info.data.size);
       Require(name, "depth unmap proxy retirement",
-              !texture_cache.FindImageFromRange(base + second_stencil_offset,
-                                                ms_stencil_size, false),
-              "unmapping depth retained its re-associated stencil proxy");
+              !texture_cache.FindImageFromRange(base + ms_stencil_offset,
+                                                ms_stencil_size, false) &&
+                  !texture_cache.FindImageFromRange(base + second_stencil_offset,
+                                                    ms_stencil_size, false),
+              "unmapping depth retained one of its stencil proxies");
 
       auto reused_stencil_color = MakeLinearDesc(
           base + 0x2200000, 0x40000, vk::Format::eR8Unorm,
@@ -8297,8 +8299,31 @@ public:
               ReadCachedTexel(name, context, reused_stencil_color_id, {},
                               {4, 1, 1}) == std::vector<u32>{0xffffffffu},
               "stencil address reuse changed the native R8 clear contents");
+      auto successor_depth = reused_stencil_depth;
+      successor_depth.info.data.address += successor_depth.info.data.size;
+      const auto successor_depth_id = texture_cache.FindImage(successor_depth);
+      TextureCacheTestAccess::AssociateStencil(
+          texture_cache, successor_depth_id, successor_depth.info.stencil);
       texture_cache.UnmapMemory(reused_stencil_depth.info.data.address,
                                 reused_stencil_depth.info.data.size);
+      Require(name, "reparented stencil survives old depth retirement",
+              !TextureCacheTestAccess::Contains(texture_cache,
+                                                reused_stencil_depth_id) &&
+                  TextureCacheTestAccess::Contains(texture_cache,
+                                                   successor_depth_id) &&
+                  texture_cache.FindImageFromRange(
+                      successor_depth.info.stencil.address,
+                      successor_depth.info.stencil.size, false) ==
+                      reused_stencil_proxy &&
+                  texture_cache.GetImage(reused_stencil_proxy).depth_id ==
+                      successor_depth_id,
+              "retiring the previous depth owner removed its reparented proxy");
+      texture_cache.UnmapMemory(successor_depth.info.data.address,
+                                successor_depth.info.data.size);
+      Require(name, "reparented stencil retires with new depth",
+              !TextureCacheTestAccess::Contains(texture_cache,
+                                                reused_stencil_proxy),
+              "retiring the new depth owner retained its reparented proxy");
       texture_cache.UnmapMemory(reused_stencil_color.info.data.address,
                                 reused_stencil_color.info.data.size);
 
