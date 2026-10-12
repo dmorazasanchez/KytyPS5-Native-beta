@@ -125,7 +125,7 @@ struct Fixture {
                  Value(0u), Value(0u), Value(0u)});
   }
 
-  void PlanAndTrack() {
+  void PlanAndTrack(Libs::Graphics::ShaderStageInputInfo input = {}) {
     for (size_t index = 0; index < program.blocks.size(); ++index) {
       const auto condition = program.blocks[index]->condition;
       if (!condition.IsEmpty())
@@ -147,7 +147,7 @@ struct Fixture {
         Emit(ValueOpcode::ReferenceU32, {value}, 0, target);
       }
     }
-    TrackResources(program, {}, {});
+    TrackResources(program, {}, {}, input);
   }
 };
 
@@ -1910,6 +1910,285 @@ void TestScalarBufferSelectorDomain() {
             sparse.offsets == std::vector<uint64_t>{144u, 0x80000090u} &&
             snapshot.images.size() == 2u,
         "large V# bounds extended the native U32 domain or invented an OOB zero key");
+}
+
+void TestSharedAppendSelectorBounds() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  enum class Variant {
+    Valid, PayloadOob, MissingInit, InactiveInit, UnknownInit, DuplicateAtomic,
+    WrongAtomicGuard, UnguardedCandidate, WrongStep, WrongLocalIndex, Multiwave,
+    OuterReentry, InnerAppendCycle, EarlyCounterRead, WrongConsumerBound, ExtraWriter, CounterAlias,
+    PayloadWrap, CounterOob
+  };
+  const auto make_plan = [](Variant variant) {
+    Fixture fixture;
+    ShaderComputeInputInfo compute;
+    compute.threads_num[0] = 8u;
+    compute.threads_num[1] = variant == Variant::Multiwave ? 16u : 8u;
+    compute.threads_num[2] = 1u;
+    compute.lds_size_dwords = variant == Variant::PayloadOob ? 2u :
+                             variant == Variant::CounterOob ? 1u : 640u;
+    compute.host_subgroup_size = 32u;
+    fixture.program.wave_size = compute.wave_size = 64u;
+    const auto branch = [](Block *from, Block *to) {
+      from->AddBranch(to);
+      from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
+    };
+    const auto choose = [&](Block *from, Block *yes, Block *no, Value condition,
+                            CFG::BranchCondition kind) {
+      from->AddBranch(yes);
+      from->AddBranch(no);
+      from->condition = fixture.Emit(ValueOpcode::ConditionRef, {condition}, kind, from);
+      from->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                         .true_block = yes, .false_block = no};
+    };
+    const auto shared = [&](uint32_t offset) {
+      MemoryInfo memory;
+      memory.kind = ResourceKind::Lds;
+      memory.offset = offset;
+      return fixture.AddMemory(memory, 0x10u);
+    };
+    auto *entry = fixture.block;
+    auto *initialize = fixture.AddBlock();
+    auto *initialized = fixture.AddBlock();
+    const auto material = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                          fixture.UserData(2), fixture.UserData(3)});
+    const auto table = fixture.Address(fixture.UserData(4), fixture.UserData(5));
+    const auto counts = fixture.Address(fixture.UserData(6), fixture.UserData(7));
+    std::array<Value, 2> count;
+    for (uint32_t index = 0; index < count.size(); ++index) {
+      MemoryInfo memory;
+      memory.kind = ResourceKind::ScalarAddress;
+      memory.offset = index * 4u;
+      count[index] = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {counts, Value(0u), Value(0u), Value(true)}, fixture.AddMemory(memory, 0x20u));
+    }
+    const auto x = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+    const auto y = fixture.Emit(ValueOpcode::GetBuiltin,
+        {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(1u)});
+    const auto local = fixture.Emit(ValueOpcode::IAdd32,
+        {x, fixture.Emit(ValueOpcode::ShiftLeftLogical32, {y, Value(3u)})});
+    auto zero_lane = fixture.Emit(ValueOpcode::IEqual32, {local, Value(0u)});
+    if (variant == Variant::InactiveInit) zero_lane = Value(false);
+    if (variant == Variant::UnknownInit)
+      zero_lane = fixture.Emit(ValueOpcode::LogicalAnd,
+          {zero_lane, fixture.Emit(ValueOpcode::IEqual32, {fixture.UserData(8), Value(0u)})});
+    choose(entry, initialize, initialized, zero_lane, CFG::BranchCondition::ExecNonZero);
+    if (variant != Variant::MissingInit)
+      fixture.Emit(ValueOpcode::WriteSharedU32x2,
+          {Value(0u), Value(0u), Value(0u), zero_lane}, shared(0u), initialize);
+    branch(initialize, initialized);
+    Value final_counter;
+    if (variant == Variant::EarlyCounterRead)
+      final_counter = fixture.Emit(ValueOpcode::LoadSharedU32,
+          {Value(0u), Value(true)}, shared(0u), initialized);
+    auto *previous = initialized;
+    for (uint32_t list = 0; list < 2u; ++list) {
+      auto *header = fixture.AddBlock();
+      auto *cull = fixture.AddBlock();
+      auto *append = fixture.AddBlock();
+      auto *latch = fixture.AddBlock();
+      auto *exit = fixture.AddBlock();
+      branch(previous, header);
+      auto &batch = header->AppendNewInst(ValueOpcode::Phi);
+      batch.SetFlags(Type::U32);
+      const auto batch_valid = fixture.Emit(ValueOpcode::ULessThan32,
+          {Value(&batch), count[list]}, 0, header);
+      choose(header, cull, exit, batch_valid, CFG::BranchCondition::SccNonZero);
+      const auto local_candidate = variant == Variant::WrongLocalIndex
+          ? fixture.Emit(ValueOpcode::IAdd32, {local, x}, 0, cull) : local;
+      const auto candidate = fixture.Emit(ValueOpcode::IAdd32, {Value(&batch), local_candidate}, 0, cull);
+      const auto even = fixture.Emit(ValueOpcode::IEqual32,
+          {fixture.Emit(ValueOpcode::BitwiseAnd32, {candidate, Value(1u)}, 0, cull), Value(0u)}, 0, cull);
+      auto active = even;
+      if (variant != Variant::UnguardedCandidate) {
+        const auto candidate_valid = list == 0u
+            ? fixture.Emit(ValueOpcode::LogicalNot,
+                {fixture.Emit(ValueOpcode::ULessThanEqual32, {count[list], candidate}, 0, cull)}, 0, cull)
+            : fixture.Emit(ValueOpcode::ULessThan32, {candidate, count[list]}, 0, cull);
+        active = fixture.Emit(ValueOpcode::LogicalAnd,
+            {candidate_valid, even}, 0, cull);
+      }
+      choose(cull, append, latch, active, CFG::BranchCondition::ExecNonZero);
+      const auto atomic_flags = shared(list == 0u || variant == Variant::CounterAlias ? 4u : 0u);
+      const auto atomic_guard = variant == Variant::WrongAtomicGuard ? Value(true) : active;
+      const auto ordinal = fixture.Emit(ValueOpcode::SharedAtomicIAdd32,
+          {Value(0u), Value(1u), atomic_guard}, atomic_flags, append);
+      if (variant == Variant::DuplicateAtomic && list == 1u)
+        fixture.Emit(ValueOpcode::SharedAtomicIAdd32,
+            {Value(0u), Value(1u), active}, atomic_flags, append);
+      const auto address = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+          {fixture.Emit(ValueOpcode::SelectU32, {active, ordinal, Value(UINT32_MAX)}, 0, append), Value(2u)},
+          0, append);
+      const auto payload = fixture.Emit(ValueOpcode::SelectU32,
+          {active, candidate, Value(UINT32_MAX)}, 0, append);
+      const auto base = list == 0u ? 1032u : variant == Variant::PayloadWrap ? 0xfffffff8u : 8u;
+      fixture.Emit(ValueOpcode::WriteSharedU32, {address, payload, active}, shared(base), append);
+      if (variant == Variant::InnerAppendCycle && list == 1u) {
+        auto *repeat = fixture.AddBlock();
+        branch(append, repeat);
+        choose(repeat, append, latch, even, CFG::BranchCondition::ExecNonZero);
+      } else {
+        branch(append, latch);
+      }
+      const auto step = fixture.Emit(ValueOpcode::IAdd32,
+          {Value(&batch), Value(variant == Variant::WrongStep ? 32u : 64u)}, 0, latch);
+      branch(latch, header);
+      batch.AddPhiOperand(previous, Value(0u));
+      batch.AddPhiOperand(latch, step);
+      previous = exit;
+    }
+    if (variant == Variant::ExtraWriter)
+      fixture.Emit(ValueOpcode::WriteSharedU32,
+          {Value(0u), Value(UINT32_MAX), Value(true)}, shared(12u), previous);
+    if (final_counter.IsEmpty())
+      final_counter = fixture.Emit(ValueOpcode::LoadSharedU32,
+          {Value(0u), Value(true)}, shared(0u), previous);
+    auto *header = fixture.AddBlock();
+    auto *body = fixture.AddBlock();
+    auto *latch = fixture.AddBlock();
+    auto *exit = fixture.AddBlock();
+    branch(previous, header);
+    auto &index = header->AppendNewInst(ValueOpcode::Phi);
+    index.SetFlags(Type::U32);
+    const auto in_list = fixture.Emit(ValueOpcode::ULessThan32,
+        {Value(&index), variant == Variant::WrongConsumerBound ? count[1] : final_counter}, 0, header);
+    choose(header, body, exit, in_list, CFG::BranchCondition::VccNonZero);
+    fixture.block = body;
+    const auto selected = fixture.Emit(ValueOpcode::LoadSharedU32,
+        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {Value(&index), Value(2u)}), Value(true)}, shared(8u));
+    const auto offset32 = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {selected, Value(5u)});
+    const auto offset = fixture.Emit(ValueOpcode::ReadFirstLane,
+        {fixture.Emit(ValueOpcode::IAdd32,
+             {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {offset32, Value(2u)}), offset32}), Value(true)});
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarBuffer;
+    scalar.offset = 144u;
+    const auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
+        {material, offset}, fixture.AddMemory(scalar, 0x30u));
+    const auto record = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
+    std::array<Value, 8> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      scalar.kind = ResourceKind::ScalarAddress;
+      scalar.offset = word * 4u;
+      words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {table, record, Value(0u), Value(true)}, fixture.AddMemory(scalar, 0x40u));
+    }
+    MemoryInfo sample;
+    sample.kind = ResourceKind::Image;
+    sample.image_dimension = Decoder::ImageDimension::Dim2D;
+    fixture.Emit(ValueOpcode::ImageSampleRaw,
+        {fixture.Image(words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
+         fixture.ImageAddress(), Value(true)}, fixture.AddMemory(sample, 0x50u));
+    branch(body, latch);
+    const auto next = fixture.Emit(ValueOpcode::IAdd32, {Value(&index), Value(1u)}, 0, latch);
+    branch(latch, header);
+    index.AddPhiOperand(previous, Value(0u));
+    index.AddPhiOperand(latch, next);
+    if (variant == Variant::OuterReentry) branch(exit, initialized);
+    fixture.PlanAndTrack({.compute = &compute});
+    const auto &indirect = fixture.program.descriptor_sources[
+        fixture.program.info.images[0].source].indirect_descriptor;
+    const bool proven = variant == Variant::Valid || variant == Variant::PayloadOob;
+    Check(indirect && indirect->selector && indirect->selector->offset == 144u &&
+              indirect->selector->stride == (proven ? 160u : 32u) &&
+              indirect->key_count.IsEmpty() != proven &&
+              (proven ? indirect->selector_first == Value(0u) : indirect->selector_first.IsEmpty()),
+          proven ? "shared append provenance did not narrow the material record domain" :
+                   "shared append provenance accepted an unproved initialization, bound or ordering");
+    return ExtractResourcePlan(fixture.program);
+  };
+  auto plan = make_plan(Variant::Valid);
+  make_plan(Variant::PayloadOob); // Ordinary LDS reads beyond the allocation return zero.
+  for (const auto variant : {Variant::MissingInit, Variant::InactiveInit, Variant::UnknownInit,
+      Variant::DuplicateAtomic, Variant::WrongAtomicGuard, Variant::UnguardedCandidate,
+      Variant::WrongStep, Variant::WrongLocalIndex, Variant::Multiwave, Variant::OuterReentry,
+      Variant::InnerAppendCycle, Variant::EarlyCounterRead, Variant::WrongConsumerBound, Variant::ExtraWriter,
+      Variant::CounterAlias, Variant::PayloadWrap, Variant::CounterOob})
+    make_plan(variant);
+
+  LinearTestMemory memory;
+  for (uint32_t index = 0; index < 8u; ++index) memory.words[(144u + 160u * index) / 4u] = index + 1u;
+  memory.words[176u / 4u] = 0xdeadbeefu; // A different field reachable only through unbounded U32 wrap.
+  for (uint32_t key = 0; key <= 8u; ++key) {
+    const auto word = (0x1000u + key * 32u) / 4u;
+    memory.words[word] = 0x100u + key;
+    memory.words[word + 1u] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    memory.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  }
+  std::array<uint32_t, 9> user_data {0x1000u, 160u << 16u, 8u, 0u, 0x2000u, 0u, 0x1800u, 0u, 0u};
+  const SrtRuntime runtime {.user_data = user_data, .read_memory = ReadLinearTestMemory,
+      .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  memory.fail_address = memory.watched_address = 0x1090u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 1u && memory.descriptor_reads == 0u && memory.watched_reads == 0u,
+        "empty shared append lists probed material keys or image descriptors");
+  memory.fail_address = 0x10b0u;
+  for (const auto counts : {std::array{1u, 2u}, std::array{3u, 1u}, std::array{1u, 1u}, std::array{0u, 0u}}) {
+    memory.words[0x800u / 4u] = counts[0];
+    memory.words[0x804u / 4u] = counts[1];
+    const auto expected = std::max(counts[0], counts[1]);
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.images.size() == std::max(expected, 1u) &&
+              (expected == 0u || snapshot.images.back().dwords[0] == 0x100u + expected),
+          "shared append union bound or refreshed runtime counts selected stale material keys");
+  }
+  memory.words[0x800u / 4u] = 1u;
+  memory.words[0x804u / 4u] = 2u;
+  memory.words[(144u + 160u) / 4u] = 4u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 2u && snapshot.images.back().dwords[0] == 0x104u,
+        "shared append materialization reused stale selector contents");
+  user_data[2] = 1u;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
+        "shared append materialization accepted a range outside its V# bounds");
+  user_data[2] = 8u;
+  for (const auto too_large : {65537u, UINT32_MAX}) {
+    for (uint32_t list = 0; list < 2u; ++list) {
+      memory.words[0x800u / 4u] = memory.words[0x804u / 4u] = 0u;
+      memory.words[0x800u / 4u + list] = too_large;
+      memory.watched_reads = 0u;
+      Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.watched_reads == 0u,
+            "inactive consumer hid an oversized producer or wrapped append address");
+    }
+  }
+
+  struct BoundaryMemory { uint32_t keys_read = 0; } boundary;
+  const auto read_boundary = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<BoundaryMemory *>(userdata);
+    std::ranges::fill(words, 0u);
+    if (words.size() == 1u && (address == 0x40000000u || address == 0x40000004u)) {
+      words[0] = address == 0x40000000u ? 65536u : 0u;
+      return true;
+    }
+    if (words.size() == 1u && address >= 0x1090u &&
+        (address - 0x1090u) % 160u == 0u && (address - 0x1090u) / 160u < 65536u) {
+      words[0] = 1u;
+      ++memory.keys_read;
+      return true;
+    }
+    if (words.size() != 8u || address != 0x50000020u) return false;
+    words[0] = 0x101u;
+    words[1] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    words[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+    return true;
+  };
+  user_data[2] = 65536u;
+  user_data[4] = 0x50000000u;
+  user_data[6] = 0x40000000u;
+  Check(MaterializeResources(plan,
+            {.user_data = user_data, .read_memory = read_boundary, .userdata = &boundary,
+             .read_specialization_memory = read_boundary}, snapshot, specialization) &&
+            boundary.keys_read == 65536u && snapshot.images.size() == 1u &&
+            snapshot.images[0].dwords[0] == 0x101u,
+        "shared append materialization rejected its exact nonwrapping probe limit");
 }
 
 void TestComputeBufferFill() {
@@ -4131,6 +4410,7 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
+    Run("shared append selector bounds", TestSharedAppendSelectorBounds);
     Run("descending image range", TestDescendingImageRange);
     Run("mixed indirect image samplers", TestMixedIndirectImageSamplers);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
