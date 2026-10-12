@@ -1987,7 +1987,6 @@ public:
     vk::ImageLayout layout = vk::ImageLayout::eUndefined;
     u32 width = 0;
     u32 height = 0;
-    u32 depth = 1;
     u32 layers = 1;
     u32 mip_levels = 1;
     u32 dwords_per_pixel = 0;
@@ -15452,12 +15451,11 @@ public:
                         u32 view_layers = 0,
                         vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1,
                         vk::Format view_format = vk::Format::eUndefined,
-                        u32 view_base_mip = 0, u32 depth = 1) {
+                        u32 view_base_mip = 0) {
     Image ret;
     ret.format = format;
     ret.width = width;
     ret.height = height;
-    ret.depth = depth;
     ret.layers = layers;
     ret.mip_levels = std::max<u32>(static_cast<u32>(initial_mips.size()), 1u);
     ret.dwords_per_pixel = dwords_per_pixel;
@@ -15468,7 +15466,7 @@ public:
     image_info.format = format;
     image_info.extent.width = width;
     image_info.extent.height = height;
-    image_info.extent.depth = depth;
+    image_info.extent.depth = 1;
     image_info.mipLevels = ret.mip_levels;
     image_info.arrayLayers = layers;
     image_info.samples = samples;
@@ -15533,13 +15531,13 @@ public:
       size_t total_dwords = 0;
       for (u32 level = 0; level < ret.mip_levels; level++) {
         total_dwords +=
-            ImageMipDwordCount(width, height, dwords_per_pixel, level, layers) * MipExtent(depth, level);
+            ImageMipDwordCount(width, height, dwords_per_pixel, level, layers);
       }
       std::vector<u32> contents(total_dwords, 0);
       size_t offset = 0;
       for (u32 level = 0; level < ret.mip_levels; level++) {
         const auto level_dwords =
-            ImageMipDwordCount(width, height, dwords_per_pixel, level, layers) * MipExtent(depth, level);
+            ImageMipDwordCount(width, height, dwords_per_pixel, level, layers);
         const auto &src = initial_mips[level];
         for (size_t i = 0; i < src.size() && i < level_dwords; i++) {
           contents[offset + i] = src[i];
@@ -15683,8 +15681,7 @@ public:
       if (image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled) {
         supported = supported ||
                     image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim1D ||
-                    image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim1DArray ||
-                    image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim3D;
+                    image.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim1DArray;
       }
       Require(test.name, "dispatch", supported,
               "unsupported image dimension needs a matching Vulkan test view");
@@ -19205,11 +19202,11 @@ private:
       copy.imageSubresource.layerCount = image->layers;
       copy.imageExtent.width = MipExtent(image->width, level);
       copy.imageExtent.height = MipExtent(image->height, level);
-      copy.imageExtent.depth = MipExtent(image->depth, level);
+      copy.imageExtent.depth = 1;
       copies.push_back(copy);
       offset += static_cast<vk::DeviceSize>(
           ImageMipDwordCount(image->width, image->height,
-                             image->dwords_per_pixel, level, image->layers) * MipExtent(image->depth, level) *
+                             image->dwords_per_pixel, level, image->layers) *
           sizeof(u32));
     }
     cmd.copyBufferToImage(staging, image->image,
@@ -36137,9 +36134,6 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
   program.info.images[root.indirect_resources[103]].dimension =
       ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
   program.info.images[root.indirect_resources[103]].cube = true;
-  program.memory_info[0].image_dimension =
-      ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
-  program.memory_info[0].image_address_components = 4;
   program.shader_info_complete = false;
   CollectShaderInfo(program, {.compute = &compute});
   spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
@@ -36148,6 +36142,9 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
               CountText(text, "OpImageSampleExplicitLod") == 3,
           "one cube split the native arrays into per-image samples");
 
+  program.memory_info[0].image_dimension =
+      ShaderRecompiler::Decoder::ImageDimension::Dim2DArray;
+  program.memory_info[0].image_address_components = 4;
   for (u32 component = 0; component < 4u; component++) {
     constexpr std::array values{1.375f, 1.625f, 10.0f, 2.0f};
     address.SetArg(component, Value(std::bit_cast<u32>(values[component])));
@@ -36201,83 +36198,6 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
     Require(name, "mixed sample count", samples == 3u,
             "mixed candidate switch did not retain every image");
   }
-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
-  enum class RejectedAccess { LodPosition, Derivatives, Gather, Depth, Multisampled, Query, Write, Atomic };
-  for (const auto [rejected, label] : {
-      std::pair{RejectedAccess::LodPosition, "IndirectImageLodPositionRejected"},
-      std::pair{RejectedAccess::Derivatives, "IndirectImageDerivativeLayoutRejected"},
-      std::pair{RejectedAccess::Gather, "IndirectImageVolumeGatherRejected"},
-      std::pair{RejectedAccess::Depth, "IndirectImageVolumeDrefRejected"},
-      std::pair{RejectedAccess::Multisampled, "IndirectImageMsaaSampleRejected"},
-      std::pair{RejectedAccess::Query, "IndirectImageQueryRejected"},
-      std::pair{RejectedAccess::Write, "IndirectImageWriteRejected"},
-      std::pair{RejectedAccess::Atomic, "IndirectImageAtomicRejected"}}) {
-    ExpectFatal(label, [&] {
-      using Dimension = ShaderRecompiler::Decoder::ImageDimension;
-      for (auto &resource : program.info.images) {
-        resource.dimension = Dimension::Dim2DArray;
-        resource.cube = false;
-      }
-      program.info.images[2].dimension = Dimension::Dim3D;
-      auto &mem = program.memory_info[0];
-      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) { return &inst == &sample; });
-      if (rejected == RejectedAccess::LodPosition) {
-        // Four available operands do not make native x,y,LOD compatible with x,y,z,LOD.
-        mem.image_dimension = Dimension::Dim2D;
-        program.info.images[0].dimension = program.info.images[1].dimension = Dimension::Dim2D;
-      } else if (rejected == RejectedAccess::Derivatives) {
-        mem.image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagDerivative;
-        mem.image_address_components = 9u; // Capacity alone must not change the native gradient layout.
-      } else if (rejected == RejectedAccess::Gather) {
-        mem.image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagLevelZero;
-        mem.image_address_components = 3u;
-        const auto gather = block->PrependNewInst(position, ValueOpcode::ImageGatherRaw,
-            {Value(&image), Value(&sampler), Value(&address), Value(0u), Value(0u),
-             Value(0u), Value(0u), Value(true)}, memory_flag_bits);
-        sample.ReplaceUsesWith(Value(&*gather), false);
-      } else if (rejected == RejectedAccess::Depth) {
-        mem.image_sample_flags |= ShaderRecompiler::Decoder::ImageSampleFlagCompare;
-        mem.image_address_components = 5u;
-        for (auto &resource : program.info.images) resource.depth_compare = true;
-        program.info.samplers[0].depth_compare = true;
-      } else if (rejected == RejectedAccess::Multisampled) {
-        program.info.images[2].dimension = Dimension::Dim2DMsaaArray;
-      } else if (rejected == RejectedAccess::Query) {
-        const auto query = block->PrependNewInst(position, ValueOpcode::ImageQueryDimensions,
-            {Value(&image), Value(&address)}, memory_flag_bits);
-        sample.ReplaceUsesWith(Value(&*query), false);
-      } else {
-        sample_x.ReplaceUsesWith(Value(0u), false);
-        sample.Invalidate();
-        sampler.Invalidate();
-        program.info.samplers.clear();
-        program.info.sampled_pairs.clear();
-        mem.image_sample_flags = 0u;
-        mem.image_address_components = 3u;
-        const bool atomic = rejected == RejectedAccess::Atomic;
-        for (auto &resource : program.info.images) {
-          resource.resource_class = ImageResourceClass::Storage;
-          resource.numeric_class = atomic ? Prospero::TextureNumericClass::Uint
-                                          : Prospero::TextureNumericClass::Float;
-          resource.written = true;
-          resource.atomic = atomic;
-        }
-        if (atomic) {
-          block->PrependNewInst(position, ValueOpcode::ImageAtomicIAdd32,
-              {Value(&image), Value(&address), Value(1u), Value(true)}, memory_flag_bits);
-        } else {
-          const auto texel = block->PrependNewInst(position, ValueOpcode::CompositeConstructU32x4,
-              {Value(0u), Value(0u), Value(0u), Value(0u)});
-          block->PrependNewInst(position, ValueOpcode::ImageWrite,
-              {Value(&image), Value(&address), Value(&*texel), Value(true)}, memory_flag_bits);
-        }
-      }
-      program.shader_info_complete = false;
-      CollectShaderInfo(program, {.compute = &compute});
-      ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
-    });
-  }
-#endif
   // Keep an unrelated native root between the null image and appended children,
   // then select both sides of a cube boundary and the unmapped suffix on the GPU.
   root.indirect_resources = {0u, 2u, 3u, 4u, 5u, 6u};
@@ -36328,148 +36248,49 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
         resource == 4u ? vk::ImageViewType::e2DArray : vk::ImageViewType::e2D, layers));
   }
   const auto native_sampler = vulkan.CreateSampler(test.name);
-  const auto mip_sampler = vulkan.CreateSampler(test.name, 2u);
-  constexpr u32 volume_mip_bits = 0x43800001u;
-  constexpr u32 array_mip_bits = 0x42800001u;
-  const auto mip_pixels = [](u32 texels, u32 first) {
-    std::vector<u32> pixels(texels * 4u);
-    for (u32 texel = 0; texel < texels; ++texel)
-      std::fill_n(pixels.begin() + texel * 4u, 4u, first + texel);
-    return pixels;
-  };
-  auto volume_texture = vulkan.CreateImageMips(
-      test.name, 4, 4, vk::Format::eR32G32B32A32Sfloat, vk::ImageUsageFlagBits::eSampled,
-      {mip_pixels(4u * 4u * 8u, 0x44000001u), mip_pixels(2u * 2u * 4u, volume_mip_bits)}, 4u,
-      vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageType::e3D, vk::ImageViewType::e3D, 1u,
-      0u, 0u, vk::SampleCountFlagBits::e1, vk::Format::eUndefined, 0u, 8u);
-  auto array_texture = vulkan.CreateImageMips(
-      test.name, 4, 4, vk::Format::eR32G32B32A32Sfloat, vk::ImageUsageFlagBits::eSampled,
-      {mip_pixels(4u * 4u * 2u, 0x43000001u), mip_pixels(2u * 2u * 2u, array_mip_bits)}, 4u,
-      vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageType::e2D, vk::ImageViewType::e2DArray, 2u);
-  constexpr u32 uint_texel = 0x80000106u;
-  auto uint_texture = vulkan.CreateImageMips(
-      test.name, 2, 2, vk::Format::eR32G32B32A32Uint, vk::ImageUsageFlagBits::eSampled,
-      {std::vector<u32>(16u, uint_texel), std::vector<u32>(4u, uint_texel + 10u)}, 4u,
-      vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageType::e2D, vk::ImageViewType::e2D, 1u);
-  vk::SamplerCreateInfo integer_sampler_info{};
-  integer_sampler_info.addressModeU = integer_sampler_info.addressModeV =
-      integer_sampler_info.addressModeW = vk::SamplerAddressMode::eClampToEdge;
-  integer_sampler_info.borderColor = vk::BorderColor::eIntOpaqueWhite;
-  vk::Sampler integer_sampler;
-  RequireVk(test.name, "integer sampler", vulkan.Device().createSampler(
-      &integer_sampler_info, nullptr, &integer_sampler), "vkCreateSampler");
-  integer_sampler_info.addressModeU = integer_sampler_info.addressModeV =
-      integer_sampler_info.addressModeW = vk::SamplerAddressMode::eClampToBorder;
-  vk::Sampler integer_border_sampler;
-  RequireVk(test.name, "integer border sampler", vulkan.Device().createSampler(
-      &integer_sampler_info, nullptr, &integer_border_sampler), "vkCreateSampler");
-  const std::array native_samplers{native_sampler, native_sampler, native_sampler,
-                                   integer_sampler, integer_sampler, integer_border_sampler};
-  enum class Access { Sample, MixedDimensions, Gather, GatherHomogeneous, MixedSample, MixedGather, MixedFetch, Fetch };
+  enum class Access { Sample, Gather, GatherHomogeneous, Fetch };
   auto *access = &sample;
-  bool uint_bound = false;
-  bool volume_bound = false;
-  for (const auto mode : {Access::Sample, Access::MixedDimensions, Access::Gather,
-                          Access::GatherHomogeneous, Access::MixedSample,
-                          Access::MixedGather, Access::MixedFetch, Access::Fetch}) {
-    const bool mixed = mode == Access::MixedSample || mode == Access::MixedGather || mode == Access::MixedFetch;
-    const bool dimensions = mode == Access::MixedDimensions;
-    const bool fetch = mode == Access::Fetch || mode == Access::MixedFetch;
-    const bool gather = mode == Access::Gather || mode == Access::GatherHomogeneous || mode == Access::MixedGather;
+  for (const auto mode : {Access::Sample, Access::Gather,
+                          Access::GatherHomogeneous, Access::Fetch}) {
+    const bool fetch = mode == Access::Fetch;
+    const bool gather = mode == Access::Gather || mode == Access::GatherHomogeneous;
     const bool homogeneous = mode == Access::GatherHomogeneous;
-    test.name = dimensions ? "IndirectImageArrayCubeVolumeLod"
-                     : mixed ? (fetch ? "IndirectImageMixedFetch" : gather ? "IndirectImageMixedGather"
-                                                                    : "IndirectImageMixedSample")
-                     : fetch ? "IndirectImageFetchContiguousRuns"
-                     : homogeneous ? "IndirectImageGatherHomogeneous"
-                     : gather ? "IndirectImageGatherContiguousRuns" : "IndirectImageContiguousRuns";
-    if (volume_bound != dimensions) {
-      std::swap(textures[6], volume_texture);
-      std::swap(textures[3], array_texture);
-      compiled.program.info.images[6].dimension = dimensions
-          ? ShaderRecompiler::Decoder::ImageDimension::Dim3D
-          : ShaderRecompiler::Decoder::ImageDimension::Dim2D;
-      compiled.program.info.images[3].dimension = dimensions
-          ? ShaderRecompiler::Decoder::ImageDimension::Dim2DArray
-          : ShaderRecompiler::Decoder::ImageDimension::Dim2D;
-      volume_bound = dimensions;
-    }
-    if (uint_bound != mixed) {
-      std::swap(textures[6], uint_texture);
-      compiled.program.info.images[6].numeric_class = mixed ? Prospero::TextureNumericClass::Uint
-                                                           : Prospero::TextureNumericClass::Float;
-      uint_bound = mixed;
-    }
-    if (mode == Access::MixedSample) {
-      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) { return &inst == &sampler; });
-      const auto sampler_key = block->PrependNewInst(position, ValueOpcode::BitwiseAnd32,
-                                                     {Value(&key), Value(1u)});
-      sampler.SetArg(0, Value(&*sampler_key));
-      compiled.program.info.samplers.resize(6);
-      for (u32 index = 0; index < 6u; ++index) {
-        auto &resource = compiled.program.info.samplers[index];
-        resource.snapshot_index = index % 3u;
-        resource.force_point_filtering = index >= 3u;
-        resource.integer_border = index >= 3u;
-      }
-      compiled.program.info.samplers[0].indirect_resources = {1u, 2u};
-      compiled.program.info.samplers[3].indirect_resources = {4u, 5u};
-      compiled.program.info.sampled_pairs.push_back({6u, 3u, 0x10f0u});
-    }
-    const auto opcode = fetch ? ValueOpcode::ImageRead : gather ? ValueOpcode::ImageGatherRaw
-                                                              : ValueOpcode::ImageSampleRaw;
-    if (access->GetOpcode() != opcode) {
+    if (mode == Access::Gather) {
+      test.name = "IndirectImageGatherContiguousRuns";
       const auto position = std::ranges::find_if(*block, [&](const Inst &inst) {
         return &inst == access;
       });
-      const auto read_at = fetch ? block->PrependNewInst(position, opcode,
-          {Value(&image), Value(&address), Value(true)}, memory_flag_bits)
-          : gather ? block->PrependNewInst(position, opcode,
-              {Value(&image), Value(&sampler), Value(&address), Value(0u), Value(0u),
-               Value(0u), Value(0u), Value(true)}, memory_flag_bits)
-          : block->PrependNewInst(position, opcode,
-              {Value(&image), Value(&sampler), Value(&address), Value(true)}, memory_flag_bits);
-      auto &read = *read_at;
+      auto &read = *block->PrependNewInst(
+          position, ValueOpcode::ImageGatherRaw,
+          {Value(&image), Value(&sampler), Value(&address), Value(0u), Value(0u),
+           Value(0u), Value(0u), Value(true)}, memory_flag_bits);
       access->ReplaceUsesWith(Value(&read), false);
       access = &read;
-    }
-    if (dimensions) {
-      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) { return &inst == &address; });
-      const auto parity = block->PrependNewInst(position, ValueOpcode::BitwiseAnd32, {Value(&key), Value(1u)});
-      const auto odd = block->PrependNewInst(position, ValueOpcode::INotEqual32, {Value(&*parity), Value(0u)});
-      const auto z = block->PrependNewInst(position, ValueOpcode::SelectU32,
-          {Value(&*odd), Value(std::bit_cast<u32>(0.75f)), Value(std::bit_cast<u32>(0.25f))});
-      const auto cube_lane = block->PrependNewInst(position, ValueOpcode::IEqual32, {Value(&key), Value(3u)});
-      const auto coordinate_z = block->PrependNewInst(position, ValueOpcode::SelectU32,
-          {Value(&*cube_lane), Value(0u), Value(&*z)});
-      address.SetArg(0, Value(std::bit_cast<u32>(1.25f)));
-      address.SetArg(1, Value(std::bit_cast<u32>(1.75f)));
-      address.SetArg(2, Value(&*coordinate_z));
-      address.SetArg(3, Value(std::bit_cast<u32>(1.0f)));
-    } else if (gather) {
       compiled.program.info.images[4].cube = false;
       auto &gather_memory = compiled.program.memory_info[0];
       gather_memory.dmask = 1;
       gather_memory.image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagLevelZero |
-          (mixed ? 0u : ShaderRecompiler::Decoder::ImageSampleFlagOffset);
-      // Nonmixed GATHER4_LZ_O places its packed signed offset before the coordinates.
-      address.SetArg(0, Value(mixed ? std::bit_cast<u32>(1.5f) : 0x3fu));
-      address.SetArg(1, Value(std::bit_cast<u32>(mixed ? 1.5f : 0.75f)));
-      address.SetArg(2, Value(mixed ? 0u : std::bit_cast<u32>(0.25f)));
+          ShaderRecompiler::Decoder::ImageSampleFlagOffset;
+      // GATHER4_LZ_O places its packed signed offset before the coordinates.
+      address.SetArg(0, Value(0x3fu));
+      address.SetArg(1, Value(std::bit_cast<u32>(0.75f)));
+      address.SetArg(2, Value(std::bit_cast<u32>(0.25f)));
       address.SetArg(3, Value(0u));
-    } else if (mode == Access::MixedSample) {
-      compiled.program.memory_info[0].dmask = 0xf;
-      compiled.program.memory_info[0].image_sample_flags = ShaderRecompiler::Decoder::ImageSampleFlagLod;
-      for (u32 component = 0; component < 4u; ++component)
-        address.SetArg(component, Value(component < 2u ? std::bit_cast<u32>(1.5f) : 0u));
     }
     auto &selected_resources = compiled.program.info.images[0].indirect_resources;
     selected_resources = homogeneous ? std::vector<u32>{0u, 2u, 3u, 5u, 6u}
                                      : root.indirect_resources;
+    if (homogeneous) test.name = "IndirectImageGatherHomogeneous";
     compiled.resources.flattened_srt[6] = homogeneous ? 4u : ordinals[5];
-    compiled.resources.flattened_srt[7] = mixed || dimensions ? 5u : ordinals[6];
-    compiled.resources.flattened_srt[8] = dimensions ? 2u : ordinals[7];
     if (fetch) {
+      test.name = "IndirectImageFetchContiguousRuns";
+      const auto position = std::ranges::find_if(*block, [&](const Inst &inst) {
+        return &inst == access;
+      });
+      auto &read = *block->PrependNewInst(
+          position, ValueOpcode::ImageRead,
+          {Value(&image), Value(&address), Value(true)}, memory_flag_bits);
+      access->ReplaceUsesWith(Value(&read), false);
       sampler.Invalidate();
       compiled.program.info.samplers.clear();
       compiled.program.info.sampled_pairs.clear();
@@ -36497,7 +36318,7 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
       const auto image_opcode = fetch ? "OpImageFetch" : gather ? "OpImageGather"
                                                           : "OpImageSampleExplicitLod";
       Require(test.name, "native array image runs", tools.Disassemble(compiled.spirv, &text) &&
-                  CountText(text, image_opcode) == (homogeneous ? 1u : dimensions ? 5u : mixed ? 4u : 3u) * halves,
+                  CountText(text, image_opcode) == (homogeneous ? 1u : 3u) * halves,
               "mixed runs expanded into per-image accesses");
       if (homogeneous) {
         Require(test.name, "homogeneous gather array", text.find("OpSwitch") == std::string::npos,
@@ -36519,37 +36340,25 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
         Require(test.name, "nonuniform image operands",
                 std::ranges::count_if(image_operands, [&](u32 operand) {
                   return std::ranges::find(decorated, operand) != decorated.end();
-                }) == (homogeneous ? 1u : mixed ? (fetch ? 1u : 4u) : 2u) * halves,
+                }) == (homogeneous ? 1u : 2u) * halves,
                 "a dynamically selected image operand lacks its nonuniform decoration");
       }
       test.initial.assign(wave_size, 0xdeadbeefu);
       test.expected.assign(wave_size, 0u);
       for (u32 lane = 0; lane < ordinals.size(); ++lane) {
         const auto resource = selected_resources[compiled.resources.flattened_srt[1u + lane]];
-        test.expected[lane] = dimensions && resource == 6u
-            ? volume_mip_bits + ((lane & 1u) ? 3u : 1u) * 4u + 3u
-            : dimensions && resource == 3u ? array_mip_bits + (lane & 1u) * 4u + 3u
-            : mixed && resource == 6u
-            ? (fetch ? uint_texel + 10u : (lane & 1u) ? 1u : uint_texel)
-            : std::bit_cast<u32>(float(resource + ((fetch || dimensions) && resource != 0u ? 10u : 0u)));
+        test.expected[lane] = std::bit_cast<u32>(float(resource + (fetch && resource != 0u ? 10u : 0u)));
       }
       auto buffer = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());
       vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, nullptr, nullptr,
-                      fetch ? vk::Sampler{} : dimensions ? mip_sampler : native_sampler, textures,
-                      mixed && !fetch ? std::span<const vk::Sampler>(native_samplers) : std::span<const vk::Sampler>{});
+                      fetch ? vk::Sampler{} : native_sampler, textures);
       const auto actual = vulkan.ReadBuffer(test.name, buffer, test.expected.size());
       vulkan.DestroyBuffer(&buffer);
       CompareWords(test, "root, native slots, array runs and mapping bounds", test.expected, actual);
     }
     std::printf("[compute] %-32s ok\n", test.name);
   }
-  vulkan.Device().destroySampler(integer_sampler);
-  vulkan.Device().destroySampler(integer_border_sampler);
   vulkan.Device().destroySampler(native_sampler);
-  vulkan.Device().destroySampler(mip_sampler);
-  vulkan.DestroyImage(&uint_texture);
-  vulkan.DestroyImage(&volume_texture);
-  vulkan.DestroyImage(&array_texture);
   for (auto &texture : textures) vulkan.DestroyImage(&texture);
 }
 

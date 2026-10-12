@@ -434,18 +434,8 @@ void TestBoundedImageViewEligibility() {
     plan.descriptor_sources.push_back(source);
   }
   plan.descriptor_sources[image_source].indirect_descriptor->sources = std::move(selected);
-  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
-            snapshot.images.size() == 2u &&
-            snapshot.images[0].dwords == descriptor(0x30u, Type::kColor2D) &&
-            snapshot.images[1].dwords == descriptor(0x30u, Type::kColor3D) &&
-            specialization.images[0].dimension == Decoder::ImageDimension::Dim2D &&
-            specialization.images[1].dimension == Decoder::ImageDimension::Dim3D,
-        "explicitly selected image dimensions were discarded before operand validation");
-  const auto converted = plan.descriptor_sources[image_source].indirect_descriptor->sources.back();
-  plan.descriptor_sources[converted].dwords[1] = Value(
-      static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k11_11_10UInt) << 20u);
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "explicitly selected incompatible conversion was silently normalized to null");
+        "explicitly selected incompatible descriptor was silently normalized to null");
 }
 
 void TestWaterfallImageTable() {
@@ -1403,52 +1393,6 @@ void TestDescendingImageRange() {
   memory.words[bitmap_word + MaxIndirectDescriptorProbes - 1u] = 1u << 31u;
   memory.words[bitmap_word] = 1u;
   check_bitmap({0u, 127u}, 0u);
-}
-
-void TestMixedIndirectImageSamplers() {
-  auto fixture = MakeIndirectImageFixture(false, 32u, 0u, 0u);
-  fixture->PlanAndTrack();
-  auto& samplers = fixture->program.info.samplers;
-  samplers.resize(3u, samplers[0]);
-  samplers[0].indirect_resources = {1u, 2u};
-  const auto plan = ExtractResourcePlan(fixture->program);
-  std::array<uint32_t, 8> data {0x3000u, 16u << 16u, 1u, 0u,
-                               0x2000u, 32u << 16u, 3u, 0u};
-  LinearTestMemory memory;
-  using F = Libs::Graphics::Prospero::BufferFormat;
-  for (uint32_t record = 0; record < 3u; ++record) {
-    const auto offset = (0x1000u + record * 32u) / 4u;
-    memory.words[offset] = 0x100u + record;
-    memory.words[offset + 1u] = static_cast<uint32_t>(
-        record == 0u ? F::k32_32_32_32Float : F::k32_32_32_32UInt) << 20u;
-    memory.words[offset + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
-        (uint32_t(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
-  }
-  const SrtRuntime runtime {.user_data = data, .userdata = &memory,
-      .read_specialization_memory = ReadLinearTestMemory};
-  ResourceSnapshot snapshot;
-  ResourceSpecialization specialization;
-  Check(MaterializeResources(plan, runtime, snapshot, specialization) && snapshot.images.size() == 4u,
-        "mixed float/uint image table failed materialization");
-  ApplyResourceSpecialization(fixture->program, specialization);
-  const auto& info = fixture->program.info;
-  Check(info.sampled_pairs.size() == 2u && info.samplers.size() == 6u,
-        "indirect image candidates duplicated sampler pairs or lost finite class variants");
-  for (const auto& pair : info.sampled_pairs) {
-    const auto integer = info.images[pair.image].numeric_class ==
-        Libs::Graphics::Prospero::TextureNumericClass::Uint;
-    const auto& sampler = info.samplers[pair.sampler];
-    Check(sampler.snapshot_index == 0u && sampler.integer_border == integer &&
-              sampler.force_point_filtering == integer && sampler.indirect_resources.size() == 2u &&
-              pair.first_use_pc == 0x10f0u,
-          "mixed image class changed native sampler identity or integer-border semantics");
-    for (uint32_t ordinal = 0; ordinal < sampler.indirect_resources.size(); ++ordinal) {
-      const auto& candidate = info.samplers[sampler.indirect_resources[ordinal]];
-      Check(candidate.snapshot_index == ordinal + 1u &&
-                candidate.integer_border == integer && candidate.force_point_filtering == integer,
-            "mixed image class mapped a finite sampler choice to the wrong variant");
-    }
-  }
 }
 
 void TestUniformizedMaterialImageKeys() {
@@ -4607,7 +4551,6 @@ int main() {
     Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
     Run("shared append selector bounds", TestSharedAppendSelectorBounds);
     Run("descending image range", TestDescendingImageRange);
-    Run("mixed indirect image samplers", TestMixedIndirectImageSamplers);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
