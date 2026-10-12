@@ -18812,6 +18812,7 @@ private:
               features12.shaderOutputViewportIndex != true ||
               features12.shaderBufferInt64Atomics != true ||
               features12.shaderSampledImageArrayNonUniformIndexing != true ||
+              features12.shaderStorageBufferArrayNonUniformIndexing != true ||
               features12.shaderSharedInt64Atomics != true ||
               image_atomic64.shaderImageInt64Atomics != true ||
               workgroup_layout.workgroupMemoryExplicitLayout != true ||
@@ -18893,6 +18894,9 @@ private:
     Require("VulkanHarness", "dispatch",
             available_features12.shaderSampledImageArrayNonUniformIndexing == true,
             "nonuniform sampled image indexing is not supported");
+    Require("VulkanHarness", "dispatch",
+            available_features12.shaderStorageBufferArrayNonUniformIndexing == true,
+            "nonuniform storage buffer indexing is not supported");
     Require("VulkanHarness", "dispatch", available_min_lod.minLod == true,
             "image view minimum LOD is not supported");
     Require("VulkanHarness", "graphics", available_features12.shaderOutputLayer == true,
@@ -35580,8 +35584,6 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
   test.initial.assign(64, 0xdeadbeefu);
   test.storage_buffer_range_bytes = 64;
   test.storage_buffer_offsets = {12, 108};
-  test.required_spirv = {"OpSwitch"};
-  test.forbidden_spirv = {"PhysicalStorageBuffer"};
 
   CompiledShader compiled;
   auto &program = compiled.program;
@@ -35603,13 +35605,19 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
       ValueOpcode::GetBufferResource,
       {Value(&key), Value(0u), Value(0u), Value(0u)});
   handle.SetFlags<uint32_t>(0u);
-  auto &offset = block->AppendNewInst(ValueOpcode::IMul32,
-                                    {Value(&lane), Value(4u)});
+  auto &lane_offset = block->AppendNewInst(ValueOpcode::IMul32,
+                                         {Value(&lane), Value(4u)});
+  auto &overflow = block->AppendNewInst(ValueOpcode::IEqual32,
+                                       {Value(&lane), Value(6u)});
+  auto &offset = block->AppendNewInst(ValueOpcode::SelectU32,
+                                    {Value(&overflow), Value(UINT32_MAX), Value(&lane_offset)});
+  auto &index = block->AppendNewInst(ValueOpcode::SelectU32,
+                                   {Value(&overflow), Value(0x40000000u), Value(&lane)});
   auto &data = block->AppendNewInst(ValueOpcode::IAdd32,
                                   {Value(&lane), Value(0x1000u)});
   auto &exec = block->AppendNewInst(ValueOpcode::INotEqual32,
                                   {Value(&lane), Value(4u)});
-  block->AppendNewInst(ValueOpcode::StoreBufferU32,
+  auto &store = block->AppendNewInst(ValueOpcode::StoreBufferU32,
                       {Value(&handle), Value(0u), Value(&offset), Value(0u),
                        Value(&data), Value(&exec)});
   program.memory_info.push_back({.kind = ResourceKind::Buffer, .offen = true});
@@ -35632,36 +35640,80 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
   compute.host_subgroup_size = vulkan.SubgroupSize();
   compute.threads_num[0] = 32;
   compute.threads_num[1] = compute.threads_num[2] = 1;
-  for (const u32 null_buffers : {0u, 1u, 2u}) {
+  enum class Layout { Shared, NullChild, AllNull, DifferentStride, ShiftedPushData, StorageData,
+                      Indexed, IndexedNullChild, IndexedSingle };
+  for (const auto layout : {Layout::Shared, Layout::NullChild, Layout::AllNull,
+                           Layout::DifferentStride, Layout::ShiftedPushData, Layout::StorageData,
+                           Layout::Indexed, Layout::IndexedNullChild, Layout::IndexedSingle}) {
+    const bool indexed = layout == Layout::Indexed || layout == Layout::IndexedNullChild ||
+                         layout == Layout::IndexedSingle;
+    const bool null_child = layout == Layout::NullChild || layout == Layout::IndexedNullChild;
+    const bool single = layout == Layout::AllNull || layout == Layout::IndexedSingle;
     program.info.buffers = {root, candidate};
-    if (null_buffers != 0u) program.info.buffers[1].packed_stride = 0;
-    if (null_buffers == 2u) {
+    if (indexed) {
+      for (auto &buffer : program.info.buffers) buffer.packed_stride = 4;
+    }
+    program.descriptor_sources[0].indirect_descriptor->indexed_store = indexed;
+    program.memory_info[0].idxen = indexed;
+    program.memory_info[0].offen = !indexed;
+    store.SetArg(1, indexed ? Value(&index) : Value(0u));
+    store.SetArg(2, indexed ? Value(0u) : Value(&offset));
+    if (null_child) program.info.buffers[1].packed_stride = 0;
+    if (layout == Layout::DifferentStride) program.info.buffers[1].packed_stride = 2;
+    if (single) {
       // Materialization deduplicates all null destinations into one unmapped root.
       program.info.buffers.resize(1);
-      program.info.buffers[0].packed_stride = 0;
+      if (layout == Layout::AllNull) program.info.buffers[0].packed_stride = 0;
       program.info.buffers[0].indirect_root = BufferResource::NoIndirectBuffer;
       program.info.buffers[0].indirect_search_iterations = 0;
       program.info.buffers[0].indirect_resources.clear();
     }
     program.shader_info_complete = false;
     CollectShaderInfo(program, {.compute = &compute});
-    compiled.spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute});
+    const auto push_start = layout == Layout::ShiftedPushData ? 3u :
+                            layout == Layout::StorageData ? PushData::NoStart : 0u;
+    compiled.spirv = ShaderRecompiler::Spirv::EmitProgram(program, {.compute = &compute}, push_start);
     Require(test.name, "candidate bindings",
-            program.bindings.descriptor_counts[0] == (null_buffers == 2u ? 1u : 2u) &&
+            program.bindings.descriptor_counts[0] == (single ? 1u : 2u) &&
                 program.info.buffers[0].descriptor_index == 0u &&
-                (null_buffers == 2u || program.info.buffers[1].descriptor_index == 1u),
+                (single || program.info.buffers[1].descriptor_index == 1u),
             "indirect store lost a buffer binding");
     compiled.packed_user_data.resize(program.bindings.ShaderDataDwords());
     compiled.packed_user_data[program.bindings.memory_offset_dword] = 12u | (108u << 8u);
     ValidateSpirv(test.name, compiled.spirv);
-    if (null_buffers == 2u) {
-      test.required_spirv.clear();
+    test.required_spirv.clear();
+    test.forbidden_spirv = {"PhysicalStorageBuffer"};
+    if (!single && !null_child && layout != Layout::DifferentStride) {
+      test.required_spirv = {"StorageBufferArrayNonUniformIndexing"};
       test.forbidden_spirv.push_back("OpSwitch");
+      std::set<u32> nonuniform;
+      std::vector<u32> accessed_pointers;
+      u32 prefix_extracts = 0;
+      for (size_t offset = 5; offset < compiled.spirv.size();) {
+        const auto words = std::span(compiled.spirv).subspan(offset, compiled.spirv[offset] >> 16u);
+        const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
+        if (opcode == spv::OpDecorate && words[2] == spv::DecorationNonUniform)
+          nonuniform.insert(words[1]);
+        if (opcode == spv::OpArrayLength) accessed_pointers.push_back(words[3]);
+        if (opcode == spv::OpStore) accessed_pointers.push_back(words[1]);
+        if (opcode == spv::OpBitFieldUExtract) ++prefix_extracts;
+        offset += words.size();
+      }
+      Require(test.name, "shared store and nonuniform pointers",
+              prefix_extracts == 1u && accessed_pointers.size() == 2u &&
+                  std::ranges::all_of(accessed_pointers, [&](u32 pointer) {
+                    return nonuniform.contains(pointer);
+                  }),
+              "indirect store retained static prefixes, was duplicated or lost a NonUniform pointer decoration");
+    } else if (single) {
+      test.forbidden_spirv.push_back("OpSwitch");
+    } else {
+      test.required_spirv = {"OpSwitch"};
     }
     CheckSpirvText(test, compiled.spirv);
 
     for (const bool swapped : {false, true}) {
-      if (null_buffers != 0u && swapped) continue;
+      if (layout != Layout::Shared && layout != Layout::IndexedNullChild && swapped) continue;
       // Repeated keys select two distinct logical buffers within one native allocation.
       // Keys below, between and above the live keys must not select either buffer.
       compiled.resources.flattened_srt = {0u, 0u, 0u, 0u, 3u,
@@ -35669,9 +35721,15 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
                                          12u, swapped ? 1u : 0u,
                                          14u, swapped ? 0u : 1u};
       test.expected = test.initial;
-      for (const u32 lane : {2u, 6u, 10u, 12u, 14u}) {
+      for (u32 lane = 0; lane < 16u; ++lane) {
+        if (lane == 4u || lane == 6u) continue;
+        if (layout == Layout::IndexedSingle) {
+          test.expected[test.storage_buffer_offsets[0] / 4u + lane] = 0x1000u + lane;
+          continue;
+        }
+        if (lane != 2u && lane != 10u && lane != 12u && lane != 14u) continue;
         const u32 resource = (lane & 7u) == 4u ? swapped : !swapped;
-        if (null_buffers == 2u || (null_buffers == 1u && resource == 1u)) continue;
+        if (layout == Layout::AllNull || (null_child && resource == 1u)) continue;
         test.expected[test.storage_buffer_offsets[resource] / 4u + lane] = 0x1000u + lane;
       }
       auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size());

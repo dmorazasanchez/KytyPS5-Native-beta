@@ -2427,6 +2427,115 @@ void TestWritableDescriptorPhi() {
         "control-dependent writable descriptor phi was not rejected transactionally");
 }
 
+void TestPackedScalarBufferSelection() {
+  const auto make = [](uint32_t shift_mask = 24u, bool cycle = false, uint32_t store_offset = 0u,
+                       bool byte_store = false) {
+    auto fixture = std::make_unique<Fixture>();
+    auto& f = *fixture;
+    auto* entry = f.block;
+    auto* left = f.AddBlock();
+    auto* right = f.AddBlock();
+    auto* merge = f.AddBlock();
+    entry->AddBranch(left);
+    entry->AddBranch(right);
+    left->AddBranch(merge);
+    right->AddBranch(merge);
+    const auto base = f.Address(f.UserData(0u), f.UserData(1u));
+    const auto lane = f.Emit(ValueOpcode::LaneId);
+    const auto offset = f.Emit(ValueOpcode::BitwiseAnd32, {lane, Value(511u)});
+    const auto shift = f.Emit(ValueOpcode::BitwiseAnd32, {lane, Value(shift_mask)});
+    auto& phi = merge->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    for (const auto [block, immediate] : {std::pair{left, 0x1c1u}, std::pair{right, 0x3c2u}}) {
+      const auto read = f.Emit(ValueOpcode::LoadAddressU32,
+          {base, offset, Value(0u), Value(true)},
+          f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = immediate}, immediate), block);
+      phi.AddPhiOperand(block, cycle ? Value(&phi) : read);
+    }
+    f.block = merge;
+    const auto word = f.Emit(ValueOpcode::ShiftRightLogical32, {Value(&phi), shift});
+    const auto key = f.Emit(ValueOpcode::BitwiseAnd32, {word, Value(255u)});
+    const auto scaled = f.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(4u)});
+    const auto table_offset = f.Emit(ValueOpcode::IAdd32, {scaled, Value(64u)});
+    std::array<Value, 4> descriptor;
+    for (uint32_t component = 0; component < descriptor.size(); ++component) {
+      descriptor[component] = f.Emit(ValueOpcode::LoadAddressU32,
+          {base, table_offset, Value(0u), Value(true)},
+          f.AddMemory({.kind = ResourceKind::ScalarAddress, .offset = component * 4u,
+                       .component_index = component, .component_count = 4u}, 0x2b4u));
+    }
+    f.Emit(ValueOpcode::StoreBufferU32,
+           {f.Buffer(descriptor), lane, Value(0u), Value(0u), Value(42u), Value(true)},
+           f.AddMemory({.kind = ResourceKind::Buffer, .offset = store_offset, .idxen = true}, 0x2c8u));
+    if (byte_store)
+      f.Emit(ValueOpcode::StoreBufferU32,
+             {f.Buffer(descriptor), Value(0u), lane, Value(0u), Value(43u), Value(true)},
+             f.AddMemory({.kind = ResourceKind::Buffer, .offen = true}, 0x2d0u));
+    return fixture;
+  };
+  auto fixture = make();
+  fixture->PlanAndTrack();
+  auto plan = ExtractResourcePlan(fixture->program);
+  const auto& source = plan.descriptor_sources[plan.info.buffers[0].source];
+  Check(source.indirect_descriptor && source.indirect_descriptor->indexed_store &&
+            source.indirect_descriptor->selector->byte_ranges ==
+                std::vector<std::pair<uint32_t, uint32_t>>{{0x1c0u, 1024u}},
+        "packed scalar lookup lost a Phi arm or independent DWORD alignment");
+  LinearTestMemory memory;
+  memory.watched_address = memory.base + 0x1c0u;
+  for (uint32_t key = 0; key < 19u; ++key) {
+    const auto descriptor = 16u + key * 4u;
+    memory.words[descriptor] = 0x100000u + key * 0x10000u;
+    memory.words[descriptor + 1u] = 4u << 16u;
+    memory.words[descriptor + 2u] = 14400u;
+    memory.words[descriptor + 3u] = 0x5204u;
+  }
+  for (uint32_t i = 0; i < 256u; ++i) {
+    for (uint32_t byte = 0; byte < 4u; ++byte)
+      memory.words[0x1c0u / 4u + i] |= ((i * 4u + byte) % 19u) << (byte * 8u);
+  }
+  // No descriptor exists after key 18; broad enumeration would read this address.
+  memory.fail_address = memory.base + 0x170u;
+  const std::array<uint32_t, 2> user_data{static_cast<uint32_t>(memory.base), 0u};
+  const SrtRuntime runtime{.user_data = user_data, .read_memory = ReadLinearTestMemory,
+                          .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  const auto materialize = [&] { return MaterializeResources(plan, runtime, snapshot, specialization); };
+  Check(materialize() && snapshot.buffers.size() == 19u && memory.reads == 20u &&
+            memory.watched_reads == 1u && memory.watched_dwords == 256u,
+        "packed scalar lookup did not batch its read and deduplicate writable candidates");
+  Check(std::ranges::find(snapshot.specialization_reads,
+                         std::pair{memory.base + 0x1c0u, uint64_t{1024u}}) != snapshot.specialization_reads.end() &&
+            std::ranges::all_of(snapshot.buffers, [&](const DescriptorValue& value) {
+              const auto key = (value.dwords[0] - 0x100000u) / 0x10000u;
+              return std::ranges::find(snapshot.specialization_reads,
+                         std::pair{memory.base + 64u + key * 16u, uint64_t{16u}}) != snapshot.specialization_reads.end();
+            }),
+        "packed lookup or writable descriptors escaped specialization overlap tracking");
+  const auto initial = specialization;
+  memory.words[16] += 4096u;
+  memory.reads = memory.watched_reads = 0u;
+  Check(materialize() && specialization == initial && memory.reads == 20u,
+        "packed table refresh changed shader specialization or repeated scalar reads");
+  memory.words[17] = 8u << 16u;
+  Check(!materialize(), "indexed DWORD write accepted an incompatible descriptor stride");
+  memory.words[17] = 4u << 16u;
+  memory.words[19] |= 3u << 28u;
+  Check(!materialize(), "indexed DWORD write accepted raw byte bounds");
+  for (auto bad : {0u, 1u, 2u}) {
+    auto invalid = make(bad == 0u ? 28u : 24u, bad == 1u, bad == 2u ? 4u : 0u);
+    CheckFatal([&] { invalid->PlanAndTrack(); }, "not a valid runtime value",
+               "packed selector accepted a cross-byte shift, leafless cycle, or indexed byte offset");
+  }
+  auto mixed = make(24u, false, 0u, true);
+  mixed->PlanAndTrack();
+  const auto& buffers = mixed->program.info.buffers;
+  Check(buffers.size() == 2u && buffers[0].source != buffers[1].source &&
+            mixed->program.descriptor_sources[buffers[0].source].indirect_descriptor->indexed_store &&
+            !mixed->program.descriptor_sources[buffers[1].source].indirect_descriptor->indexed_store,
+        "indexed and byte-addressed stores incorrectly shared their descriptor bounds contract");
+}
+
 ResourcePlan ConditionalSamplerPlan(bool diamond, bool reverse, bool reverse_phi,
                                     bool nonuniform = false,
                                     bool writable = false) {
@@ -3732,6 +3841,7 @@ int main() {
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
+    Run("packed scalar buffer selection", TestPackedScalarBufferSelection);
     Run("conditional sampler phi", TestConditionalSamplerPhi);
     Run("finite image phi cycle", TestFiniteImagePhiCycle);
     Run("finite inline sampler", TestFiniteInlineSampler);
