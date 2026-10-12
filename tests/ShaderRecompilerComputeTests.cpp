@@ -36,6 +36,7 @@
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
@@ -1356,6 +1357,7 @@ struct TestCase {
   std::vector<u32> storage_buffer_offsets;
   std::vector<std::pair<u32, u32>> storage_buffer_ranges;
   std::vector<BdaMapping> bda_mappings;
+  std::optional<uint64_t> fault_free_address;
   bool expand_shader_data_storage = false;
   bool expected_force_point_sampler = false;
   float expected_float_tolerance = 0.0f;
@@ -16094,7 +16096,30 @@ public:
                           vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
                           &barrier, 0, nullptr);
     }
+    Buffer fault_result;
+    if (test.fault_free_address) {
+      Require(test.name, "fault check", uses_bda, "fault check requires BDA");
+      fault_result = CreateHostBuffer(test.name, sizeof(u32),
+                                     vk::BufferUsageFlagBits::eTransferDst, {});
+      const vk::MemoryBarrier ready{
+          .srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite,
+          .dstAccessMask = vk::AccessFlagBits::eTransferRead};
+      cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer,
+                          vk::PipelineStageFlagBits::eTransfer, {}, 1, &ready, 0, nullptr, 0, nullptr);
+      const vk::BufferCopy region{(BufferCache::PageIndex(*test.fault_free_address) >> 5u) * sizeof(u32),
+                                   0, sizeof(u32)};
+      cmd.copyBuffer(m_fault_buffer.buffer, fault_result.buffer, 1, &region);
+      const vk::MemoryBarrier readable{.srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                                        .dstAccessMask = vk::AccessFlagBits::eHostRead};
+      cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost,
+                          {}, 1, &readable, 0, nullptr, 0, nullptr);
+    }
     EndSubmitAndFree(test.name, "dispatch", cmd);
+    if (test.fault_free_address) {
+      Require(test.name, "fault check", ReadBuffer(test.name, fault_result, 1)[0] == 0u,
+              "suppressed formatted access touched an unmapped page");
+      DestroyBuffer(&fault_result);
+    }
     for (const auto view : sampled_mip_views) {
       m_device.destroyImageView(view, nullptr);
     }
@@ -19274,7 +19299,7 @@ private:
     m_bda_pagetable_buffer =
         CreateDeviceBuffer(shader_name, BufferCache::BDA_PAGETABLE_SIZE, usage);
     m_fault_buffer = CreateDeviceBuffer(
-        shader_name, BufferCache::CACHING_NUMPAGES / 8, usage);
+        shader_name, BufferCache::CACHING_NUMPAGES / 8, usage | vk::BufferUsageFlagBits::eTransferSrc);
   }
 
   Buffer CreateHostBuffer(const char *shader_name, vk::DeviceSize size,
@@ -29842,7 +29867,7 @@ TestCase BufferLoadDwordGpuSelectedDescriptors() {
   return BufferLoadsGpuSelectedDescriptors(1u);
 }
 
-TestCase BufferLoadFormatXGpuSelectedDescriptors() {
+TestCase BufferLoadFormatXGpuSelectedDescriptors(u32 wave) {
   using O = ShaderOpcode;
   using F = Prospero::BufferFormat;
   constexpr uint64_t GuestBase = 0x0000000110000000ull;
@@ -29851,8 +29876,10 @@ TestCase BufferLoadFormatXGpuSelectedDescriptors() {
     u32 selector, stride, records, mode, index, offset, soffset;
     bool swizzle;
     u32 expected;
+    bool zero_payload = false;
+    bool unmapped = false;
   };
-  constexpr DescriptorCase cases[] = {
+  std::vector<DescriptorCase> cases = {
       {F::k8UInt, 4, 1, 4, 3, 1, 0, 0, false, 0x7f},
       {F::k8UInt, 4, 0, 4, 3, 0, 3, 0, false, 0x80},
       {F::k16UInt, 4, 2, 4, 0, 1, 0, 0, false, 0x80ff},
@@ -29881,47 +29908,87 @@ TestCase BufferLoadFormatXGpuSelectedDescriptors() {
       {F::kInvalid, 1, 4, 1, 0, 0, 0, 0, false, 0},
       {F::k32UInt, 4, 4, 0, 2, 0, 0, 0, false, 0},
       {F::k32UInt, 4, 0, 4, 3, 0, 0, 8, false, 0},
+      {F::k8_8UInt, 5, 0, 16, 3, 0, 2, 0, false, 0x80},
+      {F::k16_16UInt, 5, 0, 16, 3, 0, 1, 0, false, 0x80ff},
+      {F::k16_16_16_16UInt, 7, 0, 16, 3, 0, 0, 0, false, 0x8001},
+      {F::k16_16_16_16Float, 6, 0, 16, 3, 0, 4, 0, false, 0x3f800000},
+      {F::k32_32_32UInt, 7, 0, 16, 3, 0, 0, 0, false, 0x80ff7f01},
+      {F::k32_32_32UInt, 6, 0, 16, 3, 0, 0, 0, false, 0x40003c00},
+      {F::k11_11_10Float, 6, 0, 16, 3, 0, 0, 0, false, 0x400c0000},
+      {F::k10_11_11Float, 4, 0, 16, 3, 0, 0, 0, false, 0x44040000},
+      // Whole-record OOB and constant/reserved selectors must not touch this absent BDA page.
+      {F::k32_32_32_32UInt, 4, 4, 1, 0, 0, 0, 0, false, 0, false, true},
+      {F::k32UInt, 0, 4, 1, 0, 0, 0, 0, false, 0, false, true},
+      {F::k32UInt, 1, 4, 1, 0, 0, 0, 0, false, 1, false, true},
+      {F::k32Float, 1, 4, 1, 0, 0, 0, 0, false, 0x3f800000, false, true},
+      {F::k32UInt, 2, 4, 1, 0, 0, 0, 0, false, 0, false, true},
+      {F::k32UInt, 3, 4, 1, 0, 0, 0, 0, false, 0, false, true},
+      {static_cast<F>(127), 4, 4, 1, 0, 0, 0, 0, false, 0, false, true},
   };
+  // Visit every geometry entry and every selector. Zero payloads have exact zero
+  // results in all numeric classes; selector ONE depends only on integer vs float.
+  for (u32 format = 0; format <= static_cast<u32>(F::k32_32_32_32Float); ++format) {
+    const auto info = ShaderRecompiler::Format::GetFormatInfo(static_cast<F>(format));
+    using T = ShaderRecompiler::Format::ComponentType;
+    for (u32 selector = 0; selector < 8u; ++selector) {
+      const u32 one = info.type == T::Uint || info.type == T::Sint ? 1u : 0x3f800000u;
+      cases.push_back({static_cast<F>(format), selector, 16, 1, 0, 0, 0, 0, false,
+                       selector == 1u && info.type != T::Unknown ? one : 0u, true});
+    }
+  }
   TestCase test;
-  test.name = "BufferLoadFormatXGpuSelectedDescriptors";
-  test.initial.resize(2048);
+  test.name = wave == 32 ? "BufferLoadFormatXGpuSelectedDescriptors32"
+                        : "BufferLoadFormatXGpuSelectedDescriptors64";
+  const auto align256 = [](u32 bytes) { return (bytes + 255u) & ~255u; };
+  const auto selection_base = align256(static_cast<u32>(cases.size()) * 4u);
+  const auto descriptor_base = align256(selection_base + static_cast<u32>(cases.size()) * 4u);
+  const auto payload_base = align256(descriptor_base + static_cast<u32>(cases.size()) * 32u);
+  test.initial.resize((payload_base + cases.size() * 64u) / 4u);
   constexpr std::array payload{0x80ff7f01u, 0x8001ff00u, 0x40003c00u, 0x3fc00000u};
   for (u32 i = 0; i < std::size(cases); ++i) {
     const auto &input = cases[i];
-    const u32 data_offset = 4096 + i * 64;
+    const u32 data_offset = payload_base + i * 64;
+    const uint64_t data_address = GuestBase + (input.unmapped ? 0x100000u : data_offset);
     const std::array<u32, 8> row{
-        static_cast<u32>(GuestBase + data_offset),
+        static_cast<u32>(data_address),
         1u | (input.stride << 16u) | (input.swizzle ? 1u << 31u : 0u),
         input.records, input.selector | (static_cast<u32>(input.format) << 12u) |
                            (input.mode << 28u),
         input.index, input.offset, input.soffset, 0};
-    std::copy(row.begin(), row.end(), test.initial.begin() + 128 + i * 8);
-    std::copy(payload.begin(), payload.end(), test.initial.begin() + data_offset / 4);
+    std::copy(row.begin(), row.end(), test.initial.begin() + descriptor_base / 4u + i * 8);
+    if (!input.zero_payload)
+      std::copy(payload.begin(), payload.end(), test.initial.begin() + data_offset / 4);
     // Read the selection on the GPU, as GTA's descriptor waterfall does.
-    test.initial[64 + i] = std::size(cases) - 1 - i;
+    test.initial[selection_base / 4u + i] = std::size(cases) - 1 - i;
     test.expected.push_back(cases[std::size(cases) - 1 - i].expected);
   }
   auto &code = test.code;
   AppendSMovLiteral(&code, 28, 0);
+  AppendSMovLiteral(&code, 29, static_cast<u32>(cases.size()));
   const auto loop = static_cast<u32>(code.size());
   code.push_back(EncodeVop1(0x01, 30, 28));
   code.push_back(EncodeVop2(0x1a, 30, InlineU32(2), 30));
-  code.push_back(EncodeMubuf0(0x0c, 256));
+  code.push_back(EncodeMubuf0(0x0c, selection_base));
   code.push_back(EncodeMubuf1(2, 0, 30));
   code.push_back(EncodeVop1(0x02, 20, Vgpr(2)));
   code.push_back(EncodeSop2(0x1e, 20, 20, InlineU32(5)));
   code.push_back(EncodeSmem0(0x0b, 8, 0));
-  code.push_back(EncodeSmem1(512, 20));
+  code.push_back(EncodeSmem1(descriptor_base, 20));
   code.push_back(EncodeVop1(0x01, 21, 12));
   code.push_back(EncodeVop1(0x01, 22, 13));
   code.push_back(EncodeMubuf0(0x00, 0, true, true));
   code.push_back(EncodeMubuf1(4, 2, 21, 14));
   AppendBufferStoreDword(&code, 4, 30);
   code.push_back(EncodeSop2(0x00, 28, 28, InlineU32(1)));
-  code.push_back(EncodeSopc(0x0a, 28, InlineU32(std::size(cases))));
+  code.push_back(EncodeSopc(0x0a, 28, 29));
   code.push_back(EncodeSopp(0x05, loop - static_cast<u32>(code.size()) - 1u));
   AppendEnd(&code);
   test.bda_mappings = {{GuestBase, 0}};
+  test.fault_free_address = GuestBase + 0x100000u;
+  test.compute_info.threads_num[0] = 1;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = wave;
+  test.has_compute_info = true;
   test.required_spirv = {"PhysicalStorageBuffer", "OpSwitch", "OpLoopMerge"};
   test.opcodes = {O::S_MOV_B32, O::V_MOV_B32, O::V_LSHLREV_B32,
                   O::BUFFER_LOAD_DWORD, O::V_READFIRSTLANE_B32, O::S_LSHL_B32,
@@ -29929,6 +29996,14 @@ TestCase BufferLoadFormatXGpuSelectedDescriptors() {
                   O::BUFFER_STORE_DWORD, O::S_ADD_U32, O::S_CMP_LT_U32,
                   O::S_CBRANCH_SCC1, O::S_ENDPGM};
   return test;
+}
+
+TestCase BufferLoadFormatXGpuSelectedDescriptors() {
+  return BufferLoadFormatXGpuSelectedDescriptors(32u);
+}
+
+TestCase BufferLoadFormatXGpuSelectedDescriptors64() {
+  return BufferLoadFormatXGpuSelectedDescriptors(64u);
 }
 
 TestCase BufferStoreDwordx4DropsOnlyOutOfBoundsTail() {
@@ -35790,18 +35865,24 @@ void CheckBoundedFormattedBufferCopy(VulkanHarness &vulkan) {
       if (count == 8u) {
         std::set<u32> nonuniform;
         std::vector<u32> stores;
+        u32 bda_calls = 0;
         for (size_t offset = 5; offset < compiled.spirv.size();) {
           const auto words = std::span(compiled.spirv).subspan(offset, compiled.spirv[offset] >> 16u);
           const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
           if (opcode == spv::OpDecorate && words[2] == spv::DecorationNonUniform)
             nonuniform.insert(words[1]);
           if (opcode == spv::OpStore) stores.push_back(words[1]);
+          if (opcode == spv::OpFunctionCall) ++bda_calls;
           offset += words.size();
         }
         Require(test.name, "one shared indirect store per virtual half",
                 std::ranges::count_if(stores, [&](u32 pointer) { return nonuniform.contains(pointer); }) ==
                     (wave > vulkan.SubgroupSize() ? 2 : 1),
                 "formatted identity lowering duplicated the store per descriptor");
+        Require(test.name, "shared formatted payload read", bda_calls <= 12u,
+                "formatted source load duplicated BDA reads per format or component");
+        std::printf("[compute] BoundedFormattedBufferCopy%u: %zu SPIR-V words, %u BDA calls\n",
+                    wave, compiled.spirv.size(), bda_calls);
       }
       auto output = vulkan.CreateStorageBuffer(test.name, test.initial, test.initial.size(), true);
       vulkan.Dispatch(test, compiled, output);
@@ -38109,6 +38190,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(BufferLoadDwordGpuSelectedDescriptors);
   AddCase(BufferLoadDwordx3GpuSelectedDescriptors);
   AddCase(BufferLoadFormatXGpuSelectedDescriptors);
+  AddCase(BufferLoadFormatXGpuSelectedDescriptors64);
   AddCase(BufferStoreDwordx4DropsOnlyOutOfBoundsTail);
   AddCase(BufferLoadFormatXyzwRejectsPartialRecord);
   AddCase(BufferStoreFormatXyzwDropsPartialRecord);
@@ -43968,6 +44050,7 @@ int main(int argc, char **argv) {
     RunCase(&vulkan, BufferLoadDwordGpuSelectedDescriptors());
     RunCase(&vulkan, BufferLoadDwordx3GpuSelectedDescriptors());
     RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors());
+    RunCase(&vulkan, BufferLoadFormatXGpuSelectedDescriptors64());
     RunCase(&vulkan, BufferLoadFormatXRejectsPartialRecord());
     RunCase(&vulkan, BufferLoadFormatXyRejectsPartialRecord());
     RunCase(&vulkan, BufferLoadDwordx4SnapshotsOverlappingAddress());
