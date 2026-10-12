@@ -1,3 +1,5 @@
+#define SPV_ENABLE_UTILITY_CODE
+
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -1610,7 +1612,21 @@ void CheckRectListShaders() {
   ValidateSpirv(name, position_only.evaluation);
 }
 
-void CheckSpirvText(const TestCase &test, const std::vector<u32> &spirv) {
+void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
+  std::vector<u32> result_types(spirv[3]);
+  for (size_t offset = 5; offset < spirv.size();) {
+    const auto words = std::span<const u32>(spirv).subspan(offset, spirv[offset] >> 16u);
+    const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
+    bool has_result = false, has_type = false;
+    spv::HasResultAndType(opcode, &has_result, &has_type);
+    if (has_result && has_type) result_types[words[2]] = words[1];
+    if (opcode == spv::OpBitcast) {
+      Require(test.name, "bitcast changes representation",
+              words[1] != result_types[words[3]],
+              "emitted a redundant bitcast between identical SPIR-V types");
+    }
+    offset += words.size();
+  }
   if (test.required_spirv.empty() && test.forbidden_spirv.empty()) {
     return;
   }
@@ -1737,7 +1753,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   Require(test.name, "SPIR-V emit", !result.spirv.empty(),
           "recompiler returned empty SPIR-V");
   ValidateSpirv(test.name, result.spirv);
-  CheckSpirvText(test, result.spirv);
+  CheckSpirvEmission(test, result.spirv);
   if (test.expected_buffer_resources) {
     std::vector<u32> resources;
     for (u32 i = 0; i < result.program.info.buffers.size(); ++i) {
@@ -36184,7 +36200,7 @@ void CheckIndirectBufferStore(VulkanHarness &vulkan) {
     } else {
       test.required_spirv = {"OpSwitch"};
     }
-    CheckSpirvText(test, compiled.spirv);
+    CheckSpirvEmission(test, compiled.spirv);
 
     for (const bool swapped : {false, true}) {
       if (layout != Layout::Shared && layout != Layout::IndexedNullChild && swapped) continue;
