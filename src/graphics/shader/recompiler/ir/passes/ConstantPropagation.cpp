@@ -22,6 +22,59 @@ void Replace(Inst& inst, Value value) {
 	inst.ReplaceUsesWith(value.Resolve());
 }
 
+class FoldWorklist {
+public:
+	struct Location {
+		Block::iterator instruction;
+		uint64_t visited = 0;
+		bool queued = false;
+	};
+
+	void Register(Block::iterator instruction) {
+		locations.emplace(&*instruction, Location {instruction});
+		Queue(&*instruction);
+	}
+
+	void Queue(Inst* inst) {
+		const auto found = locations.find(inst);
+		if (found != locations.end() && !found->second.queued) {
+			found->second.queued = true;
+			pending.push_back(inst);
+		}
+	}
+
+	void QueueUsers(const std::vector<Use>& users) {
+		++generation;
+		affected.clear();
+		for (const auto& use: users) affected.push_back(use.user);
+		// Pattern folds inspect nested operands even when intermediate operations
+		// stay dynamic. Visit consumers once per change, including cyclic Phi edges.
+		for (size_t i = 0; i < affected.size(); ++i) {
+			auto* inst = affected[i];
+			const auto found = locations.find(inst);
+			if (found == locations.end() || found->second.visited == generation) continue;
+			found->second.visited = generation;
+			Queue(inst);
+			for (const auto& use: inst->Uses()) affected.push_back(use.user);
+		}
+	}
+
+	Block::iterator Prepend(Block& block, Block::iterator before, ValueOpcode opcode,
+	                         std::initializer_list<Value> args = {}) {
+		const auto result = block.PrependNewInst(before, opcode, args);
+		Register(result);
+		return result;
+	}
+
+	std::unordered_map<Inst*, Location> locations;
+	std::vector<Inst*> pending;
+	std::unordered_set<Inst*> lowered_ancillary;
+
+private:
+	std::vector<Inst*> affected;
+	uint64_t generation = 0;
+};
+
 template <typename Function>
 bool FoldU32(Inst& inst, Function function) {
 	const auto lhs = Arg(inst, 0);
@@ -196,7 +249,7 @@ bool FoldCompositeExtract(Inst& inst, ValueOpcode construct, size_t components) 
 }
 
 void FoldInstruction(Block& block, Block::iterator instruction,
-                      std::unordered_set<Inst*>& lowered_ancillary) {
+	                      FoldWorklist& worklist) {
 	auto& inst = *instruction;
 	switch (inst.GetOpcode()) {
 		case ValueOpcode::StoreBufferU32: {
@@ -208,7 +261,7 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 		case ValueOpcode::SelectU1:
 			if (!FoldSelect(inst) && IsImmediate(Arg(inst, 2), Type::U1) &&
 			    !Arg(inst, 2).U1()) {
-				auto result = block.PrependNewInst(instruction, ValueOpcode::LogicalAnd,
+				auto result = worklist.Prepend(block, instruction, ValueOpcode::LogicalAnd,
 				                                   {Arg(inst, 0), Arg(inst, 1)});
 				Replace(inst, Value(&*result));
 			}
@@ -224,8 +277,8 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 				case 0u: Replace(inst, Value(false)); break;
 				case 0x3ffu: Replace(inst, Value(true)); break;
 				case 3u: {
-					const auto result = block.PrependNewInst(
-					    instruction, ValueOpcode::FPIsNan32, {Arg(inst, 0)});
+					const auto result = worklist.Prepend(
+					    block, instruction, ValueOpcode::FPIsNan32, {Arg(inst, 0)});
 					Replace(inst, Value(&*result));
 					break;
 				}
@@ -280,12 +333,12 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 					if (offset.U32() >= field.start && offset.U32() < field.end &&
 					    count.U32() <= field.end - offset.U32()) {
 						// Preserve extraction and sign extension while exposing only the used field.
-						const auto input = block.PrependNewInst(
-						    instruction, ValueOpcode::GetBuiltin,
+						const auto input = worklist.Prepend(
+						    block, instruction, ValueOpcode::GetBuiltin,
 						    {Value(static_cast<uint32_t>(field.kind)), Value(0u)});
 						inst.SetArg(0, Value(&*input));
 						inst.SetArg(1, Value(offset.U32() - field.start));
-						lowered_ancillary.insert(source);
+						worklist.lowered_ancillary.insert(source);
 						return;
 					}
 				}
@@ -710,8 +763,7 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 // ballot projection also survives scalar EXEC operations and loop-carried mask Phis.
 class LaneMaskProjection {
 public:
-	explicit LaneMaskProjection(std::unordered_set<Inst*>& lowered_ancillary)
-	    : m_lowered_ancillary(lowered_ancillary) {}
+	explicit LaneMaskProjection(FoldWorklist& worklist): m_worklist(worklist) {}
 
 	void Fold(Inst& inst, uint32_t wave_size) {
 		if (inst.GetOpcode() != ValueOpcode::INotEqual32 || !Immediate(Arg(inst, 1), 0u)) return;
@@ -778,19 +830,18 @@ private:
 		if (const auto found = m_values.find(source); found != m_values.end()) return found->second.Resolve();
 		if (const auto predicate = BallotPredicate(*source); !predicate.IsEmpty()) return predicate;
 		auto* block = source->Parent();
-		const auto where = std::find_if(block->begin(), block->end(),
-		                               [source](const Inst& candidate) { return &candidate == source; });
+		const auto where = m_worklist.locations.at(source).instruction;
 		const auto op = source->GetOpcode() == ValueOpcode::BitwiseAnd32 ? ValueOpcode::LogicalAnd
 		              : source->GetOpcode() == ValueOpcode::BitwiseOr32 ? ValueOpcode::LogicalOr
 		              : source->GetOpcode() == ValueOpcode::BitwiseNot32 ? ValueOpcode::LogicalNot
 		              : source->GetOpcode() == ValueOpcode::SelectU32 ? ValueOpcode::SelectU1
 		                                                               : ValueOpcode::Phi;
-		auto result = op == ValueOpcode::Phi ? block->PrependNewInst(where, op)
+		auto result = op == ValueOpcode::Phi ? m_worklist.Prepend(*block, where, op)
 		            : op == ValueOpcode::LogicalNot
-		                ? block->PrependNewInst(where, op, {Value(false)})
+		                ? m_worklist.Prepend(*block, where, op, {Value(false)})
 		            : op == ValueOpcode::SelectU1
-		                ? block->PrependNewInst(where, op, {Arg(*source, 0), Value(false), Value(false)})
-		                : block->PrependNewInst(where, op, {Value(false), Value(false)});
+		                ? m_worklist.Prepend(*block, where, op, {Arg(*source, 0), Value(false), Value(false)})
+		                : m_worklist.Prepend(*block, where, op, {Value(false), Value(false)});
 		m_values.emplace(source, Value(&*result));
 		if (op == ValueOpcode::Phi) result->SetFlags(Type::U1);
 		for (size_t arg = op == ValueOpcode::SelectU1 ? 1u : 0u; arg < source->NumArgs(); ++arg) {
@@ -798,11 +849,11 @@ private:
 			if (op == ValueOpcode::Phi) result->AddPhiOperand(source->PhiBlock(arg), projected);
 			else result->SetArg(arg, projected);
 		}
-		FoldInstruction(*block, result, m_lowered_ancillary);
+		FoldInstruction(*block, result, m_worklist);
 		return Value(&*result).Resolve();
 	}
 
-	std::unordered_set<Inst*>& m_lowered_ancillary;
+	FoldWorklist& m_worklist;
 	std::unordered_set<const Inst*> m_visited;
 	std::unordered_map<const Inst*, Value> m_values;
 	bool m_grounded = false;
@@ -811,29 +862,59 @@ private:
 } // namespace
 
 void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
-	std::unordered_set<Inst*> lowered_ancillary;
-	LaneMaskProjection mask_projection(lowered_ancillary);
-	for (auto* block: blocks) {
-		for (auto inst = block->begin(); inst != block->end(); ++inst) {
+	FoldWorklist worklist;
+	LaneMaskProjection mask_projection(worklist);
+	for (auto* block: blocks)
+		for (auto inst = block->begin(); inst != block->end(); ++inst) worklist.Register(inst);
+	std::vector<Use> users;
+	std::vector<Value> operands;
+	const auto drain = [&] {
+		for (size_t i = 0; i < worklist.pending.size(); ++i) {
+			auto* inst = worklist.pending[i];
+			auto& location = worklist.locations.at(inst);
+			location.queued = false;
+			const auto opcode = inst->GetOpcode();
+			if (opcode == ValueOpcode::Identity || opcode == ValueOpcode::Void) continue;
+			const auto where = location.instruction;
+			users.assign(inst->Uses().begin(), inst->Uses().end());
+			operands.clear();
+			for (size_t arg = 0; arg < inst->NumArgs(); ++arg) operands.push_back(inst->Arg(arg));
 			mask_projection.Fold(*inst, wave_size);
-			FoldInstruction(*block, inst, lowered_ancillary);
+			FoldInstruction(*inst->Parent(), where, worklist);
+			bool changed = opcode != inst->GetOpcode() || operands.size() != inst->NumArgs();
+			for (size_t arg = 0; !changed && arg < operands.size(); ++arg)
+				changed = operands[arg] != inst->Arg(arg);
+			if (changed) {
+				worklist.QueueUsers(users);
+				worklist.Queue(inst);
+			}
 		}
-	}
+		worklist.pending.clear();
+	};
+	drain();
 	// Normalize retained PHI/select values only after every supported field read has
 	// been lowered; direct raw consumers remain unsupported.
-	for (auto* source: lowered_ancillary) {
-		const bool retained_only = std::ranges::all_of(source->Uses(), [](const Use& use) {
-			const auto& user = *use.user;
-			if (!user.HasUses() && !user.MayHaveSideEffects()) {
-				return true;
+	bool normalized;
+	do {
+		normalized = false;
+		for (auto* source: worklist.lowered_ancillary) {
+			if (source->GetOpcode() == ValueOpcode::Identity) continue;
+			const bool retained_only = std::ranges::all_of(source->Uses(), [](const Use& use) {
+				const auto& user = *use.user;
+				if (!user.HasUses() && !user.MayHaveSideEffects()) {
+					return true;
+				}
+				return user.GetOpcode() == ValueOpcode::Phi ||
+				       (user.GetOpcode() == ValueOpcode::SelectU32 && use.operand == 2u);
+			});
+			if (retained_only) {
+				worklist.QueueUsers(source->Uses());
+				Replace(*source, Value(0u));
+				normalized = true;
 			}
-			return user.GetOpcode() == ValueOpcode::Phi ||
-			       (user.GetOpcode() == ValueOpcode::SelectU32 && use.operand == 2u);
-		});
-		if (retained_only) {
-			Replace(*source, Value(0u));
 		}
-	}
+		drain();
+	} while (normalized);
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

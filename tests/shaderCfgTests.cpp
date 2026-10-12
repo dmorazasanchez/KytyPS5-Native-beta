@@ -12534,6 +12534,86 @@ void TestLaneMaskProjection() {
   }
 }
 
+void TestLateConstantPropagation() {
+  using namespace ShaderRecompiler::IR;
+  for (const uint32_t wave_size : {32u, 64u}) {
+    for (const bool reverse : {false, true}) {
+      Program program;
+      program.stage = ShaderType::Compute;
+      program.wave_size = wave_size;
+      for (uint32_t id = 0; id < 4; ++id) {
+        program.block_storage.push_back(std::make_unique<Block>());
+        program.blocks.push_back(program.block_storage.back().get());
+        program.blocks.back()->id = id;
+      }
+      auto *entry = program.blocks[0];
+      auto *header = program.blocks[1];
+      auto *latch = program.blocks[2];
+      auto *exit = program.blocks[3];
+      entry->AddBranch(header);
+      header->AddBranch(latch);
+      header->AddBranch(exit);
+      latch->AddBranch(header);
+      entry->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Branch;
+      entry->terminator.true_block = header;
+      header->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch;
+      header->terminator.true_block = latch;
+      header->terminator.false_block = exit;
+      latch->terminator.kind = ShaderRecompiler::CFG::TerminatorKind::Branch;
+      latch->terminator.true_block = header;
+      IREmitter e(entry);
+      const auto raw = e.GetUserData(static_cast<ScalarReg>(0));
+      const auto active = e.INotEqual(raw, U32(Value(0u)));
+      header->condition = active;
+      auto &predicate = header->AppendNewInst(ValueOpcode::Phi);
+      predicate.SetFlags(Type::U1);
+      auto &mask = header->AppendNewInst(ValueOpcode::Phi);
+      mask.SetFlags(Type::U32);
+      const auto thread_bit = [](IREmitter &ir, U32 word) {
+        const auto lane = ir.BitwiseAnd(U32(ir.Emit(ValueOpcode::LaneId)), U32(Value(31u)));
+        return ir.INotEqual(ir.BitwiseAnd(ir.ShiftRightLogical(word, lane), U32(Value(1u))),
+                           U32(Value(0u)));
+      };
+      IREmitter body(header);
+      const auto live = thread_bit(body, U32(Value(&mask)));
+      const auto selected = body.Select(live, U32(Value(42u)), raw);
+      const auto projected = body.Emit(ValueOpcode::SelectU1,
+                                      {Value(&predicate), live, Value(false)});
+      const auto absorbed = body.LogicalAnd(active,
+          body.LogicalOr(body.LogicalNot(active), U1(Value(&predicate))));
+      IREmitter tail(latch);
+      const auto full = thread_bit(tail, U32(Value(UINT32_MAX)));
+      const auto full_word = tail.Select(full, U32(Value(UINT32_MAX)), U32(Value(0u)));
+      predicate.AddPhiOperand(entry, Value(true));
+      predicate.AddPhiOperand(latch, full);
+      mask.AddPhiOperand(entry, Value(UINT32_MAX));
+      mask.AddPhiOperand(latch, full_word);
+      exit->condition = projected;
+      if (reverse) std::ranges::reverse(program.blocks);
+
+      ConstantPropagationPass(program.blocks, wave_size);
+      if (reverse) std::ranges::reverse(program.blocks);
+      Check(Value(&predicate).Resolve() == Value(true) &&
+                Value(&mask).Resolve() == Value(UINT32_MAX) && live.Resolve() == Value(true) &&
+                selected.Resolve() == Value(42u) && projected.Resolve() == Value(true) &&
+                absorbed.Resolve() == active.Resolve(),
+            "late constants did not reach Phi, nested mask patterns or new logical nodes");
+      ResolveControlFlowIdentities(program);
+      Check(exit->condition == Value(true), "late constant lost its control-flow use");
+      RemoveIdentities(program.blocks);
+      ValidateProgram(program, true);
+    }
+  }
+
+  Block cycle;
+  auto &phi = cycle.AppendNewInst(ValueOpcode::Phi);
+  phi.SetFlags(Type::U32);
+  phi.AddPhiOperand(&cycle, Value(&phi));
+  ConstantPropagationPass({&cycle});
+  Check(phi.GetOpcode() == ValueOpcode::Phi && phi.Arg(0).TryInstruction() == &phi,
+        "an ungrounded Phi cycle acquired a constant");
+}
+
 void TestU64ShiftConstantPropagation() {
   using namespace ShaderRecompiler::IR;
 
@@ -15722,6 +15802,7 @@ int main() {
 #endif
   TestValuePhiValidation();
   TestLaneMaskProjection();
+  TestLateConstantPropagation();
   TestU64ShiftConstantPropagation();
   TestU64RegisterPairRoundTrip();
 #if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
