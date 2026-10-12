@@ -1620,6 +1620,126 @@ void TestUniformScalarBufferImage() {
         "unavailable nested image table was accepted");
 }
 
+void TestScalarBufferSelectorDomain() {
+  const auto make_plan = [](bool active = true, bool sparse = false) {
+    Fixture fixture;
+    const auto material = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
+                                          fixture.UserData(2), fixture.UserData(3)});
+    MemoryInfo lds;
+    lds.kind = ResourceKind::Lds;
+    const auto index = fixture.Emit(ValueOpcode::LoadSharedU32,
+        {Value(8u), Value(true)}, fixture.AddMemory(lds, 0x10));
+    auto offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+        {index, Value(sparse ? 31u : 5u)});
+    if (!sparse)
+      offset = fixture.Emit(ValueOpcode::IAdd32,
+          {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {offset, Value(2u)}), offset});
+    offset = fixture.Emit(ValueOpcode::IAdd32, {offset, Value(3u)});
+    offset = fixture.Emit(ValueOpcode::ReadFirstLane, {offset, Value(active)});
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarBuffer;
+    scalar.offset = 147u;
+    const auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
+        {material, offset}, fixture.AddMemory(scalar, 0x20));
+    const auto table = fixture.Address(fixture.UserData(4), fixture.UserData(5));
+    const auto record = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
+    std::array<Value, 8> words;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+      scalar.kind = ResourceKind::ScalarAddress;
+      scalar.offset = word * 4u;
+      words[word] = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {table, record, Value(0u), Value(true)}, fixture.AddMemory(scalar, 0x30));
+    }
+    MemoryInfo sample;
+    sample.kind = ResourceKind::Image;
+    sample.image_dimension = Decoder::ImageDimension::Dim2D;
+    fixture.Emit(ValueOpcode::ImageSampleRaw,
+        {fixture.Image(words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
+         fixture.ImageAddress(), Value(true)}, fixture.AddMemory(sample, 0x40));
+    fixture.PlanAndTrack();
+    const auto &indirect = fixture.program.descriptor_sources[
+        fixture.program.info.images[0].source].indirect_descriptor;
+    Check(indirect && indirect->selector && indirect->key_count.IsEmpty() &&
+              indirect->selector_first.IsEmpty() && indirect->selector->offset == 144u &&
+              indirect->selector->stride == (sparse ? 0x80000000u : 32u),
+          "scalar selector assumed an unwrapped 160-byte record or combined unaligned offsets");
+    Check(key.ResolveInstruction()->Parent() != nullptr &&
+              std::ranges::count_if(fixture.program.memory_info, [](const MemoryInfo &memory) {
+                return memory.kind == ResourceKind::ScalarAddress && memory.planning_only;
+              }) == 8u,
+          "scalar selector lost its GPU key or retained descriptor-only address loads");
+    return ExtractResourcePlan(fixture.program);
+  };
+  auto plan = make_plan();
+  CheckFatal([&] { make_plan(false); }, "not a valid runtime value",
+             "scalar selector accepted an empty EXEC lane read");
+  LinearTestMemory memory;
+  memory.words[144u / 4u] = 1u;
+  memory.words[160u / 4u] = 99u; // This field is outside the affine offset domain.
+  memory.words[176u / 4u] = 2u;  // Reachable when the native 160*index multiplication wraps.
+  for (uint32_t key = 0; key < 3u; ++key) {
+    const auto word = (0x1000u + key * 32u) / 4u;
+    memory.words[word] = 0x100u + key;
+    memory.words[word + 1u] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    memory.words[word + 3u] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+  }
+  std::array<uint32_t, 6> user_data {0x1000u, 0u, 180u, 0u, 0x2000u, 0u};
+  const SrtRuntime runtime {.user_data = user_data, .read_memory = ReadLinearTestMemory,
+      .userdata = &memory, .read_specialization_memory = ReadLinearTestMemory};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  memory.watched_address = 0x1000u + 144u;
+  memory.fail_address = 0x1000u + 160u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 3u && memory.watched_reads == 1u &&
+            memory.watched_dwords == 1u && snapshot.images[0].dwords[0] == 0x100u &&
+            snapshot.images[2].dwords[0] == 0x102u,
+        "scalar selector read outside its wrapped domain or omitted the OOB zero key");
+  for (const auto size : {0u, 144u, 147u, 148u}) {
+    user_data[2] = size;
+    memory.watched_reads = 0u;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+              snapshot.images.size() == (size == 148u ? 2u : 1u) &&
+              memory.watched_reads == (size == 148u ? 1u : 0u) &&
+              snapshot.images[0].dwords[0] == 0x100u,
+          "scalar selector read an incomplete DWORD or lost a fully OOB zero key");
+  }
+  user_data[2] = 180u;
+  memory.words[176u / 4u] = 1u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 2u,
+        "scalar selector reused stale keys after material memory changed");
+
+  plan = make_plan(true, true);
+  struct SparseMemory { std::vector<uint64_t> offsets; } sparse;
+  const auto read_sparse = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
+    auto &memory = *static_cast<SparseMemory *>(userdata);
+    std::ranges::fill(words, 0u);
+    if (words.size() == 1u) {
+      memory.offsets.push_back(address - 0x1000u);
+      words[0] = address == 0x1090u ? 1u : 2u;
+      return address == 0x1090u || address == 0x80001090u;
+    }
+    if (words.size() != 8u || (address != 0x2020u && address != 0x2040u)) return false;
+    words[0] = static_cast<uint32_t>(address);
+    words[1] = static_cast<uint32_t>(
+        Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float) << 20u;
+    words[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+        (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
+    return true;
+  };
+  user_data[1] = 2u << 16u;
+  user_data[2] = UINT32_MAX;
+  Check(MaterializeResources(plan,
+            {.user_data = user_data, .read_memory = read_sparse, .userdata = &sparse,
+             .read_specialization_memory = read_sparse}, snapshot, specialization) &&
+            sparse.offsets == std::vector<uint64_t>{144u, 0x80000090u} &&
+            snapshot.images.size() == 2u,
+        "large V# bounds extended the native U32 domain or invented an OOB zero key");
+}
+
 void TestComputeBufferFill() {
   struct Options {
     bool scalar = false;
@@ -3838,6 +3958,7 @@ int main() {
     Run("uniformized material image keys", TestUniformizedMaterialImageKeys);
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
+    Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
     Run("SRT runtime", TestSrtFlatteningAndRuntimeMemoization);
     Run("dynamic SRT", TestDynamicSrtReadRemainsExplicit);
     Run("writable descriptor phi", TestWritableDescriptorPhi);
