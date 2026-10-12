@@ -36419,12 +36419,14 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     test.name = wave == 32u ? "GuardedRecordImageTable32" : "GuardedRecordImageTable64";
     test.initial.resize((table + offset + stride * count) / 4u, 0xdeadbeefu);
     test.initial[table / 4u + 1u] = count;
-    for (u32 row = 0; row < count; ++row) {
+    for (u32 row = 0; row < count; ++row)
+    for (const u32 member : {0u, 1u}) {
       auto image = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
-      image[0] = row + 1u;
+      image[0] = (row + 1u) * (member == 0u ? 1u : 10u);
       image[3] = DstSel(4, 0, 0, 1) |
           (static_cast<u32>(Prospero::ImageType::kColor2D) << 28u);
-      std::copy_n(image.begin(), 8, test.initial.begin() + (table + offset + row * stride) / 4u);
+      std::copy_n(image.begin(), 8,
+          test.initial.begin() + (table + offset + row * stride + member * 32u) / 4u);
     }
     test.user_data[0] = table;
     auto destination = MakeSampledTextureData(Prospero::BufferFormat::k32Float);
@@ -36454,6 +36456,15 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     const auto range_exit = code.size(); code.push_back(0u);
     code.insert(code.end(), {EncodeSop2(0x26, 23, 22, 255), stride,
                             EncodeSop2(0x02, 23, 23, 255), offset,
+                            EncodeSopc(0x0d, 22, InlineU32(0))});
+    const auto skip_first = code.size(); code.push_back(0u);
+    code.insert(code.end(), {
+                            EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
+                            EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
+                            EncodeVop2(0x03, 0, Vgpr(4), 0)});
+    code[skip_first] = EncodeSopp(0x05, code.size() - skip_first - 1u);
+    // The second descriptor is reached through both sides of the optional first sample.
+    code.insert(code.end(), {EncodeSop2(0x02, 23, 23, InlineU32(32)),
                             EncodeSmem0(0x03, 8), EncodeSmem1(0, 23),
                             EncodeMimg0(0x27, 1), EncodeMimg1(4, 20, 2, 10),
                             EncodeVop2(0x03, 0, Vgpr(4), 0),
@@ -36468,7 +36479,7 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     AppendEnd(&code);
     test.opcodes = {O::S_LSHR_B32, O::S_LOAD_DWORD, O::V_MOV_B32, O::S_FF1_I32_B32,
         O::S_CMP_LG_U32, O::S_CMP_GE_U32, O::S_CBRANCH_SCC0, O::S_CBRANCH_SCC1,
-        O::S_MUL_I32, O::S_ADD_I32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
+        O::S_MUL_I32, O::S_ADD_I32, O::S_BITCMP1_B32, O::S_LOAD_DWORDX8, O::IMAGE_SAMPLE,
         O::V_ADD_F32, O::S_LSHL_B32, O::S_ANDN2_B32, O::S_BRANCH,
         O::IMAGE_STORE, O::S_ENDPGM};
     auto compiled = CompileCase(test, vulkan.SubgroupSize());
@@ -36476,7 +36487,8 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
         [](const auto &image) {
           return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
         });
-    Require(test.name, "bounded descriptor rows", sampled_count == std::max(1u, count),
+    Require(test.name, "bounded descriptor rows",
+            count == 0u ? sampled_count <= 2u : sampled_count == count * 2u,
             "the runtime count lost a row or probed record padding");
     std::vector<VulkanHarness::Image> images(compiled.program.info.images.size());
     for (u32 resource = 0; resource < images.size(); ++resource) {
@@ -36494,8 +36506,8 @@ void CheckGuardedRecordImageTable(VulkanHarness &vulkan) {
     auto sampler = vulkan.CreateSampler(test.name, 1);
     vulkan.Dispatch(test, compiled, buffer, nullptr, nullptr, &storage, nullptr, sampler, images);
     const std::vector<u32> expected = count == 0 ? std::vector<u32>(4, 0u) :
-        std::vector<u32>{std::bit_cast<u32>(count == 3 ? 4.0f : 1.0f),
-                        std::bit_cast<u32>(2.0f), std::bit_cast<u32>(1.0f), 0u};
+        std::vector<u32>{std::bit_cast<u32>(count == 3 ? 44.0f : 11.0f),
+                        std::bit_cast<u32>(20.0f), std::bit_cast<u32>(11.0f), 0u};
     CompareWords(test, "GPU worklist, guarded count and image writes", expected,
                  vulkan.ReadImage(test.name, &storage));
     vulkan.DestroyBuffer(&buffer);

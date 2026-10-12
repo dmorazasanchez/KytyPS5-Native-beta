@@ -563,7 +563,8 @@ void TestGuardedDirectImageTable() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
   enum class Guard {
     Nonzero, SccNonZero, Plain, Zero, Unrelated, Bypass, ExecZero, VccZero,
-    Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane
+    Bounded, BoundMissing, BoundUnrelated, BoundBypass, BoundAnyLane,
+    BoundDiamond, BoundBranchSpecific, BoundMismatched
   };
   const auto make_plan = [](Guard guard) {
     const bool bounded = guard >= Guard::Bounded;
@@ -575,12 +576,6 @@ void TestGuardedDirectImageTable() {
     auto *before_sample = fixture.AddBlock();
     auto *sample = fixture.AddBlock();
     auto *exit = fixture.AddBlock();
-    entry->AddBranch(middle);
-    entry->AddBranch(exit);
-    middle->AddBranch(before_sample);
-    before_sample->AddBranch(sample);
-    sample->AddBranch(exit);
-    if (bypass) exit->AddBranch(sample);
     const auto varying = bounded
         ? fixture.Emit(ValueOpcode::GetBuiltin,
             {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)})
@@ -631,6 +626,32 @@ void TestGuardedDirectImageTable() {
     fixture.program.blocks[4]->terminator = {
         .kind = bypass ? CFG::TerminatorKind::Branch : CFG::TerminatorKind::Return,
         .true_block = fixture.program.blocks[3u]};
+    if (guard == Guard::BoundDiamond) {
+      middle->condition = fixture.Emit(ValueOpcode::IEqual32,
+          {mask, Value(1u)});
+      middle->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+          .true_block = before_sample, .false_block = sample};
+    } else if (guard == Guard::BoundBranchSpecific || guard == Guard::BoundMismatched) {
+      entry->condition = fixture.Emit(ValueOpcode::IEqual32,
+          {mask, Value(1u)});
+      entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+          .true_block = middle, .false_block = before_sample};
+      middle->condition = condition;
+      middle->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+          .true_block = exit, .false_block = sample};
+      if (guard == Guard::BoundMismatched) {
+        before_sample->condition = fixture.Emit(ValueOpcode::UGreaterThanEqual32,
+            {key, fixture.UserData(2)});
+        before_sample->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+            .true_block = exit, .false_block = sample};
+      }
+    }
+    for (auto *block : fixture.program.blocks) {
+      if (block->terminator.kind == CFG::TerminatorKind::Return) continue;
+      block->AddBranch(block->terminator.true_block);
+      if (block->terminator.kind == CFG::TerminatorKind::ConditionalBranch)
+        block->AddBranch(block->terminator.false_block);
+    }
     std::array<Value, 2> pointer;
     for (uint32_t word = 0; word < pointer.size(); ++word) {
       if (bounded) {
@@ -702,7 +723,8 @@ void TestGuardedDirectImageTable() {
   make_plan(Guard::Plain);
   for (const auto guard : {Guard::Zero, Guard::Unrelated, Guard::Bypass,
                            Guard::ExecZero, Guard::VccZero, Guard::BoundMissing,
-                           Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane}) {
+                           Guard::BoundUnrelated, Guard::BoundBypass, Guard::BoundAnyLane,
+                           Guard::BoundBranchSpecific, Guard::BoundMismatched}) {
     CheckFatal([&] { make_plan(guard); }, "not a valid runtime value",
                "direct table accepted a selector without a dominating range guard");
   }
@@ -779,7 +801,8 @@ void TestGuardedDirectImageTable() {
             endpoint.watched_reads == 0u,
         "batched descriptor read crossed the 48-bit endpoint");
 
-  auto bounded = make_plan(Guard::Bounded);
+  make_plan(Guard::Bounded);
+  auto bounded = make_plan(Guard::BoundDiamond);
   Check(bounded.capture_specialization_reads && bounded.info.images[1].written,
         "bounded table with image writes omitted specialization read capture");
   LinearTestMemory records;
