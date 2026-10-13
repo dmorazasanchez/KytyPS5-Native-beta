@@ -37279,6 +37279,46 @@ void CheckIndirectImageKeySwitch(VulkanHarness &vulkan) {
       const auto actual = vulkan.ReadBuffer(test.name, buffer, test.expected.size());
       vulkan.DestroyBuffer(&buffer);
       CompareWords(test, "root, native slots, array runs and mapping bounds", test.expected, actual);
+      if (wave_size == 32u && !homogeneous) {
+        // A single integer candidate must keep raw register bits across the
+        // same descriptor runs used by samples, gathers, and image fetches.
+        const auto coordinate_conversions = CountText(text, "OpConvertUToF");
+        auto &typed = compiled.program.info.images[3];
+        typed.numeric_class = Prospero::TextureNumericClass::Uint;
+        if (!fetch) {
+          auto integer_sampler = compiled.program.info.samplers[0];
+          integer_sampler.force_point_filtering = true;
+          integer_sampler.integer_border = true;
+          compiled.program.info.samplers.push_back(integer_sampler);
+        }
+        compiled.program.shader_info_complete = false;
+        CollectShaderInfo(compiled.program, {.compute = &compute});
+        const auto mixed_spirv = ShaderRecompiler::Spirv::EmitProgram(
+            compiled.program, {.compute = &compute});
+        ValidateSpirv("IndirectImageMixedNumeric", mixed_spirv);
+        u32 unsigned_type = 0u, raw_vector = 0u;
+        bool raw_join = false;
+        for (size_t offset = 5; offset < mixed_spirv.size();) {
+          const auto words = std::span<const u32>(mixed_spirv).subspan(
+              offset, mixed_spirv[offset] >> 16u);
+          const auto opcode = static_cast<spv::Op>(words[0] & 0xffffu);
+          if (opcode == spv::OpTypeInt && words[2] == 32u && words[3] == 0u)
+            unsigned_type = words[1];
+          if (opcode == spv::OpTypeVector && words[2] == unsigned_type && words[3] == 4u)
+            raw_vector = words[1];
+          if (opcode == spv::OpPhi && words[1] == raw_vector) raw_join = true;
+          offset += words.size();
+        }
+        Require(test.name, "mixed numeric image result", raw_join &&
+                    tools.Disassemble(mixed_spirv, &text) &&
+                    CountText(text, image_opcode) == 4u * halves &&
+                    CountText(text, "OpConvertUToF") == coordinate_conversions,
+                "mixed image classes lost raw result bits or expanded per image");
+        typed.numeric_class = Prospero::TextureNumericClass::Float;
+        if (!fetch) compiled.program.info.samplers.pop_back();
+        compiled.program.shader_info_complete = false;
+        CollectShaderInfo(compiled.program, {.compute = &compute});
+      }
     }
     std::printf("[compute] %-32s ok\n", test.name);
   }

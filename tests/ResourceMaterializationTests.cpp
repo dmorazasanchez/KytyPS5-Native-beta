@@ -974,6 +974,63 @@ void TestMixedSamplerVariantsShareRuntimeDescriptor() {
         "sampler variants retained stale or duplicated descriptors after refresh");
 }
 
+void TestIndirectImageSamplerClasses(bool mixed) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::Prospero::BufferFormat;
+  using Libs::Graphics::Prospero::TextureNumericClass;
+  auto program = MixedSamplerProgram();
+  auto &first = program.descriptor_sources[0];
+  first.dwords[0] = Value(0x100u);
+  first.dwords[1] = Value(static_cast<uint32_t>(BufferFormat::k8UNorm) << 20u);
+  first.dwords[3] = program.descriptor_sources[1].dwords[3];
+  program.descriptor_sources[1].dwords[1] = Value(static_cast<uint32_t>(
+      mixed ? BufferFormat::k8UInt : BufferFormat::k8UNorm) << 20u);
+  DescriptorSource root;
+  root.dword_count = 8;
+  root.dwords.fill(Value(0u));
+  root.indirect_descriptor.emplace().sources = {0, 1, 0};
+  program.info.images.resize(1);
+  program.info.images[0].source = static_cast<uint32_t>(program.descriptor_sources.size());
+  program.descriptor_sources.push_back(root);
+  program.info.samplers.resize(1);
+  program.info.sampled_pairs.resize(1);
+  auto plan = ExtractResourcePlan(program);
+  std::array<uint32_t, 1> user_data{0x11111111u};
+  uint32_t reads = 0;
+  const SrtRuntime runtime{.user_data = user_data, .userdata = &reads,
+                           .read_specialization_memory = RejectSpecializationRead};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) && reads == 0 &&
+            snapshot.images.size() == 2 && snapshot.images[0].dwords[0] == 0x100u &&
+            snapshot.images[1].dwords[0] == 1u &&
+            specialization.images[0].numeric_class == TextureNumericClass::Float &&
+            specialization.images[1].numeric_class ==
+                (mixed ? TextureNumericClass::Uint : TextureNumericClass::Float),
+        "indirect image materialization rejected or changed a typed candidate");
+  const auto offset = specialization.images[0].indirect_mapping_offset;
+  Check(snapshot.flattened_srt[offset] == 3u &&
+            snapshot.flattened_srt[offset + 2u] == 0u &&
+            snapshot.flattened_srt[offset + 4u] == 1u &&
+            snapshot.flattened_srt[offset + 6u] == 0u,
+        "mixed image classes changed selector ordinals or duplicated candidates");
+  ApplyResourceSpecialization(program, specialization);
+  Check(program.info.images[0].indirect_resources == std::vector<uint32_t>({0, 1}) &&
+            snapshot.samplers.size() == 1 && program.info.samplers.size() == (mixed ? 2u : 1u),
+        "indirect images lost candidates or created unnecessary sampler variants");
+  user_data[0] = 0x33333333u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "mixed image sampler refresh failed");
+  for (uint32_t index = 0; index < program.info.samplers.size(); ++index) {
+    const auto &sampler = program.info.samplers[index];
+    Check(sampler.snapshot_index == 0u && sampler.source == plan.info.samplers[0].source &&
+              sampler.force_point_filtering == (index != 0u) &&
+              sampler.integer_border == (index != 0u) &&
+              snapshot.samplers[sampler.snapshot_index].dwords[0] == user_data[0],
+          "typed sampler variants lost filtering, border class, or shared live descriptor");
+  }
+}
+
 } // namespace
 
 namespace Common {
@@ -1007,6 +1064,7 @@ int main() {
     TestEmptyTraversalSkipsUnmappedDescriptor(independent_mask);
   TestCyclicControlPredicatesRemainUnknown();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
+  for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
