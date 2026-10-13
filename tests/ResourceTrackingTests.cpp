@@ -2969,7 +2969,7 @@ void TestSharedAppendSelectorBounds() {
     OuterReentry, InnerAppendCycle, EarlyCounterRead, WrongConsumerBound, ExtraWriter, CounterAlias,
     PayloadWrap, CounterOob
   };
-  const auto make_plan = [](Variant variant) {
+  const auto make_plan = [](Variant variant, uint32_t first_base = 1032u, uint32_t consumed_base = 8u) {
     Fixture fixture;
     ShaderComputeInputInfo compute;
     compute.threads_num[0] = 8u;
@@ -3072,7 +3072,8 @@ void TestSharedAppendSelectorBounds() {
           0, append);
       const auto payload = fixture.Emit(ValueOpcode::SelectU32,
           {active, candidate, Value(UINT32_MAX)}, 0, append);
-      const auto base = list == 0u ? 1032u : variant == Variant::PayloadWrap ? 0xfffffff8u : 8u;
+      const auto base = list == 0u ? first_base :
+          variant == Variant::PayloadWrap ? 0xfffffff8u : consumed_base;
       fixture.Emit(ValueOpcode::WriteSharedU32, {address, payload, active}, shared(base), append);
       if (variant == Variant::InnerAppendCycle && list == 1u) {
         auto *repeat = fixture.AddBlock();
@@ -3106,7 +3107,8 @@ void TestSharedAppendSelectorBounds() {
     choose(header, body, exit, in_list, CFG::BranchCondition::VccNonZero);
     fixture.block = body;
     const auto selected = fixture.Emit(ValueOpcode::LoadSharedU32,
-        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {Value(&index), Value(2u)}), Value(true)}, shared(8u));
+        {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {Value(&index), Value(2u)}), Value(true)},
+        shared(consumed_base));
     const auto offset32 = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {selected, Value(5u)});
     const auto offset = fixture.Emit(ValueOpcode::ReadFirstLane,
         {fixture.Emit(ValueOpcode::IAdd32,
@@ -3181,12 +3183,26 @@ void TestSharedAppendSelectorBounds() {
   for (const auto counts : {std::array{1u, 2u}, std::array{3u, 1u}, std::array{1u, 1u}, std::array{0u, 0u}}) {
     memory.words[0x800u / 4u] = counts[0];
     memory.words[0x804u / 4u] = counts[1];
-    const auto expected = std::max(counts[0], counts[1]);
+    const auto expected = counts[1];
     Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
               snapshot.images.size() == std::max(expected, 1u) &&
               (expected == 0u || snapshot.images.back().dwords[0] == 0x100u + expected),
-          "shared append union bound or refreshed runtime counts selected stale material keys");
+          "disjoint shared append lists or refreshed counts selected unrelated material keys");
   }
+  memory.words[0x800u / 4u] = 24u;
+  memory.words[0x804u / 4u] = 2u;
+  memory.words[(144u + 320u) / 4u] = 0xbe7cc577u;
+  memory.fail_address = 0x1000u + 144u + 320u;
+  user_data[2] = 24u;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) && snapshot.images.size() == 2u &&
+            snapshot.images[0].dwords[0] == 0x101u && snapshot.images[1].dwords[0] == 0x102u,
+        "a disjoint 24-entry list exposed float fields after the two active material records");
+  for (const uint64_t address : {0x1800u, 0x1804u})
+    Check(std::ranges::find(snapshot.specialization_reads, std::pair{address, uint64_t{4u}}) !=
+              snapshot.specialization_reads.end(),
+          "a disjoint append producer escaped count capture");
+  memory.fail_address = UINT64_MAX;
+  user_data[2] = 8u;
   memory.words[0x800u / 4u] = 1u;
   memory.words[0x804u / 4u] = 2u;
   memory.words[(144u + 160u) / 4u] = 4u;
@@ -3207,12 +3223,15 @@ void TestSharedAppendSelectorBounds() {
     }
   }
 
-  struct BoundaryMemory { uint32_t keys_read = 0; } boundary;
+  struct BoundaryMemory {
+    uint32_t keys_read = 0;
+    std::array<uint32_t, 2> counts{0u, 65536u};
+  } boundary;
   const auto read_boundary = +[](void *userdata, uint64_t address, std::span<uint32_t> words) {
     auto &memory = *static_cast<BoundaryMemory *>(userdata);
     std::ranges::fill(words, 0u);
     if (words.size() == 1u && (address == 0x40000000u || address == 0x40000004u)) {
-      words[0] = address == 0x40000000u ? 65536u : 0u;
+      words[0] = memory.counts[(address - 0x40000000u) / 4u];
       return true;
     }
     if (words.size() == 1u && address >= 0x1090u &&
@@ -3238,6 +3257,26 @@ void TestSharedAppendSelectorBounds() {
             boundary.keys_read == 65536u && snapshot.images.size() == 1u &&
             snapshot.images[0].dwords[0] == 0x101u,
         "shared append materialization rejected its exact nonwrapping probe limit");
+  const std::array bases{std::pair{1032u, 8u}, std::pair{8u, 1032u}, std::pair{8u, 8u}};
+  struct OverlapCase { std::array<uint32_t, 2> counts; std::array<uint32_t, 3> expected; };
+  const std::array<OverlapCase, 7> overlaps{{
+      {{300u, 256u}, {256u, 300u, 300u}}, {{300u, 257u}, {300u, 300u, 300u}},
+      {{300u, 256u}, {256u, 300u, 300u}}, {{256u, 3u}, {3u, 3u, 256u}},
+      {{257u, 3u}, {3u, 257u, 257u}}, {{300u, 0u}, {0u, 0u, 0u}},
+      {{0u, 300u}, {300u, 300u, 300u}}}};
+  for (uint32_t layout = 0; layout < bases.size(); ++layout) {
+    auto overlap_plan = make_plan(Variant::Valid, bases[layout].first, bases[layout].second);
+    for (const auto& test : overlaps) {
+      boundary.counts = test.counts;
+      boundary.keys_read = 0u;
+      Check(MaterializeResources(overlap_plan,
+                {.user_data = user_data, .read_memory = read_boundary, .userdata = &boundary,
+                 .read_specialization_memory = read_boundary}, snapshot, specialization) &&
+                boundary.keys_read == test.expected[layout] && snapshot.images.size() == 1u &&
+                snapshot.images[0].dwords[0] == (test.expected[layout] != 0u ? 0x101u : 0u),
+            "shared append bounds lost overlap, included a touching list or retained stale keys");
+    }
+  }
 }
 
 void TestComputeBufferFill() {
