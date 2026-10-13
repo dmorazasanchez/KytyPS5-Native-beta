@@ -464,6 +464,7 @@ uint32_t EncodeFormattedStoreComponent(EmitterState& state, const Format::Buffer
 
 spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 	switch (opcode) {
+		case IR::ValueOpcode::SharedAtomicCmpSwap64:
 		case IR::ValueOpcode::ImageAtomicCompareSwap32:
 		case IR::ValueOpcode::BufferAtomicCmpSwap32: return spv::OpAtomicCompareExchange;
 		case IR::ValueOpcode::ImageAtomicSwap32:
@@ -491,7 +492,8 @@ spv::Op SpirvAtomicOpcode(IR::ValueOpcode opcode) {
 		case IR::ValueOpcode::ImageAtomicUMax32:
 		case IR::ValueOpcode::ImageAtomicUMax64:
 		case IR::ValueOpcode::BufferAtomicUMax32:
-		case IR::ValueOpcode::SharedAtomicUMax32: return spv::OpAtomicUMax;
+		case IR::ValueOpcode::SharedAtomicUMax32:
+		case IR::ValueOpcode::SharedAtomicUMax64: return spv::OpAtomicUMax;
 		case IR::ValueOpcode::ImageAtomicAnd32:
 		case IR::ValueOpcode::ImageAtomicAnd64:
 		case IR::ValueOpcode::BufferAtomicAnd32:

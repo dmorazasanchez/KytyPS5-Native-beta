@@ -1240,32 +1240,48 @@ void EmitSharedAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	const auto& mem = ctx.Memory(inst);
 	EnsureLdsStorage(state);
-	EmitIfCondition(state, ctx.Arg(inst, 2), [&]() {
-		const auto address = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
-		                            ByteAddress(ctx, inst, mem), ConstantU32(state, 0xfff8u));
-		const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
-		                          ConstantU32(state, 3u));
-		const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index,
-		                              ConstantU32(state, LdsDwordCount(state) / 2u));
-		EmitIfCondition(state, in_bounds, [&]() {
-			auto native_index = index;
-			auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
-			if (state.lds_storage_class == spv::StorageClassStorageBuffer) {
-				native_index = EmitAddU32(state, index, EmitBinaryU32(
-				    state, spv::OpShiftRightLogical, state.lds_base_dwords, ConstantU32(state, 1)));
-				semantics = spv::MemorySemanticsUniformMemoryMask;
-			}
-			const auto pointer = state.builder.AllocateId();
+	const auto address = Binary(state, spv::OpBitwiseAnd, TypeU32(state),
+	                            ByteAddress(ctx, inst, mem), ConstantU32(state, 0xfff8u));
+	const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), address,
+	                          ConstantU32(state, 3u));
+	const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index,
+	                              ConstantU32(state, LdsDwordCount(state) / 2u));
+	const auto active = EmitLogicalAndBool(state, ctx.Arg(inst, inst.NumArgs() - 1), in_bounds);
+	const auto emit = [&]() {
+		auto native_index = index;
+		auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
+		if (state.lds_storage_class == spv::StorageClassStorageBuffer) {
+			native_index = EmitAddU32(state, index, EmitBinaryU32(
+			    state, spv::OpShiftRightLogical, state.lds_base_dwords, ConstantU32(state, 1)));
+			semantics = spv::MemorySemanticsUniformMemoryMask;
+		}
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    spv::OpAccessChain, TypePointer(state, state.lds_storage_class, TypeU64(state)),
+		    pointer, state.lds_u64_variable, ConstantU32(state, 0), native_index);
+		const auto old = state.builder.AllocateId();
+		const auto opcode = SpirvAtomicOpcode(inst.GetOpcode());
+		const auto scope = ConstantU32(state, spv::ScopeWorkgroup);
+		const auto acquire_release =
+		    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | semantics);
+		if (opcode == spv::OpAtomicCompareExchange) {
+			// RDNA2 DS compares DATA and stores DATA2, opposite to BUFFER atomics.
 			state.builder.AddFunction(
-			    spv::OpAccessChain, TypePointer(state, state.lds_storage_class, TypeU64(state)),
-			    pointer, state.lds_u64_variable, ConstantU32(state, 0), native_index);
-			const auto value = ctx.Arg(inst, 1);
-			state.builder.AddFunction(
-			    SpirvAtomicOpcode(inst.GetOpcode()), TypeU64(state), state.builder.AllocateId(),
-			    pointer, ConstantU32(state, spv::ScopeWorkgroup),
-			    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | semantics), value);
-		});
-	});
+			    opcode, TypeU64(state), old, pointer, scope, acquire_release,
+			    ConstantU32(state, spv::MemorySemanticsAcquireMask | semantics),
+			    ctx.Arg(inst, 2), ctx.Arg(inst, 1));
+		} else {
+			state.builder.AddFunction(opcode, TypeU64(state), old, pointer, scope,
+			                          acquire_release, ctx.Arg(inst, 1));
+		}
+		return old;
+	};
+	if (inst.HasUses()) {
+		ctx.Define(inst, EmitValueOrDefaultIfCondition(
+		    state, active, TypeU64(state), ConstantU64(state, 0), emit));
+	} else {
+		EmitIfCondition(state, active, emit);
+	}
 }
 
 uint32_t EmitBufferFloatAtomic(ValueEmitContext& ctx, const IR::Inst& inst) {

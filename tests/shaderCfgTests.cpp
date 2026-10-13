@@ -7913,6 +7913,29 @@ void TestNewShaderRecompilerDsAddtidTranslation() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestDsReturningAtomic64Decoder() {
+  using namespace ShaderRecompiler::Decoder;
+  // CS23e96bf5029f62fd: native DATA is the comparison and DATA2 the replacement.
+  const uint32_t max_words[] = {0xd9a00008u, 0x00000400u};
+  const uint32_t cmp_words[] = {0xd9c00010u, 0x0202003fu};
+  Instruction decoded;
+  DecodeInstruction(max_words, 0u, decoded);
+  Check(decoded.opcode == Opcode::DS_MAX_RTN_U64 &&
+            decoded.word_count == 2u && decoded.data_dwords == 2u &&
+            decoded.data_bits == 32u && decoded.src_count == 2u &&
+            decoded.src0.reg == 0u && decoded.src1.reg == 4u &&
+            decoded.dst.reg == 0u && decoded.offset == 8u && !decoded.gds,
+        "captured DS_MAX_RTN_U64 lost its QWORD width, byte offset, or aliases");
+  DecodeInstruction(cmp_words, 0u, decoded);
+  Check(decoded.opcode == Opcode::DS_CMPST_RTN_B64 &&
+            decoded.word_count == 2u && decoded.data_dwords == 2u &&
+            decoded.data_bits == 32u && decoded.src_count == 3u &&
+            decoded.src0.reg == 63u && decoded.src1.reg == 0u &&
+            decoded.src2.reg == 2u && decoded.dst.reg == 2u &&
+            decoded.offset == 16u && !decoded.gds,
+        "captured DS_CMPST_RTN_B64 lost its comparison/replacement pairs or aliases");
+}
+
 void TestDsFloatMinMaxDecoder() {
   using namespace ShaderRecompiler::Decoder;
   for (bool max_value : {false, true}) {
@@ -15716,6 +15739,7 @@ int main() {
   // here.
   TestScalarAshrI64Decoder();
   TestImageAtomicWidthDecoder();
+  TestDsReturningAtomic64Decoder();
   TestDsFloatMinMaxDecoder();
   TestNewShaderDecoderArchitecture();
   TestImageAddressOperands();
