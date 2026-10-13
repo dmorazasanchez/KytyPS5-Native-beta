@@ -10869,6 +10869,13 @@ public:
       std::array<float, 4> channels;
     };
     const std::array packed_cases{
+        PackedCase{vk::Format::eB10G11R11UfloatPack32, 0u, {}},
+        PackedCase{vk::Format::eB10G11R11UfloatPack32, 0x801c03c0u, {1.0f, 0.5f, 2.0f}},
+        PackedCase{vk::Format::eB10G11R11UfloatPack32, 1u | (0x7bfu << 11u) | (1u << 22u),
+                   {0x1p-20f, 65024.0f, 0x1p-19f}},
+        PackedCase{vk::Format::eB10G11R11UfloatPack32, 0x7c0u | (0x7c0u << 11u) | (0x3e0u << 22u),
+                   {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(),
+                    std::numeric_limits<float>::infinity()}},
         PackedCase{vk::Format::eR16Sfloat, 0x7bff7bffu, {65504.0f}},
         PackedCase{vk::Format::eR16G16Sfloat, 0xbc003c00u, {1.0f, -1.0f}},
         PackedCase{vk::Format::eR16G16B16A16Sfloat, 0x40003800bc003c00ull,
@@ -10888,17 +10895,23 @@ public:
     };
     for (const auto &test : packed_cases) {
       vk::ClearColorValue clear{};
-      Require(name, "packed 16-bit clear",
+      Require(name, "packed color clear",
               DecodePackedColorClear(test.format, test.word, clear) &&
                   std::bit_cast<std::array<uint32_t, 4>>(clear.float32) ==
                       std::bit_cast<std::array<uint32_t, 4>>(test.channels),
-              "16-bit clear lost channel order, sign, range or unused-channel zeros");
+              "packed clear lost channel order, sign, range or unused-channel zeros");
     }
     vk::ClearColorValue clear{};
     Require(name, "half NaN clear",
             DecodePackedColorClear(vk::Format::eR16Sfloat, 0x7e00u, clear) &&
                 std::isnan(clear.float32[0]),
             "half NaN did not remain NaN");
+    Require(name, "packed unsigned NaN clear",
+            DecodePackedColorClear(vk::Format::eB10G11R11UfloatPack32,
+                0x7c1u | (0x7c1u << 11u) | (0x3e1u << 22u), clear) &&
+                std::isnan(clear.float32[0]) && std::isnan(clear.float32[1]) &&
+                std::isnan(clear.float32[2]),
+            "packed unsigned NaNs did not remain NaN");
     for (const auto format : {vk::Format::eR16Sfloat, vk::Format::eR16Unorm}) {
       Require(name, "R16 DWORD fill",
               !DecodeColorDwordFill(format, 0xbc003c00u, clear) &&
@@ -10930,6 +10943,10 @@ public:
                  .eliminate_fast_clear = true},
         FillCase{.fill = 0, .texel = {0, 0x3c000000u}, .cmask = true,
                  .eliminate_fast_clear = true},
+        FillCase{.fill = 0, .texel = {0, 0}, .cmask = true,
+                 .layout = Prospero::ChannelLayout::k11_11_10, .eliminate_fast_clear = true},
+        FillCase{.fill = 0, .texel = {0x801c03c0u, 0}, .cmask = true,
+                 .layout = Prospero::ChannelLayout::k11_11_10, .eliminate_fast_clear = true},
         FillCase{0x40404040u, {0, 0x3c000000u}, false, false, true},
         FillCase{.fill = 0x20202020u, .texel = {0x7bff7bffu},
                  .layout = Prospero::ChannelLayout::k16, .clear_word = 0x7bff7bffu},
@@ -11033,7 +11050,7 @@ public:
         registers.SetColorDccAddr(0, {.addr = dcc_address});
         registers.SetColorCmask(0, {.addr = dcc_address});
         registers.SetColorClearWord0(0, {.word0 = fill_case.cmask ? expected[0] : fill_case.clear_word});
-        registers.SetColorClearWord1(0, {.word1 = fill_case.eliminate_fast_clear ? expected[1] : 0});
+        registers.SetColorClearWord1(0, {.word1 = fill_case.cmask && expected.size() > 1u ? expected[1] : 0});
         registers.SetRenderTargetMask(0x0f);
         scheduler.Begin(registers, user_config, shaders);
 
@@ -11141,7 +11158,8 @@ public:
                   color.image_id == preexisting_id &&
                       texture_cache.FindTexture(color.image_id, sampled) != nullptr,
                   "FCE failed to retain the sampled allocation");
-          const std::vector<u32> stale{0x00003c00u, 0x3c003c00u};
+          const std::vector<u32> stale = layout == Prospero::ChannelLayout::k11_11_10
+              ? std::vector<u32>{0x780003c0u} : std::vector<u32>{0x00003c00u, 0x3c003c00u};
           Require(name, "FCE before graphics shader or target binding",
                   ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 1) == expected &&
                       ReadCachedTexel(name, context, color.image_id, {511, 255, 0},
