@@ -2409,27 +2409,91 @@ void TestScalarBufferSelectorDomain() {
         "large V# bounds extended the native U32 domain or invented an OOB zero key");
 }
 
+void TestPrivateLdsForwarding() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  enum class Variant { Valid, Overlap, Duplicate, CrossLane, Truncated, OutOfBounds, Mask, Bypass };
+  for (const auto variant : {Variant::Valid, Variant::Overlap, Variant::Duplicate,
+                            Variant::CrossLane, Variant::Truncated, Variant::OutOfBounds,
+                            Variant::Mask, Variant::Bypass}) {
+    Fixture fixture;
+    auto *entry = fixture.block;
+    auto *body = fixture.AddBlock();
+    auto *exit = fixture.AddBlock();
+    const auto local = [&](uint32_t axis) {
+      return fixture.Emit(ValueOpcode::GetBuiltin,
+          {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(axis)});
+    };
+    const auto x = local(0u), y = local(1u);
+    const auto address = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+        {fixture.Emit(ValueOpcode::IAdd32,
+            {x, fixture.Emit(ValueOpcode::IMul32,
+                {Value(16u), fixture.Emit(ValueOpcode::BitFieldUExtract,
+                    {y, Value(0u), Value(variant == Variant::Truncated ? 1u : 24u)})})}), Value(2u)});
+    const auto active = fixture.Emit(ValueOpcode::INotEqual32, {x, Value(0u)});
+    entry->AddBranch(body);
+    entry->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = body};
+    if (variant == Variant::Bypass) {
+      entry->condition = active;
+      entry->AddBranch(exit);
+      entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                          .true_block = body, .false_block = exit};
+    }
+    MemoryInfo memory;
+    memory.kind = ResourceKind::Lds;
+    memory.offset = 4096u;
+    fixture.Emit(ValueOpcode::WriteSharedU32,
+        {address, Value(0x12345678u), variant == Variant::Mask ? active : Value(true)},
+        fixture.AddMemory(memory, 0x10), variant == Variant::Bypass ? body : entry);
+    if (variant == Variant::Overlap || variant == Variant::Duplicate) {
+      auto other = memory;
+      other.offset += variant == Variant::Overlap ? 4u : 0u;
+      fixture.Emit(ValueOpcode::WriteSharedU32, {address, Value(0u), Value(true)},
+          fixture.AddMemory(other, 0x14), body);
+    }
+    body->AddBranch(exit);
+    body->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = exit};
+    const auto load = fixture.Emit(ValueOpcode::LoadSharedU32,
+        {variant == Variant::CrossLane
+             ? fixture.Emit(ValueOpcode::IAdd32, {address, Value(4u)}) : address, Value(true)},
+        fixture.AddMemory(memory, 0x20), exit);
+    const auto use = fixture.Emit(ValueOpcode::ReferenceU32, {load}, 0, exit);
+    ShaderComputeInputInfo compute;
+    compute.threads_num[0] = compute.threads_num[1] = 16u;
+    compute.threads_num[2] = 1u;
+    compute.lds_size_dwords = variant == Variant::OutOfBounds ? 1024u : 2048u;
+    fixture.PlanAndTrack({.compute = &compute});
+    const auto result = use.Instruction()->Arg(0).ResolveInstruction();
+    Check(result != nullptr &&
+              (result->GetOpcode() == ValueOpcode::SelectU32) == (variant == Variant::Valid),
+          "private LDS forwarding lost its value or crossed an alias, mask, bound or dominance hazard");
+  }
+}
+
 void TestCountedRowImageSelector() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
-  enum class Variant { Valid, Signed, WrongStep, Bypass, WrongRow, CountStride,
-                       KeyStride, CountImmediate, KeyImmediate, Masked, EmptyCountMask, VaryingRow,
-                       EmptyMask, UnprovenMask, WrongMask, AnyBound, MaskedWrongStep };
+  enum class Variant { Valid, Signed, StepTwo, SkippedIteration, WrongRow, CountStride,
+                       KeyStride, CountImmediate, KeyImmediate, DifferentBackedgeBound,
+                       Masked, EmptyCountMask, VaryingRow,
+                       EmptyMask, UnprovenMask, WrongMask, AnyBound, MaskedStepTwo, Spilled,
+                       MergedInitial, MissingBound, PreviousIteration };
   const auto make_plan = [](Variant variant = Variant::Valid, uint32_t capacity = 16u) {
     Fixture fixture;
     const bool masked = variant >= Variant::Masked;
+    const bool stable_index = variant == Variant::DifferentBackedgeBound;
     auto *entry = fixture.block;
     auto *header = fixture.AddBlock();
     auto *body = fixture.AddBlock();
     auto *latch = fixture.AddBlock();
     auto *exit = fixture.AddBlock();
     auto *preheader = masked ? fixture.AddBlock() : entry;
+    auto *prepare = variant == Variant::MergedInitial ? fixture.AddBlock() : preheader;
     const auto branch = [](Block *from, Block *to) {
       from->AddBranch(to);
       from->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = to};
     };
     branch(preheader, header);
     branch(body, latch);
-    branch(latch, header);
+    if (!stable_index) branch(latch, header);
     const auto keys = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
                                       fixture.UserData(2), fixture.UserData(3)});
     const auto counts = fixture.Buffer({fixture.UserData(4), fixture.UserData(5),
@@ -2462,15 +2526,42 @@ void TestCountedRowImageSelector() {
         entry->condition = fixture.Emit(ValueOpcode::INotEqual32,
             {fixture.UserData(13u), Value(0u)});
       }
-      entry->AddBranch(preheader);
+      entry->AddBranch(prepare);
       entry->AddBranch(exit);
       entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                            .true_block = preheader, .false_block = exit};
+                            .true_block = prepare, .false_block = exit};
       if (variant == Variant::EmptyMask) active = Value(false);
+    }
+    Value initial(0u);
+    if (variant == Variant::MergedInitial) {
+      auto *zero = fixture.AddBlock();
+      prepare->condition = fixture.Emit(ValueOpcode::INotEqual32,
+          {fixture.UserData(13u), Value(0u)}, 0, prepare);
+      prepare->AddBranch(zero);
+      prepare->AddBranch(preheader);
+      prepare->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                              .true_block = zero, .false_block = preheader};
+      branch(zero, preheader);
+      auto &merged = preheader->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+      merged.AddPhiOperand(prepare, fixture.UserData(14u));
+      merged.AddPhiOperand(zero, Value(0u));
+      initial = Value(&merged);
+    }
+    Value spill_address;
+    MemoryInfo spill;
+    spill.kind = ResourceKind::Lds;
+    spill.offset = 4096u;
+    if (variant == Variant::Spilled) {
+      spill_address = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+          {fixture.Emit(ValueOpcode::GetBuiltin,
+              {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)}), Value(2u)});
+      row = fixture.Emit(ValueOpcode::SelectU32, {active, row, Value(0xdeadbeefu)});
+      fixture.Emit(ValueOpcode::WriteSharedU32, {spill_address, row, active},
+                   fixture.AddMemory(spill, 0x08));
     }
     auto count_row = row;
     if (masked) count_row = fixture.Emit(ValueOpcode::ReadFirstLane,
-        {row, Value(variant != Variant::EmptyCountMask)});
+        {row, variant == Variant::Spilled ? active : Value(variant != Variant::EmptyCountMask)});
     if (variant == Variant::WrongRow)
       count_row = fixture.Emit(ValueOpcode::IAdd32, {row, Value(1u)});
     const auto count_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
@@ -2478,21 +2569,46 @@ void TestCountedRowImageSelector() {
     scalar.offset = variant == Variant::CountImmediate ? 4u : 0u;
     const auto count = fixture.Emit(ValueOpcode::ReadConstBuffer,
         {counts, count_offset}, fixture.AddMemory(scalar, 0x10));
-    auto &induction = header->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    auto *induction = stable_index ? nullptr
+        : &header->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U32));
+    auto index = stable_index ? fixture.UserData(13u) : Value(induction);
     const auto guard = fixture.Emit(variant == Variant::Signed ? ValueOpcode::SLessThan32
                                                               : ValueOpcode::ULessThan32,
-        {Value(&induction), count}, 0, header);
+        {index, count}, 0, header);
     header->AddBranch(body);
-    auto *outside = variant == Variant::Bypass ? latch : exit;
-    header->AddBranch(outside);
-    header->condition = variant == Variant::AnyBound
-        ? fixture.Emit(ValueOpcode::ConditionRef, {guard}, CFG::BranchCondition::ExecNonZero, header)
-        : guard;
-    header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                          .true_block = body, .false_block = outside};
+    if (variant == Variant::PreviousIteration) {
+      header->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = body};
+      latch->AddBranch(exit);
+      latch->condition = guard;
+      latch->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                            .true_block = header, .false_block = exit};
+    } else {
+      auto *outside = variant == Variant::SkippedIteration ? latch : exit;
+      header->AddBranch(outside);
+      header->condition = variant == Variant::AnyBound
+          ? fixture.Emit(ValueOpcode::ConditionRef, {guard}, CFG::BranchCondition::ExecNonZero, header)
+          : variant == Variant::MissingBound
+              ? fixture.Emit(ValueOpcode::INotEqual32, {fixture.UserData(13u), Value(0u)}, 0, header)
+              : guard;
+      header->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                            .true_block = body, .false_block = outside};
+    }
+    if (stable_index) {
+      const auto backedge_count = fixture.Emit(ValueOpcode::ReadConstBuffer,
+          {keys, count_offset}, fixture.AddMemory(scalar, 0x14), latch);
+      latch->condition = fixture.Emit(ValueOpcode::ULessThan32, {index, backedge_count}, 0, latch);
+      latch->AddBranch(body);
+      latch->AddBranch(exit);
+      latch->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                            .true_block = body, .false_block = exit};
+    }
     fixture.block = body;
+    if (variant == Variant::Spilled) {
+      row = fixture.Emit(ValueOpcode::SelectU32,
+          {active, fixture.Emit(ValueOpcode::LoadSharedU32, {spill_address, active},
+                                 fixture.AddMemory(spill, 0x18)), Value(0xbadbeefu)});
+    }
     const auto row_start = fixture.Emit(ValueOpcode::IMul32, {row, Value(capacity)});
-    auto index = Value(&induction);
     if (variant == Variant::KeyStride)
       index = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {index, Value(1u)});
     auto element = fixture.Emit(ValueOpcode::IAdd32, {row_start, index});
@@ -2520,33 +2636,50 @@ void TestCountedRowImageSelector() {
     fixture.Emit(ValueOpcode::ImageSampleRaw,
         {fixture.Image(image_words), fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}),
          fixture.ImageAddress(), Value(true)}, fixture.AddMemory(sample, 0x40));
-    const auto step = fixture.Emit(ValueOpcode::IAdd32,
-        {Value(&induction), Value(variant == Variant::WrongStep ||
-                                  variant == Variant::MaskedWrongStep ? 2u : 1u)}, 0, latch);
-    induction.AddPhiOperand(preheader, Value(0u));
-    induction.AddPhiOperand(latch, step);
-    fixture.PlanAndTrack();
+    if (induction != nullptr) {
+      const auto step = fixture.Emit(ValueOpcode::IAdd32,
+          {Value(induction), Value(variant == Variant::StepTwo ||
+                                   variant == Variant::MaskedStepTwo ? 2u : 1u)}, 0, latch);
+      induction->AddPhiOperand(preheader, initial);
+      induction->AddPhiOperand(latch, step);
+    }
+    ShaderComputeInputInfo compute;
+    compute.threads_num[0] = 64u;
+    compute.threads_num[1] = compute.threads_num[2] = 1u;
+    compute.lds_size_dwords = 2048u;
+    fixture.PlanAndTrack({.compute = &compute});
     const auto &source = fixture.program.descriptor_sources[fixture.program.info.images[0].source];
     Check(source.indirect_descriptor.has_value(), "counted-row image lost its indirect source");
     const auto &selector = source.indirect_descriptor->selector;
-    const bool valid = variant == Variant::Valid || variant == Variant::Masked ||
-                       variant == Variant::EmptyCountMask;
+    const bool valid = variant == Variant::Valid || variant == Variant::Masked || variant == Variant::Spilled ||
+                       variant == Variant::EmptyCountMask || variant == Variant::MergedInitial ||
+                       variant == Variant::StepTwo || variant == Variant::MaskedStepTwo ||
+                       variant == Variant::SkippedIteration || stable_index;
     Check((selector && selector->rows.has_value()) == valid,
           "counted-row selector lost its proof or accepted mismatched row/induction bounds");
     if (valid)
       Check(selector->stride == 4u && selector->offset == 0u &&
                 selector->rows->stride == uint64_t(capacity) * 4u,
             "counted-row selector changed native row or element byte spacing");
+    if (stable_index)
+      Check(EquivalentValue(fixture.program,
+                fixture.program.descriptor_sources[selector->rows->source].dwords[0],
+                counts.Instruction()->Arg(0)),
+            "a rejected backedge bound replaced the count source proven on entry");
     return ExtractResourcePlan(fixture.program);
   };
-  auto plan = make_plan();
+  auto plan = make_plan(Variant::MergedInitial);
+  make_plan();
   make_plan(Variant::Masked);
+  make_plan(Variant::Spilled);
   make_plan(Variant::EmptyCountMask);
-  for (const auto variant : {Variant::Signed, Variant::WrongStep, Variant::Bypass,
+  make_plan(Variant::DifferentBackedgeBound);
+  for (const auto variant : {Variant::Signed, Variant::StepTwo, Variant::SkippedIteration,
                              Variant::WrongRow, Variant::CountStride, Variant::KeyStride,
                              Variant::CountImmediate, Variant::KeyImmediate, Variant::VaryingRow,
                              Variant::EmptyMask, Variant::UnprovenMask, Variant::WrongMask,
-                             Variant::AnyBound, Variant::MaskedWrongStep})
+                             Variant::AnyBound, Variant::MaskedStepTwo,
+                             Variant::MissingBound, Variant::PreviousIteration})
     make_plan(variant);
 
   constexpr uint32_t CountBase = 0x1000u, KeyBase = 0x2000u, MaterialBase = 0x4000u;
@@ -5369,6 +5502,7 @@ int main() {
     Run("image descriptor fields", TestImageDescriptorFields);
     Run("draw-uniform scalar image", TestUniformScalarBufferImage);
     Run("scalar buffer selector domain", TestScalarBufferSelectorDomain);
+    Run("private LDS forwarding", TestPrivateLdsForwarding);
     Run("counted row image selector", TestCountedRowImageSelector);
     Run("shared append selector bounds", TestSharedAppendSelectorBounds);
     Run("descending image range", TestDescendingImageRange);
