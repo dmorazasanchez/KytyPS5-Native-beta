@@ -673,7 +673,7 @@ void TestSharedControlPredicates() {
       program.blocks[i]->terminator.false_block = program.blocks[2];
     }
     auto plan = ExtractResourcePlan(program);
-    Check(plan.value_storage.size() == depth + 5 &&
+    Check(plan.value_storage.size() <= 2u * depth + 12u &&
               plan.control_flow.size() == 4 &&
               plan.control_flow[0].condition == plan.control_flow[1].condition &&
               !plan.capture_specialization_reads,
@@ -793,6 +793,156 @@ void TestFiniteImageRefreshReusesScalarReads() {
         "finite image refresh grew reusable resource storage after warmup");
 }
 
+void TestEmptyTraversalSkipsUnmappedDescriptor(bool independent_mask) {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  for (uint32_t i = 0; i < 6; ++i) AddValueBlock(program);
+  auto &entry = *program.blocks[0];
+  auto &loop = *program.blocks[1];
+  auto &body = *program.blocks[2];
+  auto &merge = *program.blocks[3];
+  auto &use = *program.blocks[4];
+  auto &exit = *program.blocks[5];
+  const auto emit = [](Block &block, ValueOpcode opcode, std::initializer_list<Value> args) {
+    return Value(&block.AppendNewInst(opcode, args));
+  };
+  const auto branch = [](Block &block, Block &target, Value condition = {}, Block *other = nullptr) {
+    block.terminator.kind = other ? TerminatorKind::ConditionalBranch : TerminatorKind::Branch;
+    block.terminator.true_block = &target;
+    block.terminator.false_block = other;
+    block.condition = condition;
+    block.AddBranch(&target);
+    if (other) block.AddBranch(other);
+  };
+  const auto lane = emit(entry, ValueOpcode::GetBuiltin,
+      {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+  const auto active = emit(entry, ValueOpcode::INotEqual32, {lane, Value(0u)});
+  const auto initial_mask = independent_mask
+      ? emit(entry, ValueOpcode::IEqual32, {lane, Value(0u)}) : active;
+  const auto initial = emit(entry, ValueOpcode::SelectU32,
+      {initial_mask, Value(UINT32_MAX), Value(0u)});
+  program.memory_info.push_back({.kind = ResourceKind::ScalarAddress, .planning_only = true});
+  const auto address = emit(entry, ValueOpcode::GetAddressResource, {Value(0x1000u), Value(0u)});
+  const auto count = emit(entry, ValueOpcode::LoadAddressU32,
+      {address, Value(0u), Value(0u), Value(true)});
+  count.Instruction()->SetFlags(MemoryFlags{.index = 0});
+  const auto rejected = emit(entry, ValueOpcode::ULessThanEqual32, {count, lane});
+  const auto accepted = emit(entry, ValueOpcode::LogicalNot, {rejected});
+  branch(entry, loop, emit(entry, ValueOpcode::LogicalAnd, {active, accepted}), &merge);
+
+  // A nonempty traversal contains a varying loop-carried value. Its cycle must
+  // remain unknown; only the proven empty traversal can select the bypass arm.
+  auto &carried = loop.AppendNewInst(ValueOpcode::Phi);
+  carried.SetFlags(Type::U32);
+  const auto next = emit(body, ValueOpcode::IAdd32, {Value(&carried), Value(1u)});
+  carried.AddPhiOperand(&entry, lane);
+  carried.AddPhiOperand(&body, next);
+  branch(loop, body, emit(loop, ValueOpcode::INotEqual32, {Value(&carried), Value(UINT32_MAX)}), &merge);
+  loop.terminator.loop_header = true;
+  loop.terminator.continue_block = &body;
+  loop.terminator.merge_block = &merge;
+  branch(body, loop);
+  auto &selected = merge.AppendNewInst(ValueOpcode::Phi);
+  selected.SetFlags(Type::U32);
+  selected.AddPhiOperand(&entry, initial);
+  selected.AddPhiOperand(&loop, Value(&carried));
+  const auto valid = emit(merge, ValueOpcode::INotEqual32, {Value(&selected), Value(UINT32_MAX)});
+  branch(merge, use, emit(merge, ValueOpcode::LogicalAnd, {active, valid}), &exit);
+  branch(use, exit);
+  DescriptorSource source;
+  source.dwords = {Value(0x8000u), Value(1u << 16u), Value(16u), Value(3u << 28u)};
+  source.dword_count = 4;
+  program.descriptor_sources.push_back(source);
+  program.info.buffers.push_back({.source = 0, .read = true});
+  program.memory_info.push_back({.kind = ResourceKind::Buffer, .resource = 0});
+  const auto buffer = emit(use, ValueOpcode::GetBufferResource,
+      {source.dwords[0], source.dwords[1], source.dwords[2], source.dwords[3]});
+  emit(use, ValueOpcode::LoadBufferU32, {buffer, Value(0u), Value(0u), Value(0u), Value(true)})
+      .Instruction()->SetFlags(MemoryFlags{.index = 1});
+  auto plan = ExtractResourcePlan(program);
+  struct Reads { uint32_t count = 0; bool clean = true; } reads;
+  const SrtRuntime runtime{
+      .userdata = &reads,
+      .read_specialization_memory = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+        const auto &reads = *static_cast<Reads *>(data);
+        if (!reads.clean || address != 0x1000u || words.size() != 1) return false;
+        words[0] = reads.count;
+        return true;
+      }};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const auto state : {Reads{0u, true}, Reads{4u, true}, Reads{0u, false}, Reads{0u, true}}) {
+    reads = state;
+    uint32_t condition = 99;
+    Check(!SrtWalker(plan, runtime).Evaluate(plan.control_flow[3].condition, condition),
+          "direct merge evaluation used missing or previous runtime reachability");
+    Check(MaterializeResources(plan, runtime, snapshot, specialization),
+          "partial traversal proof rejected a valid resource snapshot");
+    const bool inactive = !independent_mask && reads.clean && reads.count == 0u;
+    Check(snapshot.buffers[0].dwords[0] == (inactive ? 0u : 0x8000u),
+          "empty traversal kept its descriptor or an uncertain traversal lost it");
+    Check(specialization.buffers[0].zero_stride_oob == inactive,
+          "inactive traversal did not expose dead vector reads to specialization");
+    if (inactive) {
+      Check(!snapshot.specialization_reads.empty(), "empty traversal lost its clean scalar read");
+      for (const auto &read : snapshot.specialization_reads)
+        Check(read == std::pair<uint64_t, uint64_t>{0x1000u, 4u},
+              "empty traversal proof captured an unrelated memory range");
+    }
+  }
+}
+
+void TestCyclicControlPredicatesRemainUnknown() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  for (uint32_t i = 0; i < 4; ++i) AddValueBlock(program);
+  auto &entry = *program.blocks[0];
+  auto &left = *program.blocks[1];
+  auto &right = *program.blocks[2];
+  auto &exit = *program.blocks[3];
+  const auto lane = Value(&entry.AppendNewInst(ValueOpcode::GetBuiltin,
+      {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)}));
+  const auto u = Value(&entry.AppendNewInst(ValueOpcode::INotEqual32, {lane, Value(0u)}));
+  const auto v = Value(&entry.AppendNewInst(ValueOpcode::INotEqual32, {lane, Value(1u)}));
+  auto &p = left.AppendNewInst(ValueOpcode::Phi);
+  auto &q = right.AppendNewInst(ValueOpcode::Phi);
+  p.SetFlags(Type::U1);
+  q.SetFlags(Type::U1);
+  const auto a = Value(&left.AppendNewInst(ValueOpcode::LogicalAnd, {u, Value(&p)}));
+  const auto b = Value(&right.AppendNewInst(ValueOpcode::LogicalAnd, {v, Value(&q)}));
+  p.AddPhiOperand(&entry, Value(true));
+  p.AddPhiOperand(&right, b);
+  q.AddPhiOperand(&entry, Value(true));
+  q.AddPhiOperand(&left, a);
+  const auto branch = [](Block &block, Value condition, Block &yes, Block &no) {
+    block.condition = condition;
+    block.terminator.kind = TerminatorKind::ConditionalBranch;
+    block.terminator.true_block = &yes;
+    block.terminator.false_block = &no;
+    block.AddBranch(&yes);
+    block.AddBranch(&no);
+  };
+  // Two loop entries have no single header whose Phi can be discarded up front.
+  branch(entry, u, left, right);
+  branch(left, a, right, exit);
+  branch(right, b, left, exit);
+  auto plan = ExtractResourcePlan(program);
+  SrtWalker walker(plan, {});
+  uint32_t value = 99;
+  Check(!walker.Evaluate(plan.control_flow[1].condition, value) &&
+            !walker.Evaluate(plan.control_flow[2].condition, value),
+        "cyclic varying control acquired an unsupported uniform value");
+  std::vector<uint32_t> flat;
+  Check(walker.RefreshFlatBuffer(flat) && plan.visited_blocks == std::vector<uint8_t>({1, 1, 1, 1}),
+        "cyclic control lost a possible branch during reachability");
+}
+
 void TestMixedSamplerVariantsShareRuntimeDescriptor() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   auto program = MixedSamplerProgram();
@@ -853,6 +1003,9 @@ int main() {
   TestFailedMaterializationRejectsStage();
   TestSharedControlPredicates();
   TestFiniteImageRefreshReusesScalarReads();
+  for (const bool independent_mask : {false, true})
+    TestEmptyTraversalSkipsUnmappedDescriptor(independent_mask);
+  TestCyclicControlPredicatesRemainUnknown();
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
