@@ -1653,8 +1653,9 @@ void TestDescendingImageRange() {
   for (uint32_t record = 1u; record <= 130u; ++record)
     memory.words[record * 8u] = 0x100u + record;
   constexpr uint32_t bitmap_address = 0x4000u;
+  constexpr uint32_t display_records = 32400u;
   const auto bitmap_word = (bitmap_address - memory.base) / 4u;
-  memory.words.resize(bitmap_word + MaxIndirectDescriptorProbes + 4u, 0u);
+  memory.words.resize(bitmap_word + display_records * 4u, 0u);
   std::array<uint32_t, 8> bitmap_data {0x1000u, 0u, 0u, UINT32_MAX,
                                       bitmap_address, 16u << 16u, 3u, 0x5204u};
   const SrtRuntime bitmap_runtime {.user_data = bitmap_data, .userdata = &memory,
@@ -1668,14 +1669,17 @@ void TestDescendingImageRange() {
     std::ranges::sort(keys);
     Check(MaterializeResources(bitmap_plan, bitmap_runtime, snapshot, specialization) &&
               memory.watched_reads == uint32_t(bitmap_data[6] != 0u) &&
-              (bitmap_data[6] == 0u || memory.watched_dwords == bitmap_data[6] * 4u) &&
+              (bitmap_data[6] == 0u || memory.watched_dwords ==
+                  std::min(bitmap_data[6] * 4u, MaxIndirectDescriptorProbes)) &&
               memory.descriptor_reads == keys.size() &&
               snapshot.images.size() == std::max<size_t>(keys.size(), 1u),
-          "bitmap selector did not read one bounded snapshot or retained unreachable descriptors");
-    Check(bitmap_data[6] == 0u || std::ranges::find(snapshot.specialization_reads,
-              std::pair{uint64_t{bitmap_address}, uint64_t{bitmap_data[6]} * 16u}) !=
-              snapshot.specialization_reads.end(),
-          "bitmap snapshot was omitted from same-dispatch write-alias protection");
+          "bitmap selector lost bounded reads or retained unreachable descriptors");
+    for (uint32_t first = 0; first < bitmap_data[6] * 4u; first += MaxIndirectDescriptorProbes)
+      Check(std::ranges::find(snapshot.specialization_reads,
+                std::pair{uint64_t{bitmap_address} + first * 4u,
+                    uint64_t{std::min(bitmap_data[6] * 4u - first, MaxIndirectDescriptorProbes)} * 4u}) !=
+                snapshot.specialization_reads.end(),
+            "bitmap chunk was omitted from same-dispatch write-alias protection");
     if (keys.empty()) {
       Check(std::ranges::all_of(snapshot.images[0].dwords, [](uint32_t value) { return value == 0u; }) &&
                 specialization.images[0].indirect_root == ImageResource::NoIndirectImage,
@@ -1725,14 +1729,13 @@ void TestDescendingImageRange() {
   memory.fail_address = UINT64_MAX;
 
   const auto valid_data = bitmap_data;
-  for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 7>{{
+  for (const auto [word, value] : std::array<std::pair<uint32_t, uint32_t>, 6>{{
            {4u, bitmap_address + 1u}, {5u, 8u << 16u}, {5u, (16u << 16u) | (1u << 31u)},
            {7u, 0x5204u | (1u << 23u)}, {7u, 0x5204u | (1u << 28u)},
-           {7u, 0x5204u | (1u << 30u)},
-           {6u, MaxIndirectDescriptorProbes / 4u + 1u}}}) {
+           {7u, 0x5204u | (1u << 30u)}}}) {
     bitmap_data[word] = value;
     Check(!MaterializeResources(bitmap_plan, bitmap_runtime, snapshot, specialization),
-          "bitmap selector accepted an unproved buffer layout or exceeded its read bound");
+          "bitmap selector accepted an unproved buffer layout");
     bitmap_data = valid_data;
   }
   bitmap_data[7] &= ~(0x7fu << 12u); // FORMAT=INVALID makes even an unformatted load unbound.
@@ -1751,6 +1754,22 @@ void TestDescendingImageRange() {
   memory.words[bitmap_word + MaxIndirectDescriptorProbes - 1u] = 1u << 31u;
   memory.words[bitmap_word] = 1u;
   check_bitmap({0u, 127u}, 0u);
+  bitmap_data[6] = display_records;
+  memory.words[bitmap_word + display_records * 4u - 1u] = 1u << 5u;
+  check_bitmap({0u, 101u, 127u}, 0u);
+  memory.fail_address = bitmap_address + MaxIndirectDescriptorProbes * 4u;
+  Check(!MaterializeResources(bitmap_plan, bitmap_runtime, snapshot, specialization),
+        "bitmap selector retained a partial union after a later chunk failed");
+  memory.fail_address = UINT64_MAX;
+  check_bitmap({0u, 101u, 127u}, 0u);
+  std::fill_n(memory.words.begin() + bitmap_word, 4u, UINT32_MAX);
+  memory.fail_address = bitmap_address + MaxIndirectDescriptorProbes * 4u;
+  Check(MaterializeResources(bitmap_plan, bitmap_runtime, snapshot, specialization) &&
+            snapshot.images.size() == 128u &&
+            std::ranges::none_of(snapshot.specialization_reads, [&](const auto &read) {
+              return read.first >= memory.fail_address;
+            }),
+        "a complete bitmap domain read redundant chunks or lost candidate keys");
 }
 
 void TestUniformizedMaterialImageKeys() {
