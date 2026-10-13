@@ -27,7 +27,7 @@ struct ImageMetadataInfo {
 	GuestRange          range;
 	ImageMetadataKind   kind                 = ImageMetadataKind::None;
 	uint32_t            control              = 0;
-	uint32_t            clear_word           = 0;
+	uint64_t            clear_word           = 0;
 	VideoOutCompression compression          = VideoOutCompression::Uncompressed;
 	bool                stencil_compressed   = false;
 	bool                clear_register_valid = false;
@@ -414,9 +414,10 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 	return false;
 }
 
-[[nodiscard]] inline bool DecodePackedColorClear(vk::Format format, uint32_t packed,
+[[nodiscard]] inline bool DecodePackedColorClear(vk::Format format, uint64_t clear_words,
                                                  vk::ClearColorValue& clear) {
 	vk::ClearColorValue next {};
+	const auto packed = static_cast<uint32_t>(clear_words);
 	const auto unorm8 = [](uint32_t value) { return static_cast<float>(value & 0xffu) / 255.0f; };
 	const auto srgb8  = [](uint32_t value) {
 		const auto encoded = static_cast<float>(value & 0xffu) / 255.0f;
@@ -434,6 +435,10 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 		                            (mantissa << 13u));
 	};
 	switch (format) {
+		case vk::Format::eR16G16B16A16Sfloat:
+			next.float32[2] = float16(static_cast<uint32_t>(clear_words >> 32u));
+			next.float32[3] = float16(static_cast<uint32_t>(clear_words >> 48u));
+			[[fallthrough]];
 		case vk::Format::eR16G16Sfloat:
 			next.float32[1] = float16(packed >> 16u);
 			[[fallthrough]];

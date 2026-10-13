@@ -10865,12 +10865,14 @@ public:
     constexpr const char *name = "RenderExecutorColorMetadataClear";
     struct PackedCase {
       vk::Format format;
-      uint32_t word;
+      uint64_t word;
       std::array<float, 4> channels;
     };
     const std::array packed_cases{
         PackedCase{vk::Format::eR16Sfloat, 0x7bff7bffu, {65504.0f}},
         PackedCase{vk::Format::eR16G16Sfloat, 0xbc003c00u, {1.0f, -1.0f}},
+        PackedCase{vk::Format::eR16G16B16A16Sfloat, 0x40003800bc003c00ull,
+                   {1.0f, -1.0f, 0.5f, 2.0f}},
         PackedCase{vk::Format::eR16Sfloat, 0xffff0001u, {0x1p-24f}},
         PackedCase{vk::Format::eR16Sfloat, 0x00008001u, {-0x1p-24f}},
         PackedCase{vk::Format::eR16Sfloat, 0x000003ffu, {1023.0f * 0x1p-24f}},
@@ -10904,7 +10906,7 @@ public:
               "alternating R16 pixels were treated as a uniform clear");
     }
     constexpr uintptr_t base = 0x0000000204100000ull;
-    constexpr uint64_t allocation_size = 0x200000;
+    constexpr uint64_t allocation_size = 0x400000;
     constexpr uint64_t allocation_alignment = 0x10000;
     struct FillCase {
       uint32_t fill;
@@ -10915,12 +10917,19 @@ public:
       Prospero::ChannelLayout layout = Prospero::ChannelLayout::k16_16_16_16;
       Prospero::ChannelType type = Prospero::ChannelType::kFloat;
       uint32_t clear_word = 0;
+      bool eliminate_fast_clear = false;
     };
     constexpr std::array cases{
         FillCase{0x40404040u, {0, 0x3c000000u}},
         FillCase{0x80808080u, {0x3c003c00u, 0x00003c00u}},
         FillCase{0x40404040u, {0, 0x3c000000u}, true},
-        FillCase{0, {0x804020ffu, 0}, false, true},
+        FillCase{.fill = 0, .texel = {0x804020ffu, 0}, .cmask = true,
+                 .layout = Prospero::ChannelLayout::k8_8_8_8,
+                 .type = Prospero::ChannelType::kUNorm},
+        FillCase{.fill = 0, .texel = {0, 0}, .cmask = true,
+                 .eliminate_fast_clear = true},
+        FillCase{.fill = 0, .texel = {0, 0x3c000000u}, .cmask = true,
+                 .eliminate_fast_clear = true},
         FillCase{0x40404040u, {0, 0x3c000000u}, false, false, true},
         FillCase{.fill = 0x20202020u, .texel = {0x7bff7bffu},
                  .layout = Prospero::ChannelLayout::k16, .clear_word = 0x7bff7bffu},
@@ -10985,15 +10994,16 @@ public:
     std::memset(mapped, 0, allocation_size);
 
     for (const auto &fill_case : cases) {
-      const auto layout = fill_case.cmask ? Prospero::ChannelLayout::k8_8_8_8 : fill_case.layout;
-      const auto type = fill_case.cmask ? Prospero::ChannelType::kUNorm : fill_case.type;
+      const auto layout = fill_case.layout;
+      const auto type = fill_case.type;
       const auto bytes_per_pixel = TextureGetRenderTargetFormat(
           layout, type, Prospero::ChannelOrder::kStandard).bytes_per_element;
       const uint32_t probe_width = bytes_per_pixel == 2 ? 2 : 1;
       TileSizeAlign dcc_size{};
       (void)TileGetDccSize(512, 256, 1, bytes_per_pixel, 1,
                           Prospero::TileMode::kRenderTarget, dcc_size, 0);
-      const uint64_t dcc_address = base + (fill_case.reuse_mips ? 0x160000 : 0x100000);
+      const uint64_t dcc_address = base + (fill_case.eliminate_fast_clear ? 0x200000 :
+                                          fill_case.reuse_mips ? 0x160000 : 0x100000);
       const uint32_t selected_layer = fill_case.cmask ? 1 : 0;
       const uint64_t metadata_size = fill_case.cmask ? 0x2000 : dcc_size.size;
       const std::vector<u32> expected(
@@ -11023,7 +11033,7 @@ public:
         registers.SetColorDccAddr(0, {.addr = dcc_address});
         registers.SetColorCmask(0, {.addr = dcc_address});
         registers.SetColorClearWord0(0, {.word0 = fill_case.cmask ? expected[0] : fill_case.clear_word});
-        registers.SetColorClearWord1(0, {.word1 = 0});
+        registers.SetColorClearWord1(0, {.word1 = fill_case.eliminate_fast_clear ? expected[1] : 0});
         registers.SetRenderTargetMask(0x0f);
         scheduler.Begin(registers, user_config, shaders);
 
@@ -11032,7 +11042,8 @@ public:
         auto &executor = context.GetRenderExecutor();
         resources.MapMemory(base, allocation_size);
         ImageId preexisting_id{};
-        if (fill_case.reuse_unorm || fill_case.reuse_mips) {
+        RenderColorInfo color{};
+        if (fill_case.reuse_unorm || fill_case.reuse_mips || fill_case.eliminate_fast_clear) {
           const auto float_info = registers.GetRenderTarget(0).info;
           const auto single_mip = registers.GetRenderTarget(0).attrib2;
           auto initial_info = float_info;
@@ -11049,6 +11060,7 @@ public:
           RenderExecutorTestAccess::ResolveRenderColorTarget(
               executor, scheduler.Current(), preexisting, 0);
           preexisting_id = preexisting.image_id;
+          color = preexisting;
           (void)texture_cache.FindRenderTarget(preexisting_id, preexisting.desc);
           if (fill_case.reuse_mips) {
             Require(name, "mip chain excludes metadata",
@@ -11060,6 +11072,13 @@ public:
             TextureCacheTestAccess::ClearImage(
                 texture_cache, scheduler.Current(), preexisting_id,
                 {vk::ImageAspectFlagBits::eColor, 0, 2, 0, 1}, clear);
+          }
+          if (fill_case.eliminate_fast_clear) {
+            vk::ClearValue stale{};
+            stale.color.float32 = std::array{1.0f, 0.0f, 1.0f, 1.0f};
+            TextureCacheTestAccess::ClearImage(
+                texture_cache, scheduler.Current(), preexisting_id,
+                {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 2}, stale);
           }
           RenderExecutorTestAccess::ResetBindings(executor);
           registers.SetColorInfo(0, float_info);
@@ -11088,7 +11107,66 @@ public:
                 !texture_cache.IsMeta(dcc_address),
                 "the native fill guessed an unbound metadata allocation's type");
 
-        RenderColorInfo color{};
+        const auto check_expanded_metadata = [&] {
+          context.GetBufferCache().ReadMemory(dcc_address, metadata_size, false);
+          std::vector<uint8_t> bytes(metadata_size);
+          Require(name, "expanded metadata readback",
+                  LibKernel::Memory::TryReadBacking(dcc_address, bytes.data(), bytes.size()),
+                  "native color metadata could not be read back");
+          const auto selected = bytes.begin() + (fill_case.cmask ? 0x1000 : 0);
+          Require(name, "selected metadata slice expansion",
+                  std::all_of(bytes.begin(), selected, [](uint8_t v) { return v == 0; }) &&
+                      std::all_of(selected, bytes.end(), [](uint8_t v) { return v == 0xff; }),
+                  "materialization retained a clear key or changed an unselected slice");
+        };
+
+        const auto paint = [&] {
+          vk::ClearValue clear{};
+          clear.color.float32 = std::array{1.0f, 0.0f, 1.0f, 1.0f};
+          TextureCacheTestAccess::ClearImage(
+              texture_cache, scheduler.Current(), color.image_id,
+              {vk::ImageAspectFlagBits::eColor, 0, 1, selected_layer, 1}, clear);
+        };
+
+        if (fill_case.eliminate_fast_clear) {
+          registers.SetRenderTargetMask(0);
+          registers.SetColorControl({.mode = 2});
+          RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+              {.vertex_count = 3, .instance_count = 1});
+          auto sampled = color.desc;
+          sampled.type = BindingType::Texture;
+          sampled.view_info.usage = vk::ImageUsageFlagBits::eSampled;
+          color.image_id = texture_cache.FindImage(sampled);
+          Require(name, "FCE sampled image reuses stale target",
+                  color.image_id == preexisting_id &&
+                      texture_cache.FindTexture(color.image_id, sampled) != nullptr,
+                  "FCE failed to retain the sampled allocation");
+          const std::vector<u32> stale{0x00003c00u, 0x3c003c00u};
+          Require(name, "FCE before graphics shader or target binding",
+                  ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 1) == expected &&
+                      ReadCachedTexel(name, context, color.image_id, {511, 255, 0},
+                                      {1, 1, 1}, 1) == expected &&
+                      ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 0) == stale,
+                  "FCE lost a clear register or changed the unselected layer");
+          check_expanded_metadata();
+          paint();
+          RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
+              {.index_count = 3, .instance_count = 1});
+          (void)texture_cache.FindTexture(color.image_id, sampled);
+          Require(name, "repeated indexed FCE preserves expanded color",
+                  ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 1) == stale,
+                  "FCE reapplied the consumed clear after rendering");
+          WriteMetadata(context, dcc_address, metadata_size, 0);
+          RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
+              {.index_count = 3, .instance_count = 1});
+          (void)texture_cache.FindTexture(color.image_id, sampled);
+          Require(name, "indexed FCE consumes a new clear",
+                  ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 1) == expected,
+                  "indexed FCE skipped a new metadata clear");
+          resources.UnmapMemory(base, allocation_size);
+          scheduler.Finish();
+          return;
+        }
         RenderExecutorTestAccess::ResolveRenderColorTarget(
             executor, scheduler.Current(), color, 0);
         RenderDepthInfo no_depth{};
@@ -11132,31 +11210,12 @@ public:
                       std::vector<u32>{0x00003c00u, 0x00003c00u},
                   "clearing mip zero changed its higher mip");
         }
-        const auto check_expanded_metadata = [&] {
-          context.GetBufferCache().ReadMemory(dcc_address, metadata_size, false);
-          std::vector<uint8_t> bytes(metadata_size);
-          Require(name, "expanded metadata readback",
-                  LibKernel::Memory::TryReadBacking(dcc_address, bytes.data(), bytes.size()),
-                  "native color metadata could not be read back");
-          const auto selected = bytes.begin() + (fill_case.cmask ? 0x1000 : 0);
-          Require(name, "selected metadata slice expansion",
-                  std::all_of(bytes.begin(), selected, [](uint8_t v) { return v == 0; }) &&
-                      std::all_of(selected, bytes.end(), [](uint8_t v) { return v == 0xff; }),
-                  "materialization retained a clear key or changed an unselected slice");
-        };
         check_expanded_metadata();
 
         const auto bind = [&] {
           RenderExecutorTestAccess::ResetBindings(executor);
           color.image_id = texture_cache.FindImage(color.desc);
           (void)texture_cache.FindRenderTarget(color.image_id, color.desc);
-        };
-        const auto paint = [&] {
-          vk::ClearValue clear{};
-          clear.color.float32 = std::array{1.0f, 0.0f, 1.0f, 1.0f};
-          TextureCacheTestAccess::ClearImage(
-              texture_cache, scheduler.Current(), color.image_id,
-              {vk::ImageAspectFlagBits::eColor, 0, 1, selected_layer, 1}, clear);
         };
         std::vector<u32> painted{0x00003c00u, 0x3c003c00u};
         if (fill_case.reuse_unorm) {
