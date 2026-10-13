@@ -454,9 +454,10 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 		case vk::Format::eR16Unorm:
 			next.float32[0] = static_cast<float>(packed & 0xffffu) / 65535.0f;
 			break;
-		// A single-plane float target carries its clear as raw float bits, the same encoding the
-		// depth decoder below uses. Without this the clear is discarded and the target keeps stale
-		// contents.
+		// Each clear register stores one raw 32-bit float channel.
+		case vk::Format::eR32G32Sfloat:
+			next.float32[1] = std::bit_cast<float>(static_cast<uint32_t>(clear_words >> 32u));
+			[[fallthrough]];
 		case vk::Format::eR32Sfloat: next.float32[0] = std::bit_cast<float>(packed); break;
 		case vk::Format::eR32Uint: next.uint32[0] = packed; break;
 		case vk::Format::eR32Sint: next.int32[0] = static_cast<int32_t>(packed); break;
@@ -517,7 +518,7 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 		clear = vk::ClearColorValue {};
 		return true;
 	}
-	return DecodePackedColorClear(format, packed, clear);
+	return DecodePackedColorClear(format, uint64_t {packed} | (uint64_t {packed} << 32u), clear);
 }
 
 [[nodiscard]] inline bool DecodePackedStencilClear(uint32_t packed, uint8_t& clear) {

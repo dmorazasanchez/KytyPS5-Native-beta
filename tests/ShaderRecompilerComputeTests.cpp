@@ -10869,6 +10869,9 @@ public:
       std::array<float, 4> channels;
     };
     const std::array packed_cases{
+        PackedCase{vk::Format::eR32G32Sfloat, 0xbf8000003f800000ull, {1.0f, -1.0f}},
+        PackedCase{vk::Format::eR32G32Sfloat, 0x7f80000080000000ull,
+                   {-0.0f, std::numeric_limits<float>::infinity()}},
         PackedCase{vk::Format::eB10G11R11UfloatPack32, 0u, {}},
         PackedCase{vk::Format::eB10G11R11UfloatPack32, 0x801c03c0u, {1.0f, 0.5f, 2.0f}},
         PackedCase{vk::Format::eB10G11R11UfloatPack32, 1u | (0x7bfu << 11u) | (1u << 22u),
@@ -10918,6 +10921,10 @@ public:
                   DecodeColorDwordFill(format, 0x3c003c00u, clear),
               "alternating R16 pixels were treated as a uniform clear");
     }
+    Require(name, "RG32 DWORD fill",
+            DecodeColorDwordFill(vk::Format::eR32G32Sfloat, 0x3f800000u, clear) &&
+                clear.float32[0] == 1.0f && clear.float32[1] == 1.0f,
+            "a repeated DWORD fill was decoded as a two-register clear");
     constexpr uintptr_t base = 0x0000000204100000ull;
     constexpr uint64_t allocation_size = 0x400000;
     constexpr uint64_t allocation_alignment = 0x10000;
@@ -10947,6 +10954,10 @@ public:
                  .layout = Prospero::ChannelLayout::k11_11_10, .eliminate_fast_clear = true},
         FillCase{.fill = 0, .texel = {0x801c03c0u, 0}, .cmask = true,
                  .layout = Prospero::ChannelLayout::k11_11_10, .eliminate_fast_clear = true},
+        FillCase{.fill = 0, .texel = {0, 0}, .cmask = true,
+                 .layout = Prospero::ChannelLayout::k32_32, .eliminate_fast_clear = true},
+        FillCase{.fill = 0, .texel = {0x3f800000u, 0xbf800000u}, .cmask = true,
+                 .layout = Prospero::ChannelLayout::k32_32, .eliminate_fast_clear = true},
         FillCase{0x40404040u, {0, 0x3c000000u}, false, false, true},
         FillCase{.fill = 0x20202020u, .texel = {0x7bff7bffu},
                  .layout = Prospero::ChannelLayout::k16, .clear_word = 0x7bff7bffu},
@@ -11159,7 +11170,8 @@ public:
                       texture_cache.FindTexture(color.image_id, sampled) != nullptr,
                   "FCE failed to retain the sampled allocation");
           const std::vector<u32> stale = layout == Prospero::ChannelLayout::k11_11_10
-              ? std::vector<u32>{0x780003c0u} : std::vector<u32>{0x00003c00u, 0x3c003c00u};
+              ? std::vector<u32>{0x780003c0u} : layout == Prospero::ChannelLayout::k32_32
+              ? std::vector<u32>{0x3f800000u, 0u} : std::vector<u32>{0x00003c00u, 0x3c003c00u};
           Require(name, "FCE before graphics shader or target binding",
                   ReadCachedTexel(name, context, color.image_id, {}, {1, 1, 1}, 1) == expected &&
                       ReadCachedTexel(name, context, color.image_id, {511, 255, 0},
