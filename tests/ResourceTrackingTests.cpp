@@ -278,14 +278,17 @@ MakeIndirectImageFixture(bool malformed, uint32_t table_stride = 32, uint32_t ta
   return fixture;
 }
 
-void TestInvariantIndirectImageMaterialization() {
-  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u, true);
+void TestInvariantIndirectImageMaterialization(bool nested) {
+  auto fixture = MakeIndirectImageFixture(false, 48u, 0u, 16u, nested);
   fixture->PlanAndTrack();
   auto plan = ExtractResourcePlan(fixture->program);
   EliminateDeadCode(fixture->program.blocks);
   ValidateProgram(fixture->program, true);
   const auto &source = *plan.descriptor_sources[plan.info.images[0].source].indirect_descriptor;
-  Check(!source.selector && fixture->program.info.buffers.size() == 3u,
+  Check(!source.selector && fixture->program.info.buffers.size() == (nested ? 3u : 2u) &&
+            std::ranges::any_of(*fixture->block, [](const Inst &inst) {
+              return inst.GetOpcode() == ValueOpcode::ReadConstBuffer;
+            }),
         "bounded image table retained CPU selector traversal or lost live loads");
   std::array<uint32_t, 8> descriptor{};
   descriptor[0] = 0x20u;
@@ -293,7 +296,7 @@ void TestInvariantIndirectImageMaterialization() {
   descriptor[2] = 3u | (3u << 14u);
   descriptor[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
       (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u);
-  std::array<uint32_t, 16> data{0x3000u, 16u << 16u, 0x200000u, 0u,
+  std::array<uint32_t, 16> data{0x3000u, 4u << 16u, 0x100000u, 0u,
                                 0x2000u, 48u << 16u, 3u, 0u};
   std::copy_n(data.begin(), 4u, data.begin() + 12u);
   LinearTestMemory memory;
@@ -5793,7 +5796,8 @@ int main() {
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
     Run("gather LOD sampler validation", TestGatherLodSamplerValidation);
     Run("dynamic storage mips", TestDynamicStorageMipTracking);
-    Run("invariant indirect images", TestInvariantIndirectImageMaterialization);
+    Run("invariant indirect images", [] { TestInvariantIndirectImageMaterialization(true); });
+    Run("unbounded material image keys", [] { TestInvariantIndirectImageMaterialization(false); });
     Run("bounded image view eligibility", TestBoundedImageViewEligibility);
     Run("waterfall image table", TestWaterfallImageTable);
     Run("guarded direct image table", TestGuardedDirectImageTable);
