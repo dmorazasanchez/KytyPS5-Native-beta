@@ -2398,26 +2398,30 @@ void TestUniformScalarBufferImage() {
 }
 
 void TestScalarBufferSelectorDomain() {
-  const auto make_plan = [](bool active = true, bool sparse = false) {
+  const auto make_plan = [](bool active = true, bool sparse = false, bool uniformize_first = false) {
     Fixture fixture;
     const auto material = fixture.Buffer({fixture.UserData(0), fixture.UserData(1),
                                           fixture.UserData(2), fixture.UserData(3)});
     MemoryInfo lds;
     lds.kind = ResourceKind::Lds;
-    const auto index = fixture.Emit(ValueOpcode::LoadSharedU32,
+    auto index = fixture.Emit(ValueOpcode::LoadSharedU32,
         {Value(8u), Value(true)}, fixture.AddMemory(lds, 0x10));
+    if (uniformize_first)
+      index = fixture.Emit(ValueOpcode::ReadFirstLane, {index, Value(active)});
     auto offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
         {index, Value(sparse ? 31u : 5u)});
     if (!sparse)
       offset = fixture.Emit(ValueOpcode::IAdd32,
           {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {offset, Value(2u)}), offset});
     offset = fixture.Emit(ValueOpcode::IAdd32, {offset, Value(3u)});
-    offset = fixture.Emit(ValueOpcode::ReadFirstLane, {offset, Value(active)});
+    if (!uniformize_first)
+      offset = fixture.Emit(ValueOpcode::ReadFirstLane, {offset, Value(active)});
     MemoryInfo scalar;
     scalar.kind = ResourceKind::ScalarBuffer;
     scalar.offset = 147u;
-    const auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
+    auto key = fixture.Emit(ValueOpcode::ReadConstBuffer,
         {material, offset}, fixture.AddMemory(scalar, 0x20));
+    if (uniformize_first) key = fixture.Emit(ValueOpcode::UMin32, {key, Value(2u)});
     const auto table = fixture.Address(fixture.UserData(4), fixture.UserData(5));
     const auto record = fixture.Emit(ValueOpcode::ShiftLeftLogical32, {key, Value(5u)});
     std::array<Value, 8> words;
@@ -2436,7 +2440,10 @@ void TestScalarBufferSelectorDomain() {
     fixture.PlanAndTrack();
     const auto &indirect = fixture.program.descriptor_sources[
         fixture.program.info.images[0].source].indirect_descriptor;
-    Check(indirect && indirect->selector && indirect->key_count.IsEmpty() &&
+    if (!active && uniformize_first)
+      Check(indirect && !indirect->selector && indirect->key_count == Value(3u),
+            "scaled empty EXEC lane read retained an unproved selector");
+    else Check(indirect && indirect->selector && indirect->key_count.IsEmpty() &&
               indirect->selector_first.IsEmpty() && indirect->selector->offset == 144u &&
               indirect->selector->stride == (sparse ? 0x80000000u : 32u),
           "scalar selector assumed an unwrapped 160-byte record or combined unaligned offsets");
@@ -2450,6 +2457,7 @@ void TestScalarBufferSelectorDomain() {
   auto plan = make_plan();
   CheckFatal([&] { make_plan(false); }, "not a valid runtime value",
              "scalar selector accepted an empty EXEC lane read");
+  make_plan(false, false, true);
   LinearTestMemory memory;
   memory.words[144u / 4u] = 1u;
   memory.words[160u / 4u] = 99u; // This field is outside the affine offset domain.
@@ -2474,6 +2482,13 @@ void TestScalarBufferSelectorDomain() {
             memory.watched_dwords == 1u && snapshot.images[0].dwords[0] == 0x100u &&
             snapshot.images[2].dwords[0] == 0x102u,
         "scalar selector read outside its wrapped domain or omitted the OOB zero key");
+  const auto scaled_lane = make_plan(true, false, true);
+  memory.words[176u / 4u] = UINT32_MAX;
+  Check(MaterializeResources(scaled_lane, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 3u && snapshot.images[0].dwords[0] == 0x100u &&
+            snapshot.images[1].dwords[0] == 0x101u && snapshot.images[2].dwords[0] == 0x102u,
+        "scaling after lane selection lost wrapped offsets, clamped keys, or the OOB zero key");
+  memory.words[176u / 4u] = 2u;
   for (const auto size : {0u, 144u, 147u, 148u}) {
     user_data[2] = size;
     memory.watched_reads = 0u;
