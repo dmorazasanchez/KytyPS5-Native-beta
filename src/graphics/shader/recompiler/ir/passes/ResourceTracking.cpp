@@ -1151,7 +1151,7 @@ private:
 	}
 
 	bool HasActiveLane(Value mask, const Block* use) const {
-		mask = mask.Resolve();
+		mask = SimplifyGuard(mask);
 		if (mask.IsImmediate()) return mask.GetType() == Type::U1 && mask.U1();
 		const auto incoming_is_nonempty = [&](const Block* from, const Block* to,
 		                                     Value incoming, const Block* header) {
@@ -1186,7 +1186,7 @@ private:
 
 	bool Implies(Value guard, Value required) const {
 		guard = SimplifyGuard(guard);
-		required = required.Resolve();
+		required = SimplifyGuard(required);
 		if (required == Value(true) || EquivalentValue(m_program, guard, required)) return true;
 		const auto* test = required.TryInstruction();
 		if (test != nullptr && test->GetOpcode() == ValueOpcode::INotEqual32) {

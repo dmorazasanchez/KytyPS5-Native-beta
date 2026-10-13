@@ -2562,10 +2562,12 @@ void TestCountedRowImageSelector() {
                        KeyStride, CountImmediate, KeyImmediate, DifferentBackedgeBound,
                        Masked, EmptyCountMask, VaryingRow,
                        EmptyMask, UnprovenMask, WrongMask, AnyBound, MaskedStepTwo, Spilled,
-                       MergedInitial, MissingBound, PreviousIteration };
+                       MergedInitial, MissingBound, PreviousIteration,
+                       InvariantMask, PossiblyEmptyMask };
   const auto make_plan = [](Variant variant = Variant::Valid, uint32_t capacity = 16u) {
     Fixture fixture;
     const bool masked = variant >= Variant::Masked;
+    const bool cyclic_mask = variant >= Variant::InvariantMask;
     const bool stable_index = variant == Variant::DifferentBackedgeBound;
     auto *entry = fixture.block;
     auto *header = fixture.AddBlock();
@@ -2606,17 +2608,35 @@ void TestCountedRowImageSelector() {
             "wave-uniform workgroup data escaped the host evaluation boundary");
       if (variant == Variant::VaryingRow)
         row = fixture.Emit(ValueOpcode::IAdd32, {row, local});
-      active = fixture.Emit(ValueOpcode::INotEqual32, {local, Value(0u)});
-      entry->condition = fixture.Emit(ValueOpcode::ConditionRef, {active},
-                                       CFG::BranchCondition::ExecNonZero);
-      if (variant == Variant::UnprovenMask) {
-        entry->condition = fixture.Emit(ValueOpcode::INotEqual32,
-            {fixture.UserData(13u), Value(0u)});
+      if (cyclic_mask) {
+        branch(entry, preheader);
+        auto &mask = header->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U1));
+        auto *restore = fixture.AddBlock();
+        body->AddBranch(restore);
+        body->condition = fixture.Emit(ValueOpcode::INotEqual32,
+            {fixture.UserData(13u), Value(0u)}, 0, body);
+        body->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                            .true_block = latch, .false_block = restore};
+        branch(restore, latch);
+        auto &next = latch->AppendNewInst(ValueOpcode::Phi, {}, uint64_t(Type::U1));
+        next.AddPhiOperand(body, Value(&mask));
+        next.AddPhiOperand(restore, Value(variant == Variant::InvariantMask));
+        mask.AddPhiOperand(preheader, Value(true));
+        mask.AddPhiOperand(latch, Value(&next));
+        active = Value(&mask);
+      } else {
+        active = fixture.Emit(ValueOpcode::INotEqual32, {local, Value(0u)});
+        entry->condition = fixture.Emit(ValueOpcode::ConditionRef, {active},
+                                         CFG::BranchCondition::ExecNonZero);
+        if (variant == Variant::UnprovenMask) {
+          entry->condition = fixture.Emit(ValueOpcode::INotEqual32,
+              {fixture.UserData(13u), Value(0u)});
+        }
+        entry->AddBranch(prepare);
+        entry->AddBranch(exit);
+        entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
+                              .true_block = prepare, .false_block = exit};
       }
-      entry->AddBranch(prepare);
-      entry->AddBranch(exit);
-      entry->terminator = {.kind = CFG::TerminatorKind::ConditionalBranch,
-                            .true_block = prepare, .false_block = exit};
       if (variant == Variant::EmptyMask) active = Value(false);
     }
     Value initial(0u);
@@ -2741,7 +2761,7 @@ void TestCountedRowImageSelector() {
     const bool valid = variant == Variant::Valid || variant == Variant::Masked || variant == Variant::Spilled ||
                        variant == Variant::EmptyCountMask || variant == Variant::MergedInitial ||
                        variant == Variant::StepTwo || variant == Variant::MaskedStepTwo ||
-                       variant == Variant::SkippedIteration || stable_index;
+                       variant == Variant::SkippedIteration || variant == Variant::InvariantMask || stable_index;
     Check((selector && selector->rows.has_value()) == valid,
           "counted-row selector lost its proof or accepted mismatched row/induction bounds");
     if (valid)
@@ -2761,6 +2781,8 @@ void TestCountedRowImageSelector() {
   make_plan(Variant::Spilled);
   make_plan(Variant::EmptyCountMask);
   make_plan(Variant::DifferentBackedgeBound);
+  make_plan(Variant::InvariantMask);
+  make_plan(Variant::PossiblyEmptyMask);
   for (const auto variant : {Variant::Signed, Variant::StepTwo, Variant::SkippedIteration,
                              Variant::WrongRow, Variant::CountStride, Variant::KeyStride,
                              Variant::CountImmediate, Variant::KeyImmediate, Variant::VaryingRow,
