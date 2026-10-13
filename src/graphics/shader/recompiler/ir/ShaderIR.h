@@ -28,6 +28,8 @@ class CodeGenerator;
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
+class SrtWalker;
+
 // Finite descriptor domains also bound the arithmetic used to prove their indices.
 constexpr uint32_t MaxIndirectDescriptorProbes = 65536u;
 
@@ -596,6 +598,9 @@ struct ResourcePlan {
 
 		std::vector<Entry> values;
 		uint64_t           generation = 0;
+		const SrtWalker*    session = nullptr;
+		Value              active_mask;
+		uint8_t            read_policy = 0;
 	};
 
 	ResourcePlan();
@@ -627,7 +632,6 @@ struct ResourcePlan {
 	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
 	mutable std::deque<EvaluationContext> evaluation_contexts;
 	mutable uint32_t                       evaluation_value_count = 0;
-	mutable uint32_t                       evaluation_depth       = 0;
 	mutable std::vector<uint8_t>            active_sources;
 	mutable std::vector<uint8_t>            visited_blocks;
 	mutable std::vector<uint8_t>            reachable_blocks;

@@ -616,11 +616,11 @@ void TestWrittenDescriptorPredicateReads(bool memory_condition) {
   ResourceSpecialization specialization;
   for (const bool clean : {false, true}) {
     reads = {.clean = clean};
-    // A failed predicate explores both edges and the writable descriptor retries its clean read.
+    // A failed predicate explores both edges; its dirty read also rejects the writable descriptor.
     const bool expected = !memory_condition || clean;
     Check(MaterializeResources(plan, runtime, snapshot, specialization) == expected &&
               reads.ordinary == (memory_condition ? 0u : 1u) &&
-              reads.strict == (memory_condition ? (clean ? 1u : 2u) : 0u),
+              reads.strict == (memory_condition ? 1u : 0u),
           "writable descriptor changed reader policy or bypassed a dirty memory predicate");
     if (!expected) continue;
     Check(snapshot.buffers[0].dwords[0] == 0x8000u &&
@@ -695,6 +695,87 @@ void TestSharedControlPredicates() {
                     : std::vector<uint8_t>{1, 1, 1, 1}),
             "shared predicate skipped an unknown branch or followed a rejected branch");
     }
+  }
+}
+
+void TestNestedExecPredicatesReuseReads() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  constexpr uint32_t depth = 12;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  for (uint32_t i = 0; i < 3; ++i) AddValueBlock(program);
+  auto &entry = *program.blocks[0];
+  auto &use = *program.blocks[1];
+  auto &exit = *program.blocks[2];
+  const auto emit = [&](ValueOpcode opcode, std::initializer_list<Value> args) {
+    return Value(&entry.AppendNewInst(opcode, args));
+  };
+  const auto lane = emit(ValueOpcode::GetBuiltin,
+      {Value(static_cast<uint32_t>(StageInputKind::LocalInvocationId)), Value(0u)});
+  program.memory_info.push_back({.kind = ResourceKind::ScalarAddress, .planning_only = true});
+  const auto address = emit(ValueOpcode::GetAddressResource, {Value(0x1000u), Value(0u)});
+  const auto count = emit(ValueOpcode::LoadAddressU32,
+      {address, Value(0u), Value(0u), Value(true)});
+  count.Instruction()->SetFlags(MemoryFlags{.index = 0});
+  auto condition = emit(ValueOpcode::LogicalNot,
+      {emit(ValueOpcode::ULessThanEqual32, {count, lane})});
+  // A compact shared DAG must not become a tree of fresh EXEC evaluations.
+  for (uint32_t i = 0; i < depth; ++i) {
+    const auto mask = emit(ValueOpcode::INotEqual32, {lane, Value(i)});
+    condition = emit(ValueOpcode::LogicalAnd,
+        {mask, emit(ValueOpcode::LogicalOr, {condition, condition})});
+  }
+  entry.condition = condition;
+  entry.terminator.kind = TerminatorKind::ConditionalBranch;
+  entry.terminator.true_block = &use;
+  entry.terminator.false_block = &exit;
+  entry.AddBranch(&use);
+  entry.AddBranch(&exit);
+  use.terminator.kind = TerminatorKind::Branch;
+  use.terminator.true_block = &exit;
+  use.AddBranch(&exit);
+  DescriptorSource source;
+  source.dwords = {Value(0x8000u), Value(1u << 16u), Value(16u), Value(3u << 28u)};
+  source.dword_count = 4;
+  program.descriptor_sources.push_back(source);
+  program.info.buffers.push_back({.source = 0, .read = true});
+  program.memory_info.push_back({.kind = ResourceKind::Buffer, .resource = 0});
+  const auto buffer = Value(&use.AppendNewInst(ValueOpcode::GetBufferResource,
+      {source.dwords[0], source.dwords[1], source.dwords[2], source.dwords[3]}));
+  use.AppendNewInst(ValueOpcode::LoadBufferU32,
+      {buffer, Value(0u), Value(0u), Value(0u), Value(true)})
+      .SetFlags(MemoryFlags{.index = 1});
+  auto plan = ExtractResourcePlan(program);
+  struct Reads { uint32_t value = 0; bool clean = true; uint32_t strict = 0, ordinary = 0; } reads;
+  const SrtRuntime runtime{
+      .read_memory = +[](void *data, uint64_t, std::span<uint32_t>) {
+        ++static_cast<Reads *>(data)->ordinary;
+        return false;
+      },
+      .userdata = &reads,
+      .read_specialization_memory = +[](void *data, uint64_t address, std::span<uint32_t> words) {
+        auto &reads = *static_cast<Reads *>(data);
+        ++reads.strict;
+        Check(reads.strict <= depth + 1,
+              "shared EXEC predicates repeated scalar reads beyond their distinct masks");
+        if (!reads.clean || address != 0x1000u || words.size() != 1) return false;
+        words[0] = reads.value;
+        return true;
+      }};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  for (const auto state : {Reads{64u, true}, Reads{0u, true}, Reads{0u, false}, Reads{64u, true}}) {
+    reads = state;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization),
+          "nested EXEC predicates rejected a valid resource snapshot");
+    const bool inactive = reads.clean && reads.value == 0;
+    Check(snapshot.buffers[0].dwords[0] == (inactive ? 0u : 0x8000u),
+          "nested EXEC predicates lost an unknown branch or retained stale runtime facts");
+    Check(reads.strict > 0 && reads.ordinary == 0 &&
+              snapshot.specialization_reads.size() <= depth + 1,
+          "shared EXEC predicates repeated scalar reads beyond their distinct masks");
   }
 }
 
@@ -1059,6 +1140,7 @@ int main() {
     TestWrittenDescriptorPredicateReads(memory_condition);
   TestFailedMaterializationRejectsStage();
   TestSharedControlPredicates();
+  TestNestedExecPredicatesReuseReads();
   TestFiniteImageRefreshReusesScalarReads();
   for (const bool independent_mask : {false, true})
     TestEmptyTraversalSkipsUnmappedDescriptor(independent_mask);

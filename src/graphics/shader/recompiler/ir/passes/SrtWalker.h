@@ -99,7 +99,7 @@ std::optional<std::array<uint64_t, Size>> AffineIndex(
 class SrtWalker {
 public:
 	SrtWalker(const ResourcePlan& program, const SrtRuntime& runtime,
-	          SrtWalker* clean_evaluator = nullptr, Value active_mask = {});
+	          SrtWalker* clean_evaluator = nullptr);
 	~SrtWalker();
 	SrtWalker(const SrtWalker&)            = delete;
 	SrtWalker& operator=(const SrtWalker&) = delete;
@@ -110,7 +110,10 @@ public:
 	bool RefreshFlatBuffer(std::vector<uint32_t>& flat);
 
 private:
-	static ResourcePlan::EvaluationContext& AcquireContext(const ResourcePlan& program);
+	SrtWalker(SrtWalker& parent, Value active_mask, bool clean = false,
+	          SrtWalker* clean_evaluator = nullptr);
+	ResourcePlan::EvaluationContext& AcquireContext();
+	void ResetUnknowns();
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);
 	bool Arg(const Inst& inst, size_t index, uint64_t& result);
@@ -124,6 +127,8 @@ private:
 	SrtWalker*                      m_clean_evaluator = nullptr;
 	Value                           m_active_mask;
 	const std::vector<uint8_t>*      m_reachable_blocks = nullptr;
+	const SrtWalker*                m_session;
+	uint8_t                         m_read_policy;
 	ResourcePlan::EvaluationContext& m_context;
 };
 
