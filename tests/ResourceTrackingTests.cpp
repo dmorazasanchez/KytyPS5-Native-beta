@@ -1867,13 +1867,15 @@ void TestUniformizedMaterialImageKeys() {
     AndNot, Subset, FirstLane, FirstLaneDirect, FirstLaneAndNot, EmptyFirstEntry, WrongFirstBackedge,
     WideningFirstEntry, WideningFirstBackedge, WrongFirstLoadMask,
     Packed, PackedUnalignedOffset, PackedNegativeOffset, PackedFullAddress,
-    PackedWrongGuard, PackedSparseOffset, PackedWrongField
+    PackedWrongGuard, PackedSparseOffset, PackedWrongField,
+    PackedMerged, PackedUnboundedMerge, PackedCyclicMerge
   };
   const auto make_plan = [](Variant variant) {
     Fixture fixture;
     fixture.program.wave_size = 64u;
     const bool first_lane = variant >= Variant::FirstLane;
     const bool packed = variant >= Variant::Packed;
+    const bool merged = variant >= Variant::PackedMerged;
     const bool first_lane_loop = first_lane && variant != Variant::FirstLaneDirect;
     const uint32_t sample_entry_id = first_lane_loop ? 10u : 9u;
     const auto branch = [&](Value predicate, CFG::BranchCondition kind, Block *block) {
@@ -2002,10 +2004,31 @@ void TestUniformizedMaterialImageKeys() {
     index_phi.AddPhiOperand(sentinel, sentinel_index);
     index_phi.AddPhiOperand(bit, bit_index);
     const auto index = Value(&index_phi);
+    Value nibble;
+    if (merged) {
+      const auto low = fixture.Emit(ValueOpcode::BitwiseAnd32, {arbitrary, Value(15u)}, 0, entry);
+      const auto high = fixture.Emit(ValueOpcode::BitwiseAnd32, {fixture.UserData(7u), Value(15u)}, 0, entry);
+      auto &phi = (variant == Variant::PackedCyclicMerge ? header : merge)->AppendNewInst(
+          ValueOpcode::Phi, {}, static_cast<uint64_t>(Type::U32));
+      if (variant == Variant::PackedCyclicMerge) {
+        phi.AddPhiOperand(entry, low);
+        phi.AddPhiOperand(bit, fixture.Emit(ValueOpcode::SelectU32, {active, low, arbitrary}, 0, bit));
+      } else {
+        phi.AddPhiOperand(inactive, low);
+        phi.AddPhiOperand(sentinel, variant == Variant::PackedUnboundedMerge ? arbitrary :
+            fixture.Emit(ValueOpcode::SelectU32,
+                {fixture.Emit(ValueOpcode::INotEqual32, {fixture.UserData(7u), Value(0u)}, 0, sentinel),
+                 low, high}, 0, sentinel));
+        phi.AddPhiOperand(bit, fixture.Emit(ValueOpcode::UMax32, {low, high}, 0, bit));
+      }
+      nibble = fixture.Emit(ValueOpcode::UMax32, {Value(&phi), low}, 0, merge);
+    }
     const auto below = fixture.Emit(
         ValueOpcode::SGreaterThan32, {Value(32u), index}, 0, merge);
     auto material_guard = fixture.Emit(
         ValueOpcode::LogicalAnd, {active_on_entry, below}, 0, merge);
+    if (variant == Variant::PackedCyclicMerge)
+      material_guard = fixture.Emit(ValueOpcode::LogicalAnd, {material_guard, active}, 0, merge);
     const auto packed_load_guard = material_guard;
     if (packed) {
       const auto left = fixture.Emit(ValueOpcode::LogicalAnd,
@@ -2034,6 +2057,9 @@ void TestUniformizedMaterialImageKeys() {
          times_nine}, 0, choose);
     if (packed) material_offset = fixture.Emit(ValueOpcode::BitwiseAnd32,
         {Value(variant == Variant::PackedSparseOffset ? 0xd0u : 0xf0u), scaled}, 0, choose);
+    if (merged) material_offset = fixture.Emit(ValueOpcode::ShiftLeftLogical32,
+        {fixture.Emit(ValueOpcode::SelectU32, {packed_load_guard, nibble, arbitrary}, 0, choose),
+         Value(4u)}, 0, choose);
     const auto base = fixture.Address(fixture.UserData(0u), fixture.UserData(1u));
     MemoryInfo material_memory;
     material_memory.kind = ResourceKind::Global;
@@ -2051,7 +2077,7 @@ void TestUniformizedMaterialImageKeys() {
     if (packed) {
       projected = fixture.Emit(ValueOpcode::SelectU32, {load_mask, loaded, arbitrary}, 0, choose);
       projected = fixture.Emit(ValueOpcode::BitFieldUExtract,
-          {projected, Value(variant == Variant::PackedWrongField ? 17u : 16u), Value(16u)}, 0, choose);
+          {projected, Value(variant == Variant::PackedWrongField ? 17u : merged ? 0u : 16u), Value(16u)}, 0, choose);
       projected = fixture.Emit(ValueOpcode::UMin32, {Value(16383u), projected}, 0, choose);
     }
     const auto local_key = fixture.Emit(
@@ -2174,7 +2200,7 @@ void TestUniformizedMaterialImageKeys() {
     if (packed)
       Check(indirect && indirect->selector && indirect->selector->stride == 16u &&
                 indirect->selector->offset == (variant == Variant::PackedUnalignedOffset ? 9u : 8u) &&
-                indirect->selector->global && indirect->selector->bit_offset == 16u &&
+                indirect->selector->global && indirect->selector->bit_offset == (merged ? 0u : 16u) &&
                 indirect->selector->bit_mask == 0xffffu && indirect->selector->maximum == 16383u &&
                 indirect->key_count == Value(16u) && indirect->selector_first == Value(0u) &&
                 indirect->selector_mask.IsEmpty(),
@@ -2306,9 +2332,21 @@ void TestUniformizedMaterialImageKeys() {
           "global selector did not preserve exact base-plus-offset while scalar descriptor reads aligned the base");
   }
   user_data[0] = base;
+  const auto merged = make_plan(Variant::PackedMerged);
+  for (uint32_t record = 0; record < 16u; ++record)
+    memory.words[(record * 16u + 8u) / 4u] =
+        0xdead0000u | (record == 1u ? 0xffffu : record == 2u ? 4096u : 7u);
+  memory.fail_address = base + 16u * 16u + 8u;
+  memory.reads = memory.descriptor_reads = 0u;
+  Check(MaterializeResources(merged, runtime, snapshot, specialization) &&
+            memory.reads == 19u && memory.descriptor_reads == 3u && snapshot.images.size() == 3u &&
+            snapshot.images[0].dwords[0] == 0x200u && snapshot.images[1].dwords[0] == 0x400u &&
+            snapshot.images[2].dwords[0] == 0x600u,
+        "merged nibble selector did not preserve its sixteen-record domain and lower-half projection");
   for (const auto variant : {Variant::PackedNegativeOffset, Variant::PackedFullAddress,
                              Variant::PackedWrongGuard, Variant::PackedSparseOffset,
-                             Variant::PackedWrongField})
+                             Variant::PackedWrongField, Variant::PackedUnboundedMerge,
+                             Variant::PackedCyclicMerge})
     CheckFatal([&] { make_plan(variant); }, "not a valid runtime value",
                "packed selector accepted an unproved OR guard, offset domain, or field extraction");
 }
