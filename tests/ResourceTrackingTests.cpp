@@ -2411,8 +2411,8 @@ void TestScalarBufferSelectorDomain() {
 
 void TestPrivateLdsForwarding() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
-  enum class Variant { Valid, Overlap, Duplicate, CrossLane, Truncated, OutOfBounds, Mask, Bypass };
-  for (const auto variant : {Variant::Valid, Variant::Overlap, Variant::Duplicate,
+  enum class Variant { Valid, MaskedLoad, Overlap, Duplicate, CrossLane, Truncated, OutOfBounds, Mask, Bypass };
+  for (const auto variant : {Variant::Valid, Variant::MaskedLoad, Variant::Overlap, Variant::Duplicate,
                             Variant::CrossLane, Variant::Truncated, Variant::OutOfBounds,
                             Variant::Mask, Variant::Bypass}) {
     Fixture fixture;
@@ -2454,7 +2454,8 @@ void TestPrivateLdsForwarding() {
     body->terminator = {.kind = CFG::TerminatorKind::Branch, .true_block = exit};
     const auto load = fixture.Emit(ValueOpcode::LoadSharedU32,
         {variant == Variant::CrossLane
-             ? fixture.Emit(ValueOpcode::IAdd32, {address, Value(4u)}) : address, Value(true)},
+             ? fixture.Emit(ValueOpcode::IAdd32, {address, Value(4u)}) : address,
+         variant == Variant::MaskedLoad ? active : Value(true)},
         fixture.AddMemory(memory, 0x20), exit);
     const auto use = fixture.Emit(ValueOpcode::ReferenceU32, {load}, 0, exit);
     ShaderComputeInputInfo compute;
@@ -2464,8 +2465,13 @@ void TestPrivateLdsForwarding() {
     fixture.PlanAndTrack({.compute = &compute});
     const auto result = use.Instruction()->Arg(0).ResolveInstruction();
     Check(result != nullptr &&
-              (result->GetOpcode() == ValueOpcode::SelectU32) == (variant == Variant::Valid),
+              (result->GetOpcode() == ValueOpcode::SelectU32) ==
+                  (variant == Variant::Valid || variant == Variant::MaskedLoad),
           "private LDS forwarding lost its value or crossed an alias, mask, bound or dominance hazard");
+    if (variant == Variant::MaskedLoad)
+      Check(result->Arg(0) == active && result->Arg(1) == Value(0x12345678u) &&
+                result->Arg(2) == Value(0u),
+            "forwarding an unconditional store lost the load's inactive-lane zero value");
   }
 }
 
