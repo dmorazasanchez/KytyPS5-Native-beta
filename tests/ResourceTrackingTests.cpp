@@ -1065,7 +1065,7 @@ void TestBoundedComputeImageLoop() {
     Masked, MaskedWrongGuard, MaskResurrection, StatusOverwrite,
     GuardedDiamond, GuardedDiamondBypass
   };
-  const auto make_plan = [](Variant variant, bool material = false) {
+  const auto make_plan = [](Variant variant, bool material = false, uint32_t first = 0u) {
     const bool diamond = variant >= Variant::GuardedDiamond;
     Fixture fixture(diamond ? ShaderType::Vertex : ShaderType::Compute);
     fixture.program.wave_size = 64u;
@@ -1140,7 +1140,11 @@ void TestBoundedComputeImageLoop() {
         ValueOpcode::GetBuiltin,
         {Value(static_cast<uint32_t>(diamond ? StageInputKind::VertexIndex
                                             : StageInputKind::LocalInvocationId)), Value(0u)});
-    const auto count = variant == Variant::DivergentBound ? local : fixture.UserData(2);
+    auto count = variant == Variant::DivergentBound ? local : fixture.UserData(2);
+    if (first != 0u && variant != Variant::DivergentBound)
+      count = fixture.Emit(ValueOpcode::LoadAddressU32,
+          {fixture.Address(fixture.UserData(0), fixture.UserData(1)), Value(0u), Value(0u), Value(true)},
+          fixture.AddMemory({.kind = ResourceKind::ScalarAddress}, 0x10));
     const auto in_range = fixture.Emit(material ? ValueOpcode::ULessThan32 : ValueOpcode::SLessThan32,
                                        {variant == Variant::WrongGuard
                                             ? Value(0u) : key,
@@ -1281,7 +1285,7 @@ void TestBoundedComputeImageLoop() {
     const auto step = fixture.Emit(ValueOpcode::IAdd32,
                                    {key, Value(variant == Variant::WrongStep ? 2u : 1u)},
                                    0, increment);
-    phi.AddPhiOperand(entry, variant == Variant::DivergentKey ? local : Value(0u));
+    phi.AddPhiOperand(entry, variant == Variant::DivergentKey ? local : Value(first));
     phi.AddPhiOperand(forwarded ? incoming : increment, step);
     Check(!forwarded || step.ResolveInstruction()->Parent() != phi.PhiBlock(1),
           "forwarded loop fixture did not separate the increment from its Phi incoming edge");
@@ -1318,13 +1322,30 @@ void TestBoundedComputeImageLoop() {
     fixture.Emit(ValueOpcode::ImageSampleRaw,
                  {image, sampler, fixture.ImageAddress(), Value(true)},
                  fixture.AddMemory(sample, 0x29c));
+    if (first != 0u) {
+      const auto output = fixture.Image({Value(0x8000u),
+          Value(static_cast<uint32_t>(Libs::Graphics::Prospero::BufferFormat::k32UInt) << 20u),
+          Value(0u), Value((static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D) << 28u) |
+                          Libs::Graphics::DstSel(4, 5, 6, 7)),
+          Value(0u), Value(0u), Value(0u), Value(0u)}, 0x2a0);
+      const auto texel = fixture.Emit(ValueOpcode::CompositeConstructU32x4,
+          {Value(0u), Value(0u), Value(0u), Value(0u)});
+      fixture.Emit(ValueOpcode::ImageWrite, {output, fixture.ImageAddress(), texel, Value(true)},
+                   fixture.AddMemory(sample, 0x2a0));
+    }
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
     Check(indirect && indirect->selector.has_value() == material &&
               indirect->table_offset == 0x6b0u &&
-              indirect->key_count.Resolve() == count.Resolve(),
+              (first == 0u ? indirect->key_count.Resolve() == count.Resolve()
+                           : indirect->selector_first == Value(first) && !indirect->signed_count),
           "bounded compute loop lost its runtime image count");
+    if (first != 0u)
+      for (const auto word : words)
+        Check(!word.Instruction()->HasUses() &&
+                  fixture.program.memory_info[word.Instruction()->Flags<MemoryFlags>().index].planning_only,
+              "nonzero-start image range retained descriptor-only scalar loads");
     if (material) Check(indirect->selector->stride == 48u &&
                             indirect->selector->offset == 2756u &&
                             fixture.program.descriptor_sources[indirect->selector->source].dword_count == 2u,
@@ -1412,6 +1433,47 @@ void TestBoundedComputeImageLoop() {
   user_data[2] = 65537u;
   Check(!MaterializeResources(plan, runtime, snapshot, specialization),
         "oversized compute loop bound was accepted for image enumeration");
+
+  const auto nonzero = make_plan(Variant::Forwarded, false, 1u);
+  Check(nonzero.capture_specialization_reads && nonzero.info.images[1].written,
+        "nonzero-start image loop omitted writable-alias validation");
+  memory.fail_address = table;
+  for (const uint32_t count : {0u, 1u, 0x80000000u, UINT32_MAX, 2u, 3u, 1u, 2u}) {
+    memory.words[(user_data[0] - memory.base) / 4u] = count;
+    memory.descriptor_reads = 0u;
+    const auto length = count > 1u && count <= INT32_MAX ? count - 1u : 0u;
+    Check(MaterializeResources(nonzero, runtime, snapshot, specialization) &&
+              memory.descriptor_reads == length &&
+              snapshot.images.size() == std::max(1u, length) + 1u &&
+              snapshot.images[0].dwords[0] == (length != 0u ? 0x101u : 0u),
+          "nonzero-start image loop read index zero or mishandled its signed bound");
+    Check(std::ranges::find(snapshot.specialization_reads,
+              std::pair{uint64_t{user_data[0]}, uint64_t{4u}}) != snapshot.specialization_reads.end(),
+          "nonzero-start loop count escaped writable-alias capture");
+    for (uint32_t key = 1u; key <= length; ++key)
+      Check(std::ranges::find(snapshot.specialization_reads,
+                std::pair{uint64_t{table} + key * 32u, uint64_t{32u}}) !=
+                    snapshot.specialization_reads.end() &&
+                std::ranges::any_of(snapshot.images, [&](const auto& image) {
+                  return image.dwords[0] == 0x100u + key;
+                }),
+            "nonzero-start loop lost a descriptor or its writable-alias capture");
+  }
+  for (const auto count : {MaxIndirectDescriptorProbes + 2u, uint32_t{INT32_MAX}}) {
+    memory.words[(user_data[0] - memory.base) / 4u] = count;
+    memory.descriptor_reads = 0u;
+    Check(!MaterializeResources(nonzero, runtime, snapshot, specialization) &&
+              memory.descriptor_reads == 0u,
+          "oversized nonzero-start image loop probed its descriptor table");
+  }
+  memory.fail_address = UINT64_MAX;
+  for (const auto variant : {Variant::WrongStep, Variant::IncrementBypass,
+                             Variant::EntryBypass, Variant::PreviousBound,
+                             Variant::DivergentBound})
+    CheckFatal([&] { make_plan(variant, false, 1u); }, "not a valid runtime value",
+               "nonzero-start image loop accepted an unproved bound or induction");
+  CheckFatal([&] { make_plan(Variant::Bounded, false, UINT32_MAX); }, "not a valid runtime value",
+             "signed image loop accepted a negative initial key");
 
   auto material = make_plan(Variant::Bounded, true);
   for (const auto variant : {Variant::WrongGuard, Variant::EntryBypass, Variant::WrongStep})
