@@ -1057,6 +1057,7 @@ void TestGuardedDirectImageTable() {
 
 void TestBoundedComputeImageLoop() {
   namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+  enum class Clamp { None, Right, Left, Dynamic };
   enum class Variant {
     Bounded, Plain, Nonzero, TrueEdge, WrongGuard, EntryBypass, ExitBypass, GuardBlock,
     WrongStep, DivergentBound, DivergentKey, Disjunction, WrongPolarity,
@@ -1065,7 +1066,8 @@ void TestBoundedComputeImageLoop() {
     Masked, MaskedWrongGuard, MaskResurrection, StatusOverwrite,
     GuardedDiamond, GuardedDiamondBypass
   };
-  const auto make_plan = [](Variant variant, bool material = false, uint32_t first = 0u) {
+  const auto make_plan = [](Variant variant, bool material = false, uint32_t first = 0u,
+                            Clamp clamp = Clamp::None) {
     const bool diamond = variant >= Variant::GuardedDiamond;
     Fixture fixture(diamond ? ShaderType::Vertex : ShaderType::Compute);
     fixture.program.wave_size = 64u;
@@ -1300,6 +1302,12 @@ void TestBoundedComputeImageLoop() {
       image_key = fixture.Emit(ValueOpcode::LoadAddressU32,
           {table, fixture.Emit(ValueOpcode::IMul32, {key, Value(48u)}), Value(0u), Value(true)},
           fixture.AddMemory(memory, 0x2ff0));
+      if (clamp != Clamp::None) {
+        const auto maximum = clamp == Clamp::Dynamic ? fixture.UserData(3u) : Value(2u);
+        image_key = fixture.Emit(ValueOpcode::UMin32,
+            clamp == Clamp::Left ? std::initializer_list<Value>{maximum, image_key}
+                                 : std::initializer_list<Value>{image_key, maximum});
+      }
     }
     const auto offset = fixture.Emit(ValueOpcode::IAdd32,
         {fixture.Emit(ValueOpcode::ShiftLeftLogical32, {image_key, Value(5u)}),
@@ -1348,6 +1356,7 @@ void TestBoundedComputeImageLoop() {
               "nonzero-start image range retained descriptor-only scalar loads");
     if (material) Check(indirect->selector->stride == 48u &&
                             indirect->selector->offset == 2756u &&
+                            indirect->selector->maximum == (clamp == Clamp::None ? UINT32_MAX : 2u) &&
                             fixture.program.descriptor_sources[indirect->selector->source].dword_count == 2u,
                         "bounded scalar selector lost its pointer or record layout");
     return ExtractResourcePlan(fixture.program);
@@ -1502,6 +1511,24 @@ void TestBoundedComputeImageLoop() {
   memory.words[(first_key - memory.base) / 4u] = UINT32_MAX - 1000u;
   Check(!MaterializeResources(material, runtime, snapshot, specialization),
         "raw pointer selector silently discarded an invalid negative key");
+
+  for (const auto clamp : {Clamp::Right, Clamp::Left}) {
+    const auto clamped = make_plan(Variant::Bounded, true, 0u, clamp);
+    memory.words[(table - memory.base) / 4u + 8u + 3u] =
+        static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor3D) << 28u;
+    memory.words[(first_key - memory.base) / 4u] = 0u;
+    memory.words[(first_key + 48u - memory.base) / 4u] = UINT32_MAX;
+    memory.words[(first_key + 96u - memory.base) / 4u] = 2u;
+    user_data[2] = 3u;
+    memory.fail_address = first_key + 144u;
+    memory.descriptor_reads = 0u;
+    Check(MaterializeResources(clamped, runtime, snapshot, specialization) &&
+              memory.descriptor_reads == 2u && snapshot.images.size() == 2u &&
+              snapshot.images[0].dwords[0] == 0x100u && snapshot.images[1].dwords[0] == 0x102u,
+          "clamped scalar selector read an unreachable image or failed to deduplicate clamped keys");
+  }
+  CheckFatal([&] { make_plan(Variant::Bounded, true, 0u, Clamp::Dynamic); },
+             "not a valid runtime value", "scalar selector accepted an unproved dynamic clamp");
 }
 
 void TestDescendingImageRange() {
