@@ -14335,8 +14335,15 @@ void TestBoundedScalarMaterialImageKeys() {
   Check(!MaterializeResources(plan, runtime, snapshot, specialization) && memory.keys == 0,
         "scalar material byte range escaped V# bounds");
   memory = {.mixed = true};
-  Check(!MaterializeResources(plan, runtime, snapshot, specialization),
-        "selected material fields bypassed image compatibility");
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.images.size() == 4 && specialization.images.size() == 4,
+        "selected material fields rejected mixed native numeric classes");
+  for (uint32_t i = 0; i < snapshot.images.size(); ++i) {
+    Check(specialization.images[i].numeric_class ==
+              (snapshot.images[i].dwords[0] == 5588u
+                  ? Prospero::TextureNumericClass::Uint : Prospero::TextureNumericClass::Float),
+          "selected material fields lost a candidate's native numeric class");
+  }
   memory = {};
   Check(MaterializeResources(plan, runtime, snapshot, specialization),
         "native scalar material image selection did not recover after rejected candidates");
@@ -14571,7 +14578,8 @@ void TestSrtWalkerRealSBufferTranslation() {
 
   user_data[10] = 3 * sizeof(uint32_t);
   const auto bounds_walked = ShaderRecompiler::IR::SrtWalker(plan, runtime).RefreshFlatBuffer(flat);
-  Check(!bounds_walked, "real S_BUFFER_LOAD walk ignored descriptor bounds");
+  Check(bounds_walked && flat == std::vector<uint32_t>{table[0], table[1], table[2], 0u},
+        "real S_BUFFER_LOAD walk did not zero only the out-of-bounds DWORD");
   CheckFlattenedReadSlots(
       ir, 4, "real S_BUFFER_LOAD patch used the wrong flat offsets");
 
