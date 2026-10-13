@@ -189,12 +189,11 @@ bool ReadLinearTestMemory(void *userdata, uint64_t address, std::span<uint32_t> 
   if (memory == nullptr || address < memory->base ||
       values.size_bytes() > memory->words.size() * sizeof(uint32_t) ||
       address - memory->base > memory->words.size() * sizeof(uint32_t) - values.size_bytes() ||
-      (address & 3u) != 0u ||
       (memory->fail_address >= address && memory->fail_address - address < values.size_bytes())) {
     return false;
   }
-  std::copy_n(memory->words.begin() + (address - memory->base) / sizeof(uint32_t),
-               values.size(), values.begin());
+  std::memcpy(values.data(), reinterpret_cast<const uint8_t *>(memory->words.data()) +
+                                (address - memory->base), values.size_bytes());
   ++memory->reads;
   if (values.size() == 8u) ++memory->descriptor_reads;
   if (memory->watched_address >= address &&
@@ -1866,12 +1865,15 @@ void TestUniformizedMaterialImageKeys() {
   enum class Variant {
     Valid, Plain, WrongUpdate, WrongEquality, WrongExit, WrongCarry, WrongBackedge,
     AndNot, Subset, FirstLane, FirstLaneDirect, FirstLaneAndNot, EmptyFirstEntry, WrongFirstBackedge,
-    WideningFirstEntry, WideningFirstBackedge, WrongFirstLoadMask
+    WideningFirstEntry, WideningFirstBackedge, WrongFirstLoadMask,
+    Packed, PackedUnalignedOffset, PackedNegativeOffset, PackedFullAddress,
+    PackedWrongGuard, PackedSparseOffset, PackedWrongField
   };
   const auto make_plan = [](Variant variant) {
     Fixture fixture;
     fixture.program.wave_size = 64u;
     const bool first_lane = variant >= Variant::FirstLane;
+    const bool packed = variant >= Variant::Packed;
     const bool first_lane_loop = first_lane && variant != Variant::FirstLaneDirect;
     const uint32_t sample_entry_id = first_lane_loop ? 10u : 9u;
     const auto branch = [&](Value predicate, CFG::BranchCondition kind, Block *block) {
@@ -2002,8 +2004,17 @@ void TestUniformizedMaterialImageKeys() {
     const auto index = Value(&index_phi);
     const auto below = fixture.Emit(
         ValueOpcode::SGreaterThan32, {Value(32u), index}, 0, merge);
-    const auto material_guard = fixture.Emit(
+    auto material_guard = fixture.Emit(
         ValueOpcode::LogicalAnd, {active_on_entry, below}, 0, merge);
+    const auto packed_load_guard = material_guard;
+    if (packed) {
+      const auto left = fixture.Emit(ValueOpcode::LogicalAnd,
+          {material_guard, fixture.Emit(ValueOpcode::IEqual32, {arbitrary, Value(0u)}, 0, merge)}, 0, merge);
+      const auto right = fixture.Emit(ValueOpcode::LogicalAnd,
+          {variant == Variant::PackedWrongGuard ? Value(true) : material_guard,
+           fixture.Emit(ValueOpcode::IEqual32, {arbitrary, Value(1u)}, 0, merge)}, 0, merge);
+      material_guard = fixture.Emit(ValueOpcode::LogicalOr, {left, right}, 0, merge);
+    }
     fixture.program.blocks[5]->terminator = {
         .kind = CFG::TerminatorKind::Branch,
         .true_block = fixture.program.blocks[6u]};
@@ -2015,24 +2026,36 @@ void TestUniformizedMaterialImageKeys() {
         ValueOpcode::ShiftLeftLogical32, {selected_scale, Value(3u)}, 0, choose);
     const auto times_nine = fixture.Emit(
         ValueOpcode::IAdd32, {times_eight, selected_scale}, 0, choose);
-    const auto material_offset = fixture.Emit(
+    auto material_offset = fixture.Emit(
         ValueOpcode::SelectU32,
         {material_guard,
          fixture.Emit(ValueOpcode::IAdd32,
                       {times_nine, Value(0xc00u)}, 0, choose),
          times_nine}, 0, choose);
+    if (packed) material_offset = fixture.Emit(ValueOpcode::BitwiseAnd32,
+        {Value(variant == Variant::PackedSparseOffset ? 0xd0u : 0xf0u), scaled}, 0, choose);
     const auto base = fixture.Address(fixture.UserData(0u), fixture.UserData(1u));
     MemoryInfo material_memory;
     material_memory.kind = ResourceKind::Global;
+    if (packed) material_memory.offset = variant == Variant::PackedUnalignedOffset ? 9u : 8u;
+    if (variant == Variant::PackedNegativeOffset) material_memory.offset = static_cast<uint32_t>(-4096);
+    material_memory.address_is_full = variant == Variant::PackedFullAddress;
     const auto load_mask = variant == Variant::WrongFirstLoadMask
         ? fixture.Emit(ValueOpcode::LogicalNot, {material_guard}, 0, choose)
-        : material_guard;
+        : packed ? packed_load_guard : material_guard;
     const auto loaded = fixture.Emit(
         ValueOpcode::LoadAddressU32,
         {base, material_offset, Value(0u), load_mask},
         fixture.AddMemory(material_memory, 0x1a88u), choose);
+    auto projected = loaded;
+    if (packed) {
+      projected = fixture.Emit(ValueOpcode::SelectU32, {load_mask, loaded, arbitrary}, 0, choose);
+      projected = fixture.Emit(ValueOpcode::BitFieldUExtract,
+          {projected, Value(variant == Variant::PackedWrongField ? 17u : 16u), Value(16u)}, 0, choose);
+      projected = fixture.Emit(ValueOpcode::UMin32, {Value(16383u), projected}, 0, choose);
+    }
     const auto local_key = fixture.Emit(
-        ValueOpcode::SelectU32, {material_guard, loaded, arbitrary}, 0, choose);
+        ValueOpcode::SelectU32, {material_guard, projected, arbitrary}, 0, choose);
     Inst *sample_active_phi = nullptr;
     auto sample_active = material_guard;
     if (first_lane) {
@@ -2148,7 +2171,15 @@ void TestUniformizedMaterialImageKeys() {
     fixture.PlanAndTrack();
     const auto source = fixture.program.info.images[0].source;
     const auto &indirect = fixture.program.descriptor_sources[source].indirect_descriptor;
-    Check(indirect && indirect->selector->stride == 0x90u &&
+    if (packed)
+      Check(indirect && indirect->selector && indirect->selector->stride == 16u &&
+                indirect->selector->offset == (variant == Variant::PackedUnalignedOffset ? 9u : 8u) &&
+                indirect->selector->global && indirect->selector->bit_offset == 16u &&
+                indirect->selector->bit_mask == 0xffffu && indirect->selector->maximum == 16383u &&
+                indirect->key_count == Value(16u) && indirect->selector_first == Value(0u) &&
+                indirect->selector_mask.IsEmpty(),
+            "packed uniformized selector lost its bounded record domain or field projection");
+    else Check(indirect && indirect->selector->stride == 0x90u &&
               indirect->selector->offset == 0xc00u &&
               indirect->table_offset == 0x20e0u &&
               !indirect->selector_mask.IsEmpty() &&
@@ -2239,6 +2270,47 @@ void TestUniformizedMaterialImageKeys() {
     CheckFatal([&] { make_plan(variant); }, "not a valid runtime value",
                "first-lane material key escaped its active load mask");
   }
+
+  const auto packed = make_plan(Variant::Packed);
+  memory.words.resize(0x84000u / 4u);
+  for (uint32_t record = 0; record < 16u; ++record)
+    memory.words[(record * 16u + 8u) / 4u] = (7u << 16u) | 0xdead;
+  memory.words[(16u + 8u) / 4u] = UINT32_MAX;
+  memory.words[(32u + 8u) / 4u] = (4096u << 16u) | 0xbeef;
+  set_descriptor(base + 0x20e0u + 16383u * 32u, 0x600u);
+  memory.fail_address = base + 16u * 16u + 8u;
+  memory.reads = memory.descriptor_reads = 0u;
+  Check(MaterializeResources(packed, runtime, snapshot, specialization) &&
+            memory.reads == 19u && memory.descriptor_reads == 3u && snapshot.images.size() == 3u &&
+            snapshot.images[0].dwords[0] == 0x200u && snapshot.images[1].dwords[0] == 0x400u &&
+            snapshot.images[2].dwords[0] == 0x600u,
+        "packed selector did not extract before clamping or read outside its sixteen records");
+  memory.fail_address = base + 15u * 16u + 8u;
+  Check(!MaterializeResources(packed, runtime, snapshot, specialization),
+        "packed selector accepted an unreadable final record");
+  memory.fail_address = UINT64_MAX;
+  const auto unaligned = make_plan(Variant::PackedUnalignedOffset);
+  for (const auto [base_offset, immediate] : {std::pair{1u, 8u}, {0u, 9u}, {3u, 9u}}) {
+    user_data[0] = base + base_offset;
+    for (uint32_t record = 0; record < 16u; ++record) {
+      const uint32_t word = ((record == 1u ? 16383u : record == 2u ? 4096u : 7u) << 16u) | 0xdead;
+      std::memcpy(reinterpret_cast<uint8_t *>(memory.words.data()) +
+                      base_offset + immediate + record * 16u, &word, sizeof(word));
+    }
+    Check(MaterializeResources(immediate == 8u ? packed : unaligned, runtime, snapshot, specialization) &&
+              snapshot.images.size() == 3u && snapshot.images[0].dwords[0] == 0x200u &&
+              snapshot.images[1].dwords[0] == 0x400u && snapshot.images[2].dwords[0] == 0x600u &&
+              std::ranges::find(snapshot.specialization_reads,
+                  std::pair<uint64_t, uint64_t>{base + base_offset + immediate, 4u}) !=
+                  snapshot.specialization_reads.end(),
+          "global selector did not preserve exact base-plus-offset while scalar descriptor reads aligned the base");
+  }
+  user_data[0] = base;
+  for (const auto variant : {Variant::PackedNegativeOffset, Variant::PackedFullAddress,
+                             Variant::PackedWrongGuard, Variant::PackedSparseOffset,
+                             Variant::PackedWrongField})
+    CheckFatal([&] { make_plan(variant); }, "not a valid runtime value",
+               "packed selector accepted an unproved OR guard, offset domain, or field extraction");
 }
 
 void TestImageDescriptorFields() {
