@@ -678,6 +678,17 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
+	if (object_primitive_id) {
+		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
+		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || mesh_active || tess_active ||
+		                     !pixel_active || (sh.m_vgtDrawPayloadCntl & 8u) == 0 ||
+		                     user_config.GetPrimType() != Prospero::PrimitiveType::kTriList);
+		const auto& target = context.GetRenderTarget(7);
+		EXIT_NOT_IMPLEMENTED(Prospero::ResolveRenderTargetFormat(target.info.format,
+		                                                       target.info.channel_type)
+		                         .buffer_format != Prospero::BufferFormat::k32UInt);
+	}
 	if (mesh_active) {
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
@@ -699,6 +710,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		pixel_info.object_primitive_id = object_primitive_id;
 		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
 			const auto slot = ShaderPixelExportTarget(pixel_info.target_shader_mask, export_index);
 			if (slot >= 8u || pixel_info.target_output_mode[export_index] == 0u) continue;
@@ -777,8 +789,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		    static_cast<float>(std::min(limits.maxViewportDimensions[1], 16384u)) * 0.5f;
 		clip.enabled = true;
 	}
-	uint32_t          push_data_cursor =
-	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
+	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
+	    mesh_active, object_primitive_id);
 	GraphicsPrograms  result;
 	if (pixel_active) {
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
