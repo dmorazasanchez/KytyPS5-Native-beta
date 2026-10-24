@@ -17,11 +17,18 @@
 #include <span>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 namespace Libs::Graphics {
 
 struct GraphicContext;
+struct ShaderParams;
 class CommandBuffer;
+
+namespace ShaderRecompiler {
+struct CompileOptions;
+struct TranslateResult;
+} // namespace ShaderRecompiler
 
 namespace ShaderRecompiler::IR {
 class ImageHeapSource;
@@ -95,7 +102,7 @@ struct ShaderProgram {
 	uint64_t         id     = 0;
 	vk::ShaderModule module = nullptr;
 
-	explicit operator bool() const { return id != 0 && module != nullptr; }
+	explicit operator bool() const { return module != nullptr; }
 };
 
 // A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.
@@ -142,7 +149,22 @@ public:
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:
-	struct ProgramCache;
+	struct Module;
+	struct Program;
+
+	struct ProgramKey {
+		ShaderType            stage           = ShaderType::Unknown;
+		uint64_t              hash            = 0;
+		uint32_t              user_data_count = 0;
+		std::vector<uint32_t> static_state;
+
+		bool operator==(const ProgramKey&) const = default;
+	};
+
+	// Variants of one source share a bucket; ProgramKey equality compares the state.
+	struct ProgramKeyHash {
+		std::size_t operator()(const ProgramKey& key) const { return key.hash; }
+	};
 
 	struct GraphicsPipelineKey {
 		PipelineRenderingState   rendering;
@@ -169,8 +191,10 @@ private:
 		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
 
-	GraphicContext&               m_graphics;
-	std::unique_ptr<ProgramCache> m_program_cache;
+	GraphicContext&                        m_graphics;
+	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
+	std::unordered_map<ProgramKey, std::unique_ptr<Program>, ProgramKeyHash> m_program_cache;
+	ProgramKey                             m_lookup_key;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
 	std::chrono::steady_clock::time_point m_next_driver_cache_save;
@@ -178,6 +202,12 @@ private:
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
 	std::unordered_map<uint64_t, Pipeline>                                     m_compute_pipelines;
 
+	template <typename InputInfo>
+	ShaderProgram GetProgram(const ShaderParams& params, InputInfo& input_info,
+	                         uint32_t& push_data_cursor);
+	Module& CompileModule(Program& program, const ProgramKey& key,
+	                      ShaderRecompiler::CompileOptions  options,
+	                      ShaderRecompiler::TranslateResult translated, uint32_t push_data_cursor);
 	void InitializeDriverCache();
 	void CheckpointDriverCache();
 };
