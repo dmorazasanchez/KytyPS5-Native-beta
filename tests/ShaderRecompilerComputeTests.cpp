@@ -611,6 +611,13 @@ struct PipelineCacheTestAccess {
     cache.StoreLayout(key, layout);
   }
 
+  // Holds the store thread until the cache is destroyed.
+  static void HoldStoreUntilExit(PipelineCache &cache) {
+    cache.m_store.Post([stop = cache.m_store.m_thread.get_stop_token()] {
+      while (!stop.stop_requested()) std::this_thread::yield();
+    });
+  }
+
   static const auto &TessLayouts(const PipelineCache &cache) { return cache.m_tess_layouts; }
 
   static std::array<size_t, 2> Pipelines(const PipelineCache &cache) {
@@ -44917,11 +44924,20 @@ void CheckShaderStore(VulkanHarness &vulkan) {
   flip(0);
   Require(name, "stale store", run() == cold && std::filesystem::file_size(store) == size,
           "a store with another header was reused instead of started over");
-  // Reflecting a layout decodes LS and HS, so a restart takes it from the store.
+  // Reflecting a layout decodes LS and HS, so a restart takes it from the store. Records land
+  // while the cache lives; one still queued at its destruction lands before it is gone.
   const ShaderTessellationInputInfo layout{1, 2, 3, 4, 5, 6, 7, 8, 9};
   {
     RenderContext context(vulkan.RuntimeContext(), store);
-    PipelineCacheTestAccess::StoreLayout(context.GetPipelineCache(), 1, layout);
+    auto &cache = context.GetPipelineCache();
+    PipelineCacheTestAccess::StoreLayout(cache, 1, layout);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::filesystem::file_size(store) <= size && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    Require(name, "background write", std::filesystem::file_size(store) > size,
+            "a record waited for the cache to be destroyed");
+    PipelineCacheTestAccess::HoldStoreUntilExit(cache);
+    PipelineCacheTestAccess::StoreLayout(cache, 2, layout);
   }
   {
     RenderContext context(vulkan.RuntimeContext(), store);
@@ -44929,6 +44945,8 @@ void CheckShaderStore(VulkanHarness &vulkan) {
     Require(name, "tessellation layout",
             layouts.contains(1) && std::memcmp(&layouts.at(1), &layout, sizeof(layout)) == 0,
             "a restart did not load the stored tessellation layout");
+    Require(name, "drain at exit", layouts.contains(2),
+            "a record still queued when the cache was destroyed was dropped");
   }
   std::filesystem::remove_all(store.parent_path());
   Require(name, "release",

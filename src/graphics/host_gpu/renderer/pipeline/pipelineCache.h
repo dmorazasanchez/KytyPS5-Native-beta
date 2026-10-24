@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/file.h"
+#include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -14,10 +15,14 @@
 #include "graphics/shader/shader.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <queue>
 #include <span>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -141,6 +146,29 @@ struct DrawRenderState {
 	}
 };
 
+// Writes the shader store on its own thread, running jobs in the order they were posted.
+class ShaderStoreWriter {
+public:
+	// Keeps the first `kept` bytes of the store at `path`, or starts it over with `header`. The
+	// thread runs only if that succeeded.
+	void Open(const std::filesystem::path& path, std::span<const uint8_t> header, uint64_t kept);
+	explicit operator bool() const { return m_thread.joinable(); }
+	// Compresses `record` and appends it on the store thread, in call order.
+	void Append(std::vector<uint8_t>&& record);
+
+private:
+	friend struct PipelineCacheTestAccess;
+
+	void Post(Common::UniqueFunction<void>&& job);
+
+	Common::File                             m_file;
+	std::mutex                               m_mutex;
+	std::condition_variable_any              m_ready;
+	std::queue<Common::UniqueFunction<void>> m_jobs;
+	// Declared last, so it drains the queue and joins before the rest is destroyed.
+	std::jthread m_thread;
+};
+
 // The owning renderer serializes access, including saves while the GPU is running.
 class PipelineCache {
 public:
@@ -219,8 +247,8 @@ private:
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
 	std::unordered_map<uint64_t, Pipeline>                                     m_compute_pipelines;
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;
-	// Appends records of everything first created; invalid without a shader store.
-	Common::File m_store;
+	// Records everything first created; closed without a shader store.
+	ShaderStoreWriter m_store;
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,

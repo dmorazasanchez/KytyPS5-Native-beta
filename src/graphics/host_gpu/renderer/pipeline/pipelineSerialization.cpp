@@ -72,19 +72,6 @@ std::vector<uint8_t> StoreHeader(const GraphicContext& graphics) {
 	return std::move(header.bytes);
 }
 
-void Append(Common::File& store, const Writer& record) {
-	std::vector<uint8_t> bytes(sizeof(Frame) + ZSTD_compressBound(record.bytes.size()));
-	const auto size = ZSTD_compress(bytes.data() + sizeof(Frame), bytes.size() - sizeof(Frame),
-	                                record.bytes.data(), record.bytes.size(), 3);
-	EXIT_IF(ZSTD_isError(size));
-	const Frame frame {.compressed_size = static_cast<uint32_t>(size),
-	                   .raw_size        = static_cast<uint32_t>(record.bytes.size()),
-	                   .checksum        = XXH3_64bits(bytes.data() + sizeof(Frame), size)};
-	std::memcpy(bytes.data(), &frame, sizeof(frame));
-	// A failed write leaves a partial record; the next run drops it and everything after it.
-	store.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size));
-}
-
 // Record fields, shared by writing and reading.
 template <class S, class Key> void IoKey(S& io, Key& key) {
 	auto& [stage, hash, user_data_count, static_state] = key;
@@ -98,6 +85,56 @@ template <class S, class Module> void IoModule(S& io, Module& stage) {
 }
 
 } // namespace
+
+void ShaderStoreWriter::Open(const std::filesystem::path& path, std::span<const uint8_t> header,
+                             uint64_t kept) {
+	Common::File::CreateDirectories(path.parent_path());
+	if (kept == 0) {
+		if (m_file.Create(path)) {
+			m_file.Write(header.data(), static_cast<uint32_t>(header.size()));
+		}
+	} else if (m_file.Open(path, Common::File::Mode::ReadWrite)) {
+		m_file.Truncate(kept);
+		m_file.Seek(kept);
+	}
+	if (m_file.IsInvalid()) {
+		return;
+	}
+	m_thread = std::jthread([this](std::stop_token stop) {
+		std::unique_lock lock(m_mutex);
+		// Once stop is requested the wait returns false only when the queue is empty.
+		while (m_ready.wait(lock, stop, [this] { return !m_jobs.empty(); })) {
+			const auto job = std::move(m_jobs.front());
+			m_jobs.pop();
+			lock.unlock();
+			job();
+			lock.lock();
+		}
+	});
+}
+
+void ShaderStoreWriter::Append(std::vector<uint8_t>&& record) {
+	Post([this, record = std::move(record)] {
+		std::vector<uint8_t> bytes(sizeof(Frame) + ZSTD_compressBound(record.size()));
+		const auto size = ZSTD_compress(bytes.data() + sizeof(Frame), bytes.size() - sizeof(Frame),
+		                                record.data(), record.size(), 3);
+		EXIT_IF(ZSTD_isError(size));
+		const Frame frame {.compressed_size = static_cast<uint32_t>(size),
+		                   .raw_size        = static_cast<uint32_t>(record.size()),
+		                   .checksum        = XXH3_64bits(bytes.data() + sizeof(Frame), size)};
+		std::memcpy(bytes.data(), &frame, sizeof(frame));
+		// A failed write leaves a partial record; the next run drops it and everything after it.
+		m_file.Write(bytes.data(), static_cast<uint32_t>(sizeof(Frame) + size));
+	});
+}
+
+void ShaderStoreWriter::Post(Common::UniqueFunction<void>&& job) {
+	{
+		std::scoped_lock lock(m_mutex);
+		m_jobs.push(std::move(job));
+	}
+	m_ready.notify_one();
+}
 
 void PipelineCache::WarmUp(const std::filesystem::path& path) {
 	if (path.empty()) {
@@ -126,16 +163,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		}
 	}
 	// A damaged record ends the store; the records before it stay.
-	const auto kept = reusable ? bytes.size() - records.size() : 0;
-	Common::File::CreateDirectories(path.parent_path());
-	if (kept == 0) {
-		if (m_store.Create(path)) {
-			m_store.Write(header.data(), static_cast<uint32_t>(header.size()));
-		}
-	} else if (m_store.Open(path, Common::File::Mode::ReadWrite)) {
-		m_store.Truncate(kept);
-		m_store.Seek(kept);
-	}
+	m_store.Open(path, header, reusable ? bytes.size() - records.size() : 0);
 
 	const auto modules = MapModules();
 	for (const auto& key: pipelines) {
@@ -238,9 +266,10 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>&        records,
 	return true;
 }
 
+// Records are encoded here, since programs and modules change later.
 void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
                                 const ShaderModule& module, const std::vector<uint32_t>& spirv) {
-	if (m_store.IsInvalid()) {
+	if (!m_store) {
 		return;
 	}
 	Writer record;
@@ -249,26 +278,26 @@ void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
 	IoAll(record, ShaderRecompiler::IR::SaveResourcePlan(program.resource_plan));
 	IoModule(record, module);
 	IoAll(record, spirv);
-	Append(m_store, record);
+	m_store.Append(std::move(record.bytes));
 }
 
 void PipelineCache::StorePipeline(const GraphicsPipelineKey& key) {
-	if (m_store.IsInvalid()) {
+	if (!m_store) {
 		return;
 	}
 	Writer record;
 	IoAll(record, Record::GraphicsPipeline);
 	record.Raw(&key, sizeof(key));
-	Append(m_store, record);
+	m_store.Append(std::move(record.bytes));
 }
 
 void PipelineCache::StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout) {
-	if (m_store.IsInvalid()) {
+	if (!m_store) {
 		return;
 	}
 	Writer record;
 	IoAll(record, Record::TessellationLayout, key, layout);
-	Append(m_store, record);
+	m_store.Append(std::move(record.bytes));
 }
 
 PipelineCache::ModuleMap PipelineCache::MapModules() const {
