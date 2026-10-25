@@ -11024,6 +11024,18 @@ void TestMemoryFedScalarLeafCall() {
   ExpectFatal([&] { (void)PrepareShaderSource(multiple, options); },
               "a native return pair was accepted as a later call target");
 #endif
+  // A lane read and a wave32 lane mask write one SGPR, so neither s13 writer defines s14.
+  for (const auto& [wave_size, writer] : {std::pair{64u, 0x360u}, std::pair{32u, 0xc2u}}) {
+    const uint32_t neighbor[] = {EncodeVop3Word0(writer, 13), EncodeVop3Word1(256, 128, 0),
+                                 EncodeSop1(0x21, 14, 14), EncodeSopp(0x01)};
+    auto neighbor_options = options;
+    neighbor_options.wave_size = wave_size;
+    const auto neighbor_source = PrepareShaderSource(neighbor, neighbor_options);
+    const auto* target = neighbor_source.calls.front().target[0].TryInstruction();
+    Check(target != nullptr && target->GetOpcode() == IR::ValueOpcode::GetUserData &&
+              IR::RegIndex(target->Arg(0).ScalarRegister()) == 14u,
+          "a single-SGPR vector write was taken as the next SGPR's call-target definition");
+  }
 }
 
 void TestNewShaderRecompilerSetpcBranch() {
