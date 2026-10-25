@@ -843,6 +843,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
 	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
+	// compiled.
+	if (state.vertex_info[0].stage.module == nullptr) {
+		return false;
+	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
