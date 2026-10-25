@@ -153,6 +153,9 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		file.Read(bytes.data(), static_cast<uint32_t>(bytes.size()), &read);
 		bytes.resize(read);
 	}
+	Log::WriteToConsoleAndLog(
+	    fmt::format("Shader cache: compiling shaders and pipelines from {} ({:.1f} MB)\n",
+	                Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0));
 	std::vector<GraphicsPipelineKey> pipelines;
 	auto                             records = std::span<const uint8_t>(bytes);
 	const bool reusable =
@@ -183,10 +186,9 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 		CheckpointDriverCache();
 	}
 	Log::WriteToConsoleAndLog(fmt::format(
-	    "Shader cache: loaded {} programs, {} modules, {} pipelines from {} ({:.1f} MB) in {} ms\n",
+	    "Shader cache: loaded {} programs, {} modules, {} pipelines in {} ms\n",
 	    m_program_cache.size(), modules.size() - 1,
-	    m_graphics_pipelines.size() + m_compute_pipelines.size(), Common::PathToString(path),
-	    static_cast<double>(bytes.size()) / 1'000'000.0,
+	    m_graphics_pipelines.size() + m_compute_pipelines.size(),
 	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
 	                                                          start)
 	        .count()));
