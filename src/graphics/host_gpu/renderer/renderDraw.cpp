@@ -1161,7 +1161,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (mesh_active) {
 			draw_data = {draw.index_count,
 			             static_cast<uint32_t>(emit.vertex_offset),
-			             emit.first_instance,
 			             index_source.guest_element_size,
 			             static_cast<uint32_t>(index_source.address),
 			             static_cast<uint32_t>(index_source.address >> 32u)};
