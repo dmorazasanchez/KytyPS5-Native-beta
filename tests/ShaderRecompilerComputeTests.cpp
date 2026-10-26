@@ -21559,8 +21559,9 @@ private:
             "shaderStorageImageWriteWithoutFormat is not supported");
     Require("VulkanHarness", "dispatch",
             available_features.shaderImageGatherExtended == true &&
+                available_features.shaderResourceMinLod == true &&
                 available_derivatives.computeDerivativeGroupQuads == true,
-            "image gather or compute derivative quads are not supported");
+            "image gather, MinLod or compute derivative quads are not supported");
     Require("VulkanHarness", "dispatch",
             available_features11.storageBuffer16BitAccess == true &&
                 available_features12.storageBuffer8BitAccess == true,
@@ -21694,6 +21695,7 @@ private:
     device_features.shaderStorageImageWriteWithoutFormat = true;
     device_features.shaderStorageImageMultisample = available_features.shaderStorageImageMultisample;
     device_features.shaderImageGatherExtended = true;
+    device_features.shaderResourceMinLod = true;
     device_features.sampleRateShading = true;
     device_features.shaderInt64 = true;
     device_features.shaderFloat64 = available_features.shaderFloat64;
@@ -39224,6 +39226,48 @@ TestCase ImageGatherExplicitLod() {
   return test;
 }
 
+TestCase ImageSampleLodClamp() {
+  using O = ShaderOpcode;
+
+  // _cl clamps the computed LOD from below: compute's implicit LOD and zero
+  // derivatives would both select mip 0, so a clamp of 1 must read mip 1.
+  std::vector<u32> code;
+  AppendVMovU32(&code, 20, 0);
+  AppendVMovU32(&code, 21, 0);
+  AppendVMovU32(&code, 22, 0);
+  AppendVMovU32(&code, 23, 0);
+  AppendVMovLiteral(&code, 24, 0x3f000000u);
+  AppendVMovLiteral(&code, 25, 0x3f000000u);
+  AppendVMovLiteral(&code, 26, 0x3f800000u);
+  code.push_back(EncodeMimg0(0x21, 0x1));
+  code.push_back(EncodeMimg1(0, 24, 0, 2));
+  code.push_back(EncodeMimg0(0x23, 0x1));
+  code.push_back(EncodeMimg1(1, 20, 0, 2));
+  AppendStoreVgpr(&code, 0, 0);
+  AppendStoreVgpr(&code, 1, 1);
+  AppendEnd(&code);
+
+  TestCase test;
+  test.name = "ImageSampleLodClamp";
+  test.code = std::move(code);
+  test.opcodes = {O::V_MOV_B32, O::IMAGE_SAMPLE, O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  test.expected = std::vector<u32>(2, 0x41000000u);
+  test.sampled_image_rgba_mips = {std::vector<u32>(4 * 4 * 4, 0x3f800000u),
+                                 std::vector<u32>(2 * 2 * 4, 0x41000000u)};
+  test.user_data = MakeSampledTextureData(Prospero::BufferFormat::k32_32_32_32Float);
+  test.user_data[1] |= 3u << 30u;
+  test.user_data[2] = 3u << 14u;
+  test.user_data[3] |= 1u << 16u;
+  test.user_data[8] = 0x92u;
+  test.user_data[9] = 0xfff000u;
+  test.user_data[10] = 0x05000000u;
+  test.user_data[50] = test.expected.size() * sizeof(u32);
+  test.user_data[51] = 3u << 28u;
+  test.has_user_data = true;
+  test.required_spirv = {"MinLod"};
+  return test;
+}
+
 template <u32 mode> TestCase ImageGatherLodPerLane() {
   using O = ShaderOpcode;
   constexpr std::array names{
@@ -44788,6 +44832,7 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageSampleAndGather);
   AddCase(ImageCubeGradientsPreserveDerivatives);
   AddCase(ImageGatherExplicitLod);
+  AddCase(ImageSampleLodClamp);
   AddCase(ImageGatherLodPerLane<0>);
   AddCase(ImageGatherLodPerLane<1>);
   AddCase(ImageGatherLodPerLane<2>);
@@ -51205,6 +51250,7 @@ int main(int argc, char **argv) {
     VulkanHarness vulkan;
     vulkan.CheckComparisonDepthTexture();
     RunCase(&vulkan, ImageGatherExplicitLod());
+    RunCase(&vulkan, ImageSampleLodClamp());
     RunCase(&vulkan, ImageGatherLodPerLane<0>());
     RunCase(&vulkan, ImageGatherLodPerLane<1>());
     RunCase(&vulkan, ImageGatherLodPerLane<2>());

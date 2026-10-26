@@ -337,6 +337,7 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 
 		check_feature(device_features2.features.shaderImageGatherExtended,
 		              "shaderImageGatherExtended");
+		check_feature(device_features2.features.shaderResourceMinLod, "shaderResourceMinLod");
 
 		check_feature(device_features2.features.independentBlend, "independentBlend");
 		check_feature(device_features2.features.tessellationShader, "tessellationShader");
@@ -636,6 +637,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	device_features.shaderStorageImageMultisample        =
 	    supported_features2.features.shaderStorageImageMultisample;
 	device_features.shaderImageGatherExtended            = VK_TRUE;
+	device_features.shaderResourceMinLod                 = VK_TRUE;
 	device_features.independentBlend                     = VK_TRUE;
 	device_features.dualSrcBlend                         = VK_TRUE;
 	device_features.tessellationShader                   = VK_TRUE;
