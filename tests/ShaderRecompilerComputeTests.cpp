@@ -1436,6 +1436,7 @@ struct GraphicsCase {
   u32 pixel_custom_interpolation_mask = 0;
   u32 width = 1;
   std::vector<u32> object_ids;
+  std::vector<u32> gds_initial;
 };
 
 struct CompiledShader {
@@ -19919,8 +19920,40 @@ public:
       push_constant_range.size = ShaderRecompiler::IR::NativePushConstantSize;
     }
 
+    using Kind = ShaderRecompiler::IR::DescriptorBindingKind;
+    const bool uses_gds = !test.gds_initial.empty();
+    const auto gds_bit = uint64_t{1} << static_cast<u32>(Kind::Gds);
+    Require(test.name, "graphics", fragment_bind.descriptor_mask == (uses_gds ? gds_bit : 0u),
+            "a graphics case binds GDS only, and only with initial GDS data");
+    Buffer gds_buffer;
+    vk::DescriptorBufferInfo gds_info{};
+    vk::WriteDescriptorSet gds_write{};
+    vk::DescriptorSetLayout descriptor_layout = nullptr;
+    if (uses_gds) {
+      gds_buffer = CreateStorageBuffer(test.name, test.gds_initial, test.gds_initial.size());
+      gds_info = {gds_buffer.buffer, 0, gds_buffer.size};
+      const vk::DescriptorSetLayoutBinding binding{
+          ShaderRecompiler::IR::NativeBinding(ShaderType::Pixel, Kind::Gds),
+          vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eFragment};
+      vk::DescriptorSetLayoutCreateInfo layout_info{};
+      layout_info.sType = vk::StructureType::eDescriptorSetLayoutCreateInfo;
+      layout_info.flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+      layout_info.bindingCount = 1;
+      layout_info.pBindings = &binding;
+      RequireVk(test.name, "graphics",
+                m_device.createDescriptorSetLayout(&layout_info, nullptr, &descriptor_layout),
+                "vkCreateDescriptorSetLayout");
+      gds_write.sType = vk::StructureType::eWriteDescriptorSet;
+      gds_write.dstBinding = binding.binding;
+      gds_write.descriptorCount = 1;
+      gds_write.descriptorType = vk::DescriptorType::eStorageBuffer;
+      gds_write.pBufferInfo = &gds_info;
+    }
+
     vk::PipelineLayoutCreateInfo pipeline_layout_info{};
     pipeline_layout_info.sType = vk::StructureType::ePipelineLayoutCreateInfo;
+    pipeline_layout_info.setLayoutCount = uses_gds ? 1u : 0u;
+    pipeline_layout_info.pSetLayouts = &descriptor_layout;
     pipeline_layout_info.pushConstantRangeCount =
         push_constant_range.size != 0 ? 1u : 0u;
     pipeline_layout_info.pPushConstantRanges =
@@ -20077,6 +20110,10 @@ public:
       }
       cmd.beginRendering(rendering);
       cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
+      if (uses_gds) {
+        cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, pipeline_layout, 0, 1,
+                                 &gds_write);
+      }
       if (push_constant_range.size != 0) {
         ShaderRecompiler::IR::PushData push_data;
         if (object_id) {
@@ -20104,6 +20141,8 @@ public:
 
     m_device.destroyPipeline(pipeline, nullptr);
     m_device.destroyPipelineLayout(pipeline_layout, nullptr);
+    m_device.destroyDescriptorSetLayout(descriptor_layout, nullptr);
+    DestroyBuffer(&gds_buffer);
     m_device.destroyShaderModule(fragment_module, nullptr);
     m_device.destroyShaderModule(vertex_module, nullptr);
     DestroyBuffer(&vertex_buffer);
@@ -21639,6 +21678,7 @@ private:
                                 available_features.drawIndirectFirstInstance &&
                                 available_features.multiDrawIndirect &&
                                 available_features.depthBounds &&
+                                available_features.fragmentStoresAndAtomics &&
                                 available_depth_clip.depthClipEnable &&
                                 available_clip_control.depthClipControl &&
                                 available_color_write.colorWriteEnable &&
@@ -21738,6 +21778,7 @@ private:
     device_features.drawIndirectFirstInstance = m_rasterization_supported;
     device_features.multiDrawIndirect = m_rasterization_supported;
     device_features.depthBounds = m_rasterization_supported;
+    device_features.fragmentStoresAndAtomics = m_rasterization_supported;
     device_info.pEnabledFeatures = &device_features;
     std::vector<const char *> device_extensions{
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
@@ -44098,6 +44139,92 @@ GraphicsCase GraphicsDsAddtidScratchExport() {
            O::DS_READ_ADDTID_B32, O::EXP, O::S_ENDPGM}};
 }
 
+// Covers only pixel 1 of a 2x1 target, so the rest of its quad runs as helper invocations, and
+// starts a GDS counter at 10 in dword 5.
+void CoverOnePixelOfQuad(GraphicsCase *test) {
+  test->width = 2;
+  test->vertices = {0x00000000u, 0xbf800000u, 0, 0, 0, 0,
+                    0x40400000u, 0xbf800000u, 0, 0, 0, 0,
+                    0x00000000u, 0x40400000u, 0, 0, 0, 0};
+  test->gds_initial = {0, 0, 0, 0, 0, 10};
+}
+
+GraphicsCase GraphicsDsAppendSkipsHelperLanes(bool consume) {
+  using O = ShaderOpcode;
+
+  // The EXEC and VCC words exclude the helper lanes. Exports the first counter value, the second
+  // minus the first minus s_bcnt1(exec) (reversed for consume), s_bcnt1(exec), and the EXEC plus
+  // VCC counts after an if/endif on a compare of the interpolant (zero in every lane).
+  const u32 op = consume ? 0x3d : 0x3e;
+  std::vector<u32> code;
+  code.push_back(EncodeVintrp(0x00, 7, 0, 0, 0));
+  code.push_back(EncodeVintrp(0x01, 7, 0, 0, 1));
+  AppendSMovLiteral(&code, 124, 0x100);
+  code.push_back(EncodeDs0(op, 20, true));
+  code.push_back(EncodeDs1(1, 0, 0));
+  code.push_back(EncodeDs0(op, 20, true));
+  code.push_back(EncodeDs1(2, 0, 0));
+  code.push_back(EncodeSop1(0x10, 0, 126));
+  code.push_back(EncodeVop2(0x26, 3, Vgpr(consume ? 1 : 2), consume ? 2 : 1));
+  code.push_back(EncodeVop2(0x27, 3, 0, 3));
+  code.push_back(EncodeVop1(0x06, 4, Vgpr(1)));
+  code.push_back(EncodeVop1(0x05, 5, Vgpr(3)));
+  code.push_back(EncodeVop1(0x06, 6, 0));
+  code.push_back(EncodeVopc(0xc2, InlineU32(0), 7));
+  code.push_back(EncodeSop1(0x24, 2, 106));
+  code.push_back(EncodeSop2(0x11, 126, 126, 2));
+  code.push_back(EncodeSop1(0x10, 1, 126));
+  code.push_back(EncodeSop1(0x10, 4, 106));
+  code.push_back(EncodeSop2(0x00, 1, 1, 4));
+  code.push_back(EncodeVop1(0x06, 7, 1));
+  code.push_back(EncodeExp0(0x00, 0xf));
+  code.push_back(EncodeExp1(4, 5, 6, 7));
+  AppendEnd(&code);
+
+  GraphicsCase test;
+  test.name = consume ? "GraphicsDsConsumeSkipsHelperLanes" : "GraphicsDsAppendSkipsHelperLanes";
+  test.fragment_code = std::move(code);
+  CoverOnePixelOfQuad(&test);
+  test.expected_pixel = {0, 0, 0, 0, 0x41200000u, 0, 0x3f800000u, 0x40000000u};
+  test.opcodes = {O::V_INTERP_P1_F32, O::V_INTERP_P2_F32, O::S_MOV_B32,
+                  consume ? O::DS_CONSUME : O::DS_APPEND, O::S_BCNT1_I32_B64,
+                  O::V_SUB_NC_U32, O::V_SUBREV_NC_U32, O::V_CVT_F32_U32, O::V_CVT_F32_I32,
+                  O::V_CMP_EQ_U32, O::S_AND_SAVEEXEC_B64, O::S_OR_B64, O::S_ADD_U32, O::EXP,
+                  O::S_ENDPGM};
+  return test;
+}
+
+GraphicsCase GraphicsDsOrderedCountSkipsHelperLanes() {
+  using O = ShaderOpcode;
+
+  // A live lane adds the first lane's ADDR value (1) for the wave. Exports the first counter
+  // value and the difference to the second.
+  std::vector<u32> code;
+  code.push_back(EncodeVintrp(0x00, 7, 0, 0, 0));
+  code.push_back(EncodeVintrp(0x01, 7, 0, 0, 1));
+  code.push_back(EncodeVop1(0x01, 2, InlineU32(1)));
+  AppendSMovLiteral(&code, 124, 0x00100000u); // M0 base 0x10; offset0 adds 4: dword 5.
+  code.push_back(EncodeDs0(0x3f, 7, true));
+  code.push_back(EncodeDs1(1, 2, 2));
+  code.push_back(EncodeDs0(0x3f, 7, true));
+  code.push_back(EncodeDs1(3, 2, 2));
+  code.push_back(EncodeVop2(0x26, 4, Vgpr(3), 1));
+  code.push_back(EncodeVop1(0x06, 5, Vgpr(1)));
+  code.push_back(EncodeVop1(0x06, 6, Vgpr(4)));
+  code.push_back(EncodeExp0(0x00, 0xf));
+  code.push_back(EncodeExp1(5, 6, 6, 6));
+  AppendEnd(&code);
+
+  GraphicsCase test;
+  test.name = "GraphicsDsOrderedCountSkipsHelperLanes";
+  test.fragment_code = std::move(code);
+  CoverOnePixelOfQuad(&test);
+  test.expected_pixel = {0, 0, 0, 0, 0x41200000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+  test.opcodes = {O::V_INTERP_P1_F32, O::V_INTERP_P2_F32, O::V_MOV_B32, O::S_MOV_B32,
+                  O::DS_ORDERED_COUNT, O::V_SUB_NC_U32, O::V_CVT_F32_U32, O::EXP, O::S_ENDPGM};
+  return test;
+}
+
 GraphicsCase GraphicsDirectSgprPushConstantExport() {
   using O = ShaderOpcode;
 
@@ -44970,6 +45097,9 @@ std::vector<GraphicsCase> MakeGraphicsCases() {
       GraphicsFrontFaceBits(true, true),
       GraphicsFlatInterpolatorExport(),
       GraphicsDsAddtidScratchExport(),
+      GraphicsDsAppendSkipsHelperLanes(false),
+      GraphicsDsAppendSkipsHelperLanes(true),
+      GraphicsDsOrderedCountSkipsHelperLanes(),
       GraphicsDirectSgprPushConstantExport(),
       GraphicsInlineSrtScalarPromotionExport(),
       GraphicsNullVmExportDiscardsInactiveExec(),
@@ -50965,6 +51095,13 @@ int main(int argc, char **argv) {
   if (argc == 2 && std::strcmp(argv[1], "--packed-integer-neg-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, Vop3pIntegerNegationCapturedAndSelectedHalves());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--helper-lanes-only") == 0) {
+    VulkanHarness vulkan;
+    RunGraphicsCase(&vulkan, GraphicsDsAppendSkipsHelperLanes(false));
+    RunGraphicsCase(&vulkan, GraphicsDsAppendSkipsHelperLanes(true));
+    RunGraphicsCase(&vulkan, GraphicsDsOrderedCountSkipsHelperLanes());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--dpp-only") == 0) {
