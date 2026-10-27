@@ -25,22 +25,6 @@ Value Value::F32(float value) {
 	return Value(Type::F32, std::bit_cast<uint32_t>(value));
 }
 
-bool Value::IsEmpty() const {
-	return type == Type::Void;
-}
-
-bool Value::IsImmediate() const {
-	return type != Type::Opaque;
-}
-
-bool Value::IsIdentity() const {
-	return type == Type::Opaque && inst->GetOpcode() == ValueOpcode::Identity;
-}
-
-bool Value::IsPhi() const {
-	return type == Type::Opaque && inst->GetOpcode() == ValueOpcode::Phi;
-}
-
 Type Value::GetType() const {
 	if (IsPhi()) {
 		return inst->Flags<Type>();
@@ -54,19 +38,6 @@ Type Value::GetType() const {
 Inst* Value::Instruction() const {
 	EXIT_IF(type != Type::Opaque);
 	return inst;
-}
-
-Inst* Value::TryInstruction() const {
-	return type == Type::Opaque ? inst : nullptr;
-}
-
-Inst* Value::ResolveInstruction() const {
-	EXIT_IF(type != Type::Opaque);
-	return IsIdentity() ? inst->Arg(0).ResolveInstruction() : inst;
-}
-
-Value Value::Resolve() const {
-	return IsIdentity() ? inst->Arg(0).Resolve() : *this;
 }
 
 ScalarReg Value::ScalarRegister() const {
@@ -92,11 +63,6 @@ uint8_t Value::U8() const {
 uint16_t Value::U16() const {
 	EXIT_IF(type != Type::U16);
 	return imm_u16;
-}
-
-uint32_t Value::U32() const {
-	EXIT_IF(type != Type::U32);
-	return imm_u32;
 }
 
 uint64_t Value::U64() const {
@@ -152,10 +118,6 @@ Inst::~Inst() {
 	ClearArgs();
 }
 
-ValueOpcode Inst::GetOpcode() const {
-	return opcode;
-}
-
 Type Inst::GetType() const {
 	if (opcode == ValueOpcode::Phi) {
 		return static_cast<Type>(flags);
@@ -178,38 +140,13 @@ size_t Inst::UseCount() const {
 	return uses.size();
 }
 
-size_t Inst::NumArgs() const {
-	return num_args == PhiArity ? phi_args.size() : num_args;
-}
-
 size_t Inst::NumPhiBlocks() const {
 	return num_args == PhiArity ? phi_args.size() : 0;
-}
-
-template <typename Self>
-auto& Inst::ArgSlot(Self& self, size_t index) {
-	EXIT_IF(index >= self.NumArgs());
-	if (self.num_args <= InlineArity) {
-		return self.fixed_args[index];
-	}
-	return self.num_args == PhiArity ? self.phi_args[index].second : self.large_args[index];
-}
-
-Value Inst::Arg(size_t index) const {
-	return ArgSlot(*this, index);
 }
 
 Block* Inst::PhiBlock(size_t index) const {
 	EXIT_IF(opcode != ValueOpcode::Phi || index >= phi_args.size());
 	return phi_args[index].first;
-}
-
-Block* Inst::Parent() const {
-	return parent;
-}
-
-const std::vector<Use>& Inst::Uses() const {
-	return uses;
 }
 
 void Inst::SetParent(Block* block) {
