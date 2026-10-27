@@ -18826,6 +18826,10 @@ public:
       cmd.setViewportWithCount(1, &viewport);
       cmd.setScissorWithCount(1, &scissor);
       cmd.setLineWidth(1);
+      cmd.setCullMode(vk::CullModeFlagBits::eNone);
+      cmd.setFrontFace(registers.GetModeControl().face
+                           ? vk::FrontFace::eClockwise
+                           : vk::FrontFace::eCounterClockwise);
       cmd.setDepthTestEnable(depth.depth_test_enable);
       cmd.setDepthWriteEnable(depth.depth_write_enable);
       cmd.setDepthCompareOp(depth.depth_compare_op);
@@ -19023,6 +19027,9 @@ public:
       const std::array stencil_pipelines{
           pipeline(true, 2, 2, false, true).pipeline,
           pipeline(true, 2, 2, false, false).pipeline};
+      Require(name, "dynamic winding pipeline reuse",
+              stencil_pipelines[0] == stencil_pipelines[1],
+              "the winding changed the graphics pipeline");
       const auto check_stencil = [&](const char *label, bool back_face,
                                      uint8_t initial, uint8_t written) {
         vk::ClearValue clear{};
@@ -19655,6 +19662,22 @@ public:
                   "native vertex or instance offset was applied twice");
         }
       }
+      // With back faces culled, the triangle draws for exactly one winding.
+      const auto draws_with_back_cull = [&](bool clockwise) {
+        registers.SetModeControl({.cull_back = true, .face = clockwise});
+        TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
+            {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
+        RenderExecutorTestAccess::DrawAuto(executor, scheduler.Current(),
+            {.vertex_count = 3, .instance_count = 1, .first_vertex = 7, .first_instance = 5,
+             .offset_source = DrawOffsetSource::IndirectArgs});
+        const auto pixels = ReadCachedTexel(name, context, sparse_color.image_id,
+                                            {}, {extent, extent, 1});
+        return std::ranges::any_of(pixels, [](u32 word) { return word != 0; });
+      };
+      Require("DynamicCullMode", "back faces culled by winding",
+              draws_with_back_cull(false) != draws_with_back_cull(true),
+              "the draw's cull mode or front face did not reach the host GPU");
+      registers.SetModeControl({});
 
       // Indirect records come from the GPU copy; the CPU backing holds zeros. In each pair the
       // first record draws nothing and the second covers the target, through vertex offset 7
@@ -19800,9 +19823,10 @@ public:
       registers.SetPsInputEna(2);
       registers.SetPsInputAddr(2);
       registers.SetPsInputSettings(0, 0);
+      // Rect lists are drawn without culling.
       const auto check_rect = [&](Prospero::PrimitiveType primitive, const char *rect_name) {
         user_config.SetPrimitiveType(primitive);
-        registers.SetModeControl({});
+        registers.SetModeControl({.cull_front = true, .cull_back = true});
         TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
             {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
         RenderExecutorTestAccess::DrawAuto(
