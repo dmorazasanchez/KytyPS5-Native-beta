@@ -3942,6 +3942,62 @@ public:
             "write invalidation without a remaining copy did not establish CPU "
             "ownership");
 
+    // A RELEASE_MEM label beside GPU-written bytes lands without downloading
+    // them; one over GPU-written bytes downloads them first, and one on a clean
+    // cached page leaves it CPU-modified for the next upload.
+    constexpr uint64_t label_gpu_address = fault_base + 0xf000;
+    constexpr uint64_t label_beside_address = fault_base + 0xf100;
+    constexpr uint64_t label_clean_address = memory_dst + 0x100;
+    constexpr uint32_t label_gpu_value = 0x7e57ab1eu;
+    constexpr uint64_t label_value = 0x0123456789abcdefull;
+    gpu.SendCommandSync([&] {
+      auto dirty = buffer_cache.ObtainBuffer(
+          label_gpu_address, sizeof(label_gpu_value), true, false);
+      Require("GpuCommandLane", "label page setup",
+              dirty.first != nullptr &&
+                  buffer_cache.IsRegionRegistered(label_clean_address,
+                                                  sizeof(label_value)) &&
+                  !buffer_cache.IsRegionCpuModified(label_clean_address,
+                                                    sizeof(label_value)) &&
+                  !buffer_cache.IsRegionGpuModified(label_clean_address,
+                                                    sizeof(label_value)),
+              "label test has no GPU-written page or clean cached page");
+      buffer_cache.FillBuffer(label_gpu_address, sizeof(label_gpu_value),
+                              label_gpu_value, false);
+    });
+    const auto release_label = [&](uint64_t address) {
+      const auto packet = make_interrupt_packet(
+          2, 0, reinterpret_cast<void *>(address), label_value, 0);
+      gpu.Submit(packet);
+      gpu.WaitForIdle();
+      uint64_t label = 0;
+      return LibKernel::Memory::TryReadBacking(address, &label,
+                                               sizeof(label)) &&
+             label == label_value;
+    };
+    LibKernel::Memory::InstallGpuResources(&resources);
+    const bool label_beside_stored =
+        release_label(label_beside_address) &&
+        buffer_cache.HasGpuDirtyBytes(label_gpu_address,
+                                      sizeof(label_gpu_value));
+    const bool label_over_stored =
+        release_label(label_gpu_address) &&
+        !buffer_cache.HasGpuDirtyBytes(label_gpu_address, sizeof(label_value));
+    const bool label_clean_stored =
+        release_label(label_clean_address) &&
+        buffer_cache.IsRegionCpuModified(label_clean_address,
+                                         sizeof(label_value));
+    LibKernel::Memory::InstallGpuResources(nullptr);
+    Require("GpuCommandLane", "RELEASE_MEM label beside GPU-written bytes",
+            label_beside_stored,
+            "a label downloaded the GPU-written bytes beside it");
+    Require("GpuCommandLane", "RELEASE_MEM label over GPU-written bytes",
+            label_over_stored,
+            "a label over GPU-written bytes left them to a later download");
+    Require("GpuCommandLane", "RELEASE_MEM label on a clean cached page",
+            label_clean_stored,
+            "a label left a clean cached copy of its page stale");
+
     resources.UnmapMemory(fault_base, fault_size);
     Require("GpuCommandLane", "processor fault unmap",
             Libs::LibKernel::Memory::KernelMunmap(fault_base, fault_size) == 0,

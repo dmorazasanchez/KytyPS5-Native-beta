@@ -976,16 +976,28 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	// Dumped occlusion counters are written before any end-of-pipe signal reaches the guest.
 	m_renderer.GetOcclusionQueries().Publish();
 
+	// A label beside GPU-written bytes goes to the backing store, so they are not downloaded.
+	// Other labels go through the guest mapping: its fault keeps a clean cached copy current and
+	// downloads GPU-written bytes under the label before the store.
+	const auto write_label = [this, address](const void* value, uint64_t size) {
+		const auto vaddr   = reinterpret_cast<uint64_t>(address);
+		auto&      buffers = m_renderer.GetBufferCache();
+		if (!GuestRange {vaddr, size}.Valid() || !buffers.IsRegionGpuModified(vaddr, size) ||
+		    buffers.HasGpuDirtyBytes(vaddr, size) ||
+		    !LibKernel::Memory::TryWriteBacking(vaddr, value, size)) {
+			std::memcpy(address, value, size);
+		}
+	};
 	// EndOfPipeData: kNone, kImmediate32b, kImmediate64b, kRefClk; 5 reads GDS.
 	switch (data_sel) {
 		case 0: break;
 		case 1: {
 			const auto value = static_cast<uint32_t>(data);
-			std::memcpy(address, &value, sizeof(value));
+			write_label(&value, sizeof(value));
 			break;
 		}
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
-		case 2: std::memcpy(address, &data, sizeof(data)); break;
+		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
 			GetScheduler().Finish();
 			const auto gds = static_cast<uint32_t>(data);
