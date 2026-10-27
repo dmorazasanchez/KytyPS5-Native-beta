@@ -251,6 +251,8 @@ enum class StageInputKind {
 	LocalInvocationId,
 	LocalInvocationIndex,
 	GlobalInvocationId,
+	BaseVertex,
+	BaseInstance,
 	Parameter,
 };
 

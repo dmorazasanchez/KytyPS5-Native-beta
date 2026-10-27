@@ -19763,11 +19763,12 @@ public:
         for (u32 i = 0; i < 4; i++) {
           shaders.SetGsUserSgpr(i, static_cast<u32>(tables[i / 2] >> (i % 2 * 32)));
         }
-        const auto check = [&](const char *step, uint64_t vertex_shader, bool indexed, u32 first) {
+        const auto check = [&](const char *step, uint64_t vertex_shader, bool indexed, u32 first,
+                               ShaderIndirectOffsets offsets = {}) {
           shaders.SetEsShaderBase(vertex_shader);
           TextureCacheTestAccess::ClearImage(cache, scheduler.Current(), sparse_color.image_id,
               {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}, {});
-          const DrawIndirectArgs records{args_address + first * stride, 2, stride};
+          const DrawIndirectArgs records{args_address + first * stride, 2, stride, offsets};
           const bool drawn = indexed
               ? RenderExecutorTestAccess::DrawIndex(executor, scheduler.Current(),
                     {.index_count = 3, .index_addr = reinterpret_cast<const void *>(index_address),
@@ -19793,6 +19794,16 @@ public:
                 "no cached graphics pipeline named only compiled modules");
         check("recreated indexed embedded fetch", fetch_vs, true, 0);
         check("recreated auto native fetch", vertex_address, false, 6);
+        // Patched user SGPRs 0/1 read the records' base vertex 7 and first instance 5, not the
+        // table pointers they hold, and the index VGPRs exclude both bases.
+        check("indexed patched offsets", indirect_vs, true, 0, {0, 1});
+        check("auto patched offsets", indirect_vs, false, 4, {0, 1});
+        // Slots 4/5 lie past USER_SGPR, so the tables survive; rewritten fetches keep Vulkan's
+        // vertex offset.
+        check("indexed patched embedded fetch", fetch_vs, true, 0, {4, 5});
+        // Patching one offset still leaves both bases out of the index VGPRs.
+        check("auto instance-only patch", vertex_address, false, 5,
+              {ShaderIndirectOffsets::None, 1});
       }
 
       // A fourth VS invocation reads beyond the descriptor instead of reconstructing the corner.
@@ -51528,6 +51539,16 @@ void CheckPm4DrawIndirectMultiPacket(RenderContext &renderer) {
   auto_packet[3] = Pm4::SH_NOP;
   arguments[3] = 103;
   check_offsets(auto_packet, hs, {53, 101}, "disabled destinations");
+  // GS destinations, with an index buffer size for indexed draws, leave the records to the
+  // GPU and the CP writes no SGPR. A first-index destination stays on the CPU.
+  processor.SetIndexBufferSize(3);
+  arguments = {0, 1, 61, 17, 19};
+  check_offsets(indexed_packet, gs, {41, 7, 8}, "GPU indexed records");
+  auto_packet[2] = Pm4::SPI_SHADER_USER_DATA_GS_0 + 9;
+  auto_packet[3] = Pm4::SPI_SHADER_USER_DATA_GS_0 + 10;
+  check_offsets(auto_packet, gs, {41, 7, 8}, "GPU records");
+  indexed_packet[3] |= 1u << 28u;
+  check_offsets(indexed_packet, gs, {17, 19, 61}, "first-index destination");
   processor.BufferFlush();
   std::printf("[host]    %-32s ok\n", "Pm4DrawIndirectMulti");
 }

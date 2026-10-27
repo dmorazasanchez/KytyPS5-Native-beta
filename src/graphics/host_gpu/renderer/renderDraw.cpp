@@ -1250,8 +1250,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 }
 
-// Vulkan offsets for a prepared draw, or nullopt when its indirect records need CPU counts, as
-// mesh and quad-list draws do. Indirect records carry their own offsets.
+// Vulkan offsets for a prepared draw, or nullopt when its indirect records need the CPU: mesh
+// and quad-list draws for counts, tessellation draws for patched SGPRs. Indirect records carry
+// their own offsets.
 static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        ucfg,
                                                    const ShaderVertexInputInfo& vs,
                                                    DrawOffsetSource             source,
@@ -1260,7 +1261,8 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
                                                    const DrawIndirectArgs&      indirect) {
 	if (indirect.address != 0) {
 		if (vs.stage.module->info.stage == ShaderType::Mesh ||
-		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy) {
+		    ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
+		    vs.indirect_offsets != indirect.offsets) {
 			return std::nullopt;
 		}
 		return DrawEmitInfo {.indirect = indirect};
@@ -1324,7 +1326,7 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	hw_check(buffer);
 
-	DrawRenderState state {};
+	DrawRenderState state {.indirect_offsets = args.indirect.offsets};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		return true;
 	}
@@ -1429,7 +1431,7 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};
 
-	DrawRenderState state {};
+	DrawRenderState state {.indirect_offsets = args.indirect.offsets};
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		ResetBindings();
 		return true;

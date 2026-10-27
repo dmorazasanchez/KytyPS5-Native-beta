@@ -124,6 +124,18 @@ struct ShaderTessellationInputInfo {
 	uint32_t output_topology       = 0;
 };
 
+// GS user-data slots an indirect draw packet writes its record's base vertex and first instance
+// to. Like the hardware index VGPRs, the vertex shader's indices exclude both bases once either
+// slot is set.
+struct ShaderIndirectOffsets {
+	static constexpr uint8_t None = UINT8_MAX;
+
+	uint8_t vertex   = None;
+	uint8_t instance = None;
+
+	bool operator==(const ShaderIndirectOffsets&) const = default;
+};
+
 struct ShaderVertexInputInfo {
 	static constexpr int RES_MAX = 32;
 
@@ -146,6 +158,7 @@ struct ShaderVertexInputInfo {
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
+	ShaderIndirectOffsets   indirect_offsets;
 	bool                    fetch_external      = false;
 	bool                    fetch_embedded      = false;
 };

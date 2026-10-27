@@ -814,6 +814,27 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 	write(registers.draw_index, draw_index);
 }
 
+// Writes the GS user-data slots the packet patches; false when the shaders cannot read the
+// offsets from GPU records: a first-index or subdraw-index destination, or another stage's
+// user data.
+static bool IndirectDrawOffsets(IndirectDrawRegisters registers, ShaderIndirectOffsets& offsets) {
+	if (registers.index_offset != Pm4::SH_NOP || registers.draw_index != Pm4::SH_NOP) {
+		return false;
+	}
+	for (const auto [location, slot]: {std::pair {registers.vertex_offset, &offsets.vertex},
+	                                   std::pair {registers.instance_offset, &offsets.instance}}) {
+		if (location == Pm4::SH_NOP) {
+			continue;
+		}
+		const uint32_t index = location - Pm4::SPI_SHADER_USER_DATA_GS_0;
+		if (index >= HW::UserSgprInfo::SGPRS_MAX) {
+			return false;
+		}
+		*slot = static_cast<uint8_t>(index);
+	}
+	return true;
+}
+
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
                                     uint32_t draw_initiator, bool indexed) {
 	const auto args_size =
@@ -845,13 +866,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// NUM_INSTANCES keeps the last draw's instance count.
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
-	// With no SGPRs to patch, the GPU reads the records if the shaders allow. Shaders apply
-	// the records' offsets only through those SGPRs; Vulkan applies them, which matches
-	// while they are zero.
-	const DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
-	if (registers.vertex_offset == Pm4::SH_NOP && registers.instance_offset == Pm4::SH_NOP &&
-	    registers.index_offset == Pm4::SH_NOP && registers.draw_index == Pm4::SH_NOP &&
-	    (!indexed || m_index_buffer_size != 0) &&
+	// The GPU reads the records if the shaders allow; the VS prolog loads the patched SGPRs from
+	// Vulkan's bases. With no SGPR patched, Vulkan applies the offsets, which matches while they
+	// are zero.
+	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
+	if (IndirectDrawOffsets(registers, records.offsets) && (!indexed || m_index_buffer_size != 0) &&
 	    (indexed ? executor.DrawIndex(m_submit_id, CurrentBuffer(),
 	                                  {.index_count         = m_index_buffer_size,
 	                                   .index_addr          = IndexAddress(0),
