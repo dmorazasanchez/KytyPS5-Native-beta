@@ -1,0 +1,334 @@
+{
+  "base": "47857b43743a4905eacf6b30c82f7f910ed2a093",
+  "anyps5_reference": "06a90922740d075d3730c5d877a979e8c4d86776",
+  "device": "AMD BC-250 PCI 1002:13fe",
+  "kernel": "7.3.1-1.391-cachyos-bc250",
+  "cpu_semantic_cases": 26600,
+  "ctest_suites": 3,
+  "hardware_dispatches": 64,
+  "hardware_lane_results": 4096,
+  "all_hardware_results_match": true,
+  "raw_original_encodings_executed": false,
+  "cases": [
+    {
+      "case": "dot-14-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-14-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-14-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-14-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-15-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-15-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-15-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-15-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-16-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-16-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-16-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-16-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-17-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-17-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-17-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-17-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-18-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-18-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-18-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-18-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-19-alias0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-19-alias0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot-19-alias1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot-19-alias1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dot4c",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dot4c",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load-0-mask0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load-0-mask0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "load-0-mask1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load-0-mask1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "load-16-mask0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load-16-mask0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "load-16-mask1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load-16-mask1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "load--28-mask0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load--28-mask0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "load--28-mask1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "load--28-mask1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "store-mask0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "store-mask0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "store-mask1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "store-mask1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "sgpr",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "sgpr",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "literal",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "literal",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp16",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp16",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp16-masked",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp16-masked",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-fi",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-fi",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-fi-masked",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-fi-masked",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp8",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp8",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-masked",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "dpp8-masked",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "readfirstlane-mask0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "readfirstlane-mask0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "readfirstlane-mask1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "readfirstlane-mask1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "local-constant",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "local-constant",
+      "wave": 64,
+      "exit": 0
+    }
+  ]
+}

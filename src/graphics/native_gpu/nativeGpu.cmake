@@ -75,3 +75,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	# What the Steam shortcuts (the Decky plugin adds them) start: unloads Steam, boot and exit videos.
 	install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/tools/kytyps5-native/kytyps5-run.sh" DESTINATION .)
 endif()
+
+add_executable(native_gpu_integer_patcher_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/NativeGpuIntegerPatcherTests.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderIntegerPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderScan.cpp")
+target_include_directories(native_gpu_integer_patcher_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+    add_test(NAME native_gpu_integer_patcher COMMAND $<TARGET_FILE:native_gpu_integer_patcher_tests>)
+    add_dependencies(kyty_tests native_gpu_integer_patcher_tests)
+endif()

@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/nativeShaderPatches.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
 #include "graphics/presentation/videoOut.h"
@@ -715,7 +716,11 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	EXIT_NOT_IMPLEMENTED(h->file_header != 0x34333231);
 	EXIT_NOT_IMPLEMENTED(h->version != 0x00000018);
 
-	auto base = reinterpret_cast<uint64_t>(code);
+	uint32_t native_code_size = 0;
+	if (!NativeGpu::PrepareNativeIntegerShader(h, &native_code_size)) {
+		return GRAPHICS5_ERROR_INVALID_SHADER_PROGRAM;
+	}
+	auto base = reinterpret_cast<uint64_t>(h->code);
 
 	LOGF("\t base   = 0x%016" PRIx64 "\n", base);
 
@@ -724,7 +729,7 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	map.user_data           = h->user_data;
 	map.input_semantics     = h->input_semantics;
 	map.num_input_semantics = h->num_input_semantics;
-	map.code_size_bytes     = h->shader_size;
+	map.code_size_bytes     = native_code_size ? native_code_size : h->shader_size;
 	map.scratch_size_dwords = h->scratch_size_dw_per_thread;
 
 	ShaderMapUserData(base, map);

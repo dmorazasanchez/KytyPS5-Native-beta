@@ -86,6 +86,9 @@ void ApplyNativeDefaults() {
 		}
 		setenv("KYTY_NATIVE_GPU_GEM", "1", 0);
 		setenv("KYTY_NATIVE_GPU_PRIMARY", "1", 0);
+		// The validated gfx1013 replacements target BC-250. A PS5 keeps its
+		// native PS5 ISA; other devices require an explicit opt-in.
+		setenv("KYTY_NATIVE_GPU_INTEGER_PATCH", device == 0x13feu ? "1" : "0", 0);
 		std::fprintf(stderr, "native GPU: %s (1002:%04x), native mode on (KYTY_NATIVE_GPU=0 turns it off)\n", name, device);
 		return;
 	}
