@@ -17,12 +17,24 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
 #include <magic_enum.hpp>
 #include <vector>
 
 namespace Libs::Audio {
 
 namespace {
+
+// Experimental and deliberately opt-in. Leave the upstream path bit-identical
+// unless explicitly launched with KYTY_BC250_AUDIO_TEST=dialogue.
+static bool DialogueAudioTest() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("KYTY_BC250_AUDIO_TEST");
+        return value != nullptr && std::strcmp(value, "dialogue") == 0;
+    }();
+    return enabled;
+}
 
 constexpr int AUDIO_OUT_PORT_TYPE_MAIN      = 0;
 constexpr int AUDIO_OUT_PORT_TYPE_BGM       = 1;
@@ -261,7 +273,10 @@ uint32_t Audio::BytesPerSample(Format format) {
 
 uint32_t Audio::OutputChannels(const PortOut& port) {
 	// SDL only takes up to 8 channels. Keep the guest buffer's channel count separate.
-	return std::min(port.channels_num, 8);
+	if (DialogueAudioTest() && port.type == AUDIO_OUT_PORT_TYPE_MAIN && port.channels_num == 8) {
+        return 2;
+    }
+    return std::min(port.channels_num, 8);
 }
 
 SDL_AudioFormat Audio::SdlFormat(Format format) {
@@ -338,6 +353,56 @@ const void* Audio::PrepareOutputBuffer(const PortOut& port, const void* data,
 		             (gains != nullptr ? gains[ch] : 1.0f);
 		volume_changed |= scales[ch] != 1.0;
 	}
+
+    // The currently observed Demon's Souls HDMI stream is already 2-channel.
+    // Rebalance its phantom centre (mostly speech) and gently compress peaks.
+    // Also provide an explicit 8->2 downmix if another title opens 8 channels.
+    if (DialogueAudioTest() && port.type == AUDIO_OUT_PORT_TYPE_MAIN &&
+        (channels == 2 || channels == 8)) {
+        buffer->resize(frames * 2 * bytes_per_sample);
+        constexpr double center = 1.20;
+        constexpr double side = 0.80;
+        auto process = [](double v) -> double {
+            // Smooth, bounded transfer: attenuates aggressive sword transients.
+            const double a = std::abs(v);
+            return v * (1.0 / (1.0 + 0.28 * a)) * 1.15;
+        };
+        for (uint32_t frame = 0; frame < frames; ++frame) {
+            double left = 0.0, right = 0.0;
+            auto sample = [&](uint32_t ch) -> double {
+                const size_t index = static_cast<size_t>(frame) * channels + ch;
+                if (FormatIsFloat(port.format)) return static_cast<double>(static_cast<const float*>(data)[index]) * scales[ch];
+                return (static_cast<double>(static_cast<const int16_t*>(data)[index]) / 32768.0) * scales[ch];
+            };
+            if (channels == 2) {
+                const double l = sample(0), r = sample(1);
+                const double mid = (l + r) * 0.5;
+                const double difference = (l - r) * 0.5;
+                left = center * mid + side * difference;
+                right = center * mid - side * difference;
+            } else {
+                // Kyty non-STD layout: FL FR FC LFE SL SR RL RR.
+                // Standard format: FL FR FC LFE RL RR SL SR.
+                const bool standard = FormatIsStd(port.format);
+                const unsigned rl = standard ? 4 : 6, rr = standard ? 5 : 7;
+                const unsigned sl = standard ? 6 : 4, sr = standard ? 7 : 5;
+                left = (sample(0) + 0.86*sample(2) + 0.50*sample(sl) + 0.40*sample(rl) + 0.12*sample(3)) / 2.2;
+                right = (sample(1) + 0.86*sample(2) + 0.50*sample(sr) + 0.40*sample(rr) + 0.12*sample(3)) / 2.2;
+            }
+            left = std::clamp(process(left), -1.0, 1.0);
+            right = std::clamp(process(right), -1.0, 1.0);
+            const size_t out = static_cast<size_t>(frame) * 2;
+            if (FormatIsFloat(port.format)) {
+                auto* dst = reinterpret_cast<float*>(buffer->data());
+                dst[out] = static_cast<float>(left); dst[out+1] = static_cast<float>(right);
+            } else {
+                auto* dst = reinterpret_cast<int16_t*>(buffer->data());
+                dst[out] = static_cast<int16_t>(left * 32767.0);
+                dst[out+1] = static_cast<int16_t>(right * 32767.0);
+            }
+        }
+        return buffer->data();
+    }
 
 	if (!volume_changed && !reorder) {
 		return data;
