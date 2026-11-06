@@ -1,0 +1,5 @@
+# Disabled BY image-load prototype
+
+These four BY2/BY4 load forms are not called by PatchNativeInstructions and are not compiled into the installed emulator. Native query/load instructions passed bounded-memory smoke checks. A two-component read of an R32_UINT T# returns replicated R on this BC-250, whereas the AnyPS5/Vulkan model supplies zero for the absent G channel. Resolve the intended guest behavior before enabling this pass. The harness has been extended to test RG32_UINT with real distinct R/G data; its latest results are in _Build/instruction-tests/hardware-image-by/results.json. Do not count these four encodings as integrated. Valid nonzero mip levels, nonzero base levels, missing-component/swizzle rules, formats, and descriptor kinds need more validation.
+
+Compile prototype separately with -Isrc and these source paths; the CLI is patch_image_blob.cpp here. The Python harness imports the parent probe helpers (add its parent to PYTHONPATH). It uses only known native replacements and refuses to run while kyty_emulator is active. No original unsupported BY encoding is submitted to the GPU.
