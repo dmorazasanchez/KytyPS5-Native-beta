@@ -89,13 +89,11 @@ written under _Build/instruction-tests/hardware*.
 ## SharpEmu installation
 
 The live selector is /home/david/ps5-sharp-ui-bridge-20261103/kyty-conditional-emu.sh.
-The normal Upstream backend and its recovery/audio aliases use the new build.
-The original Fast profile remains available separately. All Upstream variants
-continue to use /home/david/kyty-upstream-clean-47857b4-20261104/release as their
-working directory for the existing saves, caches and assets.
+ASTRO BOT and Ghost of Yotei use its normal Upstream profile, now selecting
+/home/david/kyty-native-instructions-20261106/release/kyty_emulator.
+It retains /home/david/kyty-upstream-clean-47857b4-20261104/release as the working
+directory for existing saves, caches and assets. No GUI or game settings change.
 
-The existing opt-in Scream recovery from commit 14fc2fc and the existing
-KYTY_BC250_AUDIO_TEST=dialogue changes are preserved on the 47857b4 base.
-The recovery PC/byte/fault filters and context resume passed a standalone check.
-Recovery and dialogue processing remain enabled only by their existing settings.
-The old backend binaries and the selector backup remain available for rollback.
+The older optional recovery/audio executables and Fast profile retain their
+original routes. Their code is not added to this native instruction build.
+The original binary and selector backup remain available for rollback.
