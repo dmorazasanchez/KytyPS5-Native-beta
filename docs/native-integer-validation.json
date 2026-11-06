@@ -4,9 +4,9 @@
   "device": "AMD BC-250 PCI 1002:13fe",
   "kernel": "7.3.1-1.391-cachyos-bc250",
   "cpu_semantic_cases": 26600,
-  "ctest_suites": 3,
-  "hardware_dispatches": 64,
-  "hardware_lane_results": 4096,
+  "ctest_suites": 5,
+  "hardware_dispatches": 348,
+  "hardware_lane_results": 22272,
   "all_hardware_results_match": true,
   "raw_original_encodings_executed": false,
   "cases": [
@@ -330,5 +330,1352 @@
       "wave": 64,
       "exit": 0
     }
-  ]
+  ],
+  "implemented_encodings": 14,
+  "atomic_cpu_wave_executions": 512,
+  "float_cpu_exact_cases": 42576,
+  "float_cpu_accumulating_cases": 2000,
+  "atomic_cases": [
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-memory-soff128-offset-28-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-empty-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global-full-glc1-shared0-sub7-mem64-memory-soff128-offset-28-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-old-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc0-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-memory-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-old-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-empty-glc1-shared0-subffffffff-mem80000000-flags-soff96-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "buffer-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-memory-soff128-offset-28-scc1",
+      "wave": 32,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-old-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc0-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc0",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-empty-glc1-shared0-subffffffff-mem80000000-flags-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub0-mem0-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub0-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub1-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-subffffffff-memffffffff-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7fffffff-mem80000000-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc0-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared1-sub7-mem3e8-memory-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-partial-glc1-shared1-sub7-mem3e8-old-soff128-offset0-scc1",
+      "wave": 64,
+      "exit": 0
+    },
+    {
+      "case": "global64-full-glc1-shared0-sub7-mem64-memory-soff128-offset-28-scc1",
+      "wave": 64,
+      "exit": 0
+    }
+  ],
+  "float_cases": [
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave32-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave32-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode1-flags0-mod0-seed101",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode2-flags0-mod0-seed102",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode3-flags0-mod0-seed103",
+      "exit": 0
+    },
+    {
+      "case": "packed-sgpr-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-literal-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-inline-wave32-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod1-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1000",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1001",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1002",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1003",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1004",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1005",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1006",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1007",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1008",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1009",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1010",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1011",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1012",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1013",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1014",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave32-full-mode0-flags0-mod0-seed1015",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "accum-vgpr-wave64-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-full-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-partial-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-partial-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-empty-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "alias-vgpr-wave64-empty-mode3-flags1-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode1-flags0-mod0-seed101",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode2-flags0-mod0-seed102",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode3-flags0-mod0-seed103",
+      "exit": 0
+    },
+    {
+      "case": "packed-sgpr-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-literal-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-inline-wave64-full-mode0-flags0-mod0-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod1-seed0",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1000",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1001",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1002",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1003",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1004",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1005",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1006",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1007",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1008",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1009",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1010",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1011",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1012",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1013",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1014",
+      "exit": 0
+    },
+    {
+      "case": "packed-vgpr-wave64-full-mode0-flags0-mod0-seed1015",
+      "exit": 0
+    }
+  ],
+  "image_candidates_enabled": false
 }

@@ -41,24 +41,35 @@ static bool RunIntegerLanes(Device* d, Common* c, const uint8_t* code, size_t si
 }
 
 int main(int argc, char** argv) {
-	if (argc != 4) return 2;
+	if (argc != 4 && argc != 5 && argc != 6) return 2;
 	uint8_t  code[48 * 1024];
 	uint32_t expected[64], actual[64];
 	FILE*    f = fopen(argv[1], "rb");
 	if (!f) return 3;
 	size_t size = fread(code, 1, sizeof(code), f);
 	fclose(f);
-	f = fopen(argv[2], "rb");
-	if (!f) return 3;
-	size_t count = fread(expected, sizeof(uint32_t), 64, f);
-	fclose(f);
+	size_t count = 64;
+	bool compare = strcmp(argv[2], "-") != 0;
+	if (compare) {
+		f = fopen(argv[2], "rb");
+		if (!f) return 3;
+		count = fread(expected, sizeof(uint32_t), 64, f);
+		fclose(f);
+	} else if (argc < 5) return 2;
 	if (!size || size % 4 || count != 64) return 4;
 	Device d;
 	if (DeviceOpen(&d, "/dev/dri/renderD128") != 0) return 5;
 	Common c = {0};
 	if (CommonInit(&d, &c) != 0) return 6;
-	bool ok = RunIntegerLanes(&d, &c, code, size, NULL, actual, 5.0, 20, atoi(argv[3]) == 32);
-	if (ok)
+	bool ok = RunIntegerLanes(&d, &c, code, size, NULL, actual, 5.0, argc == 6 ? (uint32_t)atoi(argv[5]) : 20, atoi(argv[3]) == 32);
+	if (ok && argc >= 5) {
+		f = fopen(argv[4], "wb");
+		if (!f) return 3;
+		count = fwrite(actual, sizeof(uint32_t), 64, f);
+		fclose(f);
+		if (count != 64) return 3;
+	}
+	if (ok && compare)
 		for (int i = 0; i < 64; i++)
 			if (actual[i] != expected[i]) {
 				fprintf(stderr, "lane %d: got %08x expected %08x\n", i, actual[i], expected[i]);

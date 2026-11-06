@@ -6,9 +6,11 @@
 namespace Libs::Graphics::NativeGpu {
 // Lowers seven packed integer dot forms and GLOBAL addtid loads/stores to
 // gfx1013 VALU and ordinary memory instructions. VOP3 readfirstlane maps
-// directly to its native VOP1 spelling without scratch registers.
+// directly to its native VOP1 spelling without scratch registers. Buffer/GLOBAL
+// unsigned saturating subtraction atomics use native compare-and-swap retry loops.
 // The original instruction positions and all non-targeted words are retained.
-// Integer dots and addtid require four extra VGPRs; EXEC, VCC, SCC and original inputs are
+// Integer dots, addtid and subtraction atomics require four extra VGPRs;
+// EXEC, VCC, SCC and original inputs are
 // preserved. Refusals are transactional: no partially rewritten shader is returned.
 ShaderPatchResult PatchNativeIntegerInstructions(std::span<const uint32_t> code,
                                                  uint32_t                  num_vgprs);

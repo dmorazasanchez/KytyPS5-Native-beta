@@ -20,7 +20,7 @@ inline std::optional<NativeVgprPlan> PlanNativeVgprs(uint32_t resource1, uint32_
 }
 // Original shaders are untouched unless native primary mode needs a supported
 // replacement. Patched code is immutable, GPU-mapped, cached and process-lived.
-bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size);
+bool PrepareNativeShader(Shader* shader, uint32_t* patched_size);
 } // namespace NativeGpu
 } // namespace Libs::Graphics
 #endif

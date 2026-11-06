@@ -86,3 +86,26 @@ if(BUILD_TESTING)
     add_test(NAME native_gpu_integer_patcher COMMAND $<TARGET_FILE:native_gpu_integer_patcher_tests>)
     add_dependencies(kyty_tests native_gpu_integer_patcher_tests)
 endif()
+
+add_executable(native_gpu_atomic_patcher_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/NativeGpuAtomicPatcherTests.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderIntegerPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderScan.cpp")
+target_include_directories(native_gpu_atomic_patcher_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+    add_test(NAME native_gpu_atomic_patcher COMMAND $<TARGET_FILE:native_gpu_atomic_patcher_tests>)
+    add_dependencies(kyty_tests native_gpu_atomic_patcher_tests)
+endif()
+
+add_executable(native_gpu_float_patcher_tests EXCLUDE_FROM_ALL
+    "${KYTY_TESTS_DIR}/NativeGpuFloatPatcherTests.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderFloatPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderIntegerPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderPatcher.cpp"
+    "${KYTY_SOURCE_DIR}/graphics/native_gpu/shaderScan.cpp")
+target_include_directories(native_gpu_float_patcher_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+    add_test(NAME native_gpu_float_patcher COMMAND $<TARGET_FILE:native_gpu_float_patcher_tests>)
+    add_dependencies(kyty_tests native_gpu_float_patcher_tests)
+endif()

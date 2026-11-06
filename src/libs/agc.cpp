@@ -717,7 +717,7 @@ int KYTY_SYSV_ABI AgcCreateShader(Shader** dst, void* header, const volatile voi
 	EXIT_NOT_IMPLEMENTED(h->version != 0x00000018);
 
 	uint32_t native_code_size = 0;
-	if (!NativeGpu::PrepareNativeIntegerShader(h, &native_code_size)) {
+	if (!NativeGpu::PrepareNativeShader(h, &native_code_size)) {
 		return GRAPHICS5_ERROR_INVALID_SHADER_PROGRAM;
 	}
 	auto base = reinterpret_cast<uint64_t>(h->code);

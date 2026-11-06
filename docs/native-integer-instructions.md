@@ -1,14 +1,13 @@
-# Native integer instruction replacements
+# Native shader instruction replacements
 
-This change is based on KytyPS5-Native commit
-47857b43743a4905eacf6b30c82f7f910ed2a093, the normal backend selected by the
-SharpEmu bridge on this BC-250. The semantic audit used AnyPS5 commit
-06a90922740d075d3730c5d877a979e8c4d86776, particularly IntegerDot.cpp,
-GlobalLoadAddtid.cpp, the vector decoder and globalAddtid translation.
+Base: KytyPS5-Native 47857b43743a4905eacf6b30c82f7f910ed2a093.
+Semantic reference: AnyPS5 06a90922740d075d3730c5d877a979e8c4d86776,
+including IntegerDot, GlobalLoadAddtid, BufferAtomicCsub, Float16Dot,
+F32Dot2Rounding and SpirvAluEmitterFloat64. The exact floating arithmetic is
+adapted under the repositories' GPL-2.0 licenses; the source identifies its origin.
 
-The CPU guest code and compatible GPU instructions continue to execute
-natively. Ten instruction encodings outside LLVM's gfx1013 model can now
-be replaced with ordinary gfx1013 instructions at shader creation:
+Compatible CPU and GPU instructions continue to run natively. Fourteen
+candidate encodings now have replacements made from ordinary gfx1013 instructions:
 
 | Encoding | Operation |
 | --- | --- |
@@ -18,82 +17,93 @@ be replaced with ordinary gfx1013 instructions at shader creation:
 | VOP3P 0x18/0x19 | signed/unsigned dot8 of packed 4-bit values |
 | GLOBAL 0x16/0x17 | lane-addressed dword load/store |
 | VOP3 0x182 | readfirstlane in its native VOP1 encoding |
+| MUBUF/GLOBAL 0x34 | unsigned saturating subtraction atomics |
+| VOP2 0x02, VOP3P 0x13 | exact half dot2 plus binary32 accumulator |
 
-Integer sums wrap modulo 2^32. The implementation preserves EXEC, VCC and
-SCC, supports source/destination aliases, scalar/literal inputs and DOT2
-half selectors. Reducible DPP16 and DPP8 inputs are supported. A DPP source
-that suppresses its write sees zero-initialized temporary data, so an
-accumulating integer dot retains the original accumulator.
+## Semantics
 
-GLOBAL addtid uses MBCNT of an all-ones mask to obtain physical wave lane
-ID, multiplies it by four and emits an ordinary GLOBAL load/store.
-Offsets, scalar base, cache flags, data registers and inactive lanes retain
-their original meaning. Workgroup thread ID is not substituted for lane ID.
+Integer dots wrap modulo 2^32 and support aliases, scalar/literal inputs,
+half selectors and reducible DPP16/DPP8. Zero-initialized DPP scratch
+preserves the accumulator when the source lane suppresses a write.
+GLOBAL addtid uses physical wave lane ID from MBCNT, multiplied by four.
+Offsets, cache flags, scalar bases and inactive lanes retain their meanings.
+Readfirstlane maps directly to native VOP1 without added registers.
 
-## Loading and lifetime
+Buffer/GLOBAL csub uses native CMPSWAP retry loops: max(old-sub, 0), with
+unsigned comparison and linearizable shared-address updates. GLC returns
+the old value; no-return forms preserve the original data/destination.
+EXEC, VCC, SCC and borrowed ordinary SGPRs are restored. Five SGPRs are
+spilled into private VGPR lanes using EXEC-independent WRITELANE/READLANE.
+Explicit memory/dependency waits protect register lifetimes. Four extra
+VGPRs are needed. LDS/TFE and unsupported scalar-offset forms refuse.
 
-The shader loader detects reachable target instructions, resolves wave size
-from stage metadata and reserves four extra private VGPRs for dots and addtid. Readfirstlane
-rewrites in place without extra registers. Original instruction
-positions, PC-relative constants and embedded constant offsets stay intact;
-branches enter appended replacement sequences and return to the next original
-instruction. Patched code is immutable, GPU-mapped and retained for process
-lifetime, with a 128 MiB cache budget including original-byte cache keys. PC reads require a recognized, fully
-carried address calculation that resolves inside the copied blob.
+Floating dot2 uses exact half conversion, binary64 TwoSum expansions and
+round-to-odd before one binary32 rounding. It implements signed zero,
+cancellation, half subnormals, the flushed binary32 accumulator, infinities,
+and NaN payload priority from the pinned AnyPS5 exact model.
+Scalar/literal sources, aliases, half selectors and A/B sign modifiers are
+supported; float inline operands use binary16 bits. DPP/SDWA, clamp and
+accumulator modifiers refuse. MODE, VCC, SCC and borrowed SGPRs are restored.
+The current sequence needs 42 private VGPRs. This is a correctness path;
+game performance is unmeasured.
 
-The original AGC shader size and constant metadata stay unchanged. Constants
-and the trailer remain at their original offsets inside the declared blob;
-no bytes past shader_size are read. The shader registry records the expanded executable size. Resource
-registers and shader program addresses are updated before publication.
-Readfirstlane accepts an unmodified VGPR source and an ordinary SGPR destination.
+## Loader and control
 
-A required replacement is refused atomically for unsupported modifiers,
-incomplete/indirect control flow or detected non-local PC-relative data, branch range exhaustion, split
-shader stages, shared VGPRs, missing stage metadata, register exhaustion,
-allocation failure or cache-budget exhaustion. There is no automatic Vulkan
-fallback for those refusals.
+Passes compose transactionally. Original code/data offsets remain fixed;
+replacement stubs are appended and branch back. The AGC declared shader
+blob includes constants/trailer data and is never read beyond its size.
+Immutable GPU-mapped code is retained for process lifetime within a
+128 MiB cache budget. The cache stores actual scratch usage; resource
+registers use the correct wave32/wave64 granularity on first use and hits.
 
-BC-250 native defaults enable KYTY_NATIVE_GPU_INTEGER_PATCH=1. PS5 Linux
-defaults leave it off to retain the PS5's own ISA. Set it to 0 when launching
-the emulator directly to disable replacements. Other hosts require explicit
-opt-in plus native primary mode and a GEM backing device.
+Unsupported operands, non-local/indirect control flow, relative VGPR indexing
+with added registers, branch exhaustion, shared VGPRs, split stages,
+missing metadata, register exhaustion and mapping/budget failures refuse.
+There is no automatic Vulkan fallback.
 
-## Validation and limits
+BC-250 native defaults enable KYTY_NATIVE_GPU_INTEGER_PATCH=1; this legacy
+control now gates all 14 replacements. Direct launches can set it to 0.
+PS5 Linux leaves it off to retain the PS5 ISA. Other devices require
+explicit native primary mode and GEM support.
 
-The CPU suite checks 26,600 integer semantic cases plus refusal, allocation
-and encoding boundaries. The hardware fixtures check 4,096 lane results over 64 dispatches and execute only the generated,
-opcode-scanned gfx1013 code on BC-250, in actual wave32 and wave64 modes.
-They cover signed/unsigned packed widths, overflow, aliases, SGPR/literal
-inputs, DPP permutations, inactive source lanes, EXEC masking, unchanged
-SCC/VCC, GLOBAL loads/stores and positive/negative offsets.
+## Verification
 
-These tests validate the replacement sequences. They do not prove that all
-ten original raw encodings fail on the silicon, establish game compatibility
-or measure performance. The opcode-table comparison is not a hardware
-capability percentage.
+- Five CTest suites: integer, atomic, float, original shader patcher, scanner.
+- 26,600 integer CPU cases, 512 atomic wave executions, 42,576 floating
+  exact CPU cases plus 2,000 accumulating-form checks.
+- 348 synthetic GPU dispatches / 22,272 lane results, all matching:
+  original 64 re-passed; 202 atomics; 82 floating.
+- Actual wave32/wave64, aliases, masks including zero EXEC, contention,
+  returned/no-return atomics, flags/SGPR/MODE restoration, selectors,
+  scalar/literal inputs, signed offsets and relocated constants.
 
-Floating-point dot replacements remain disabled: two FMAs can differ from a
-single-rounded dot. This change does not implement csub atomics, the extra
-image encodings or their modifier combinations. Those candidates require separate
-semantic and target-hardware validation. Unrelated shader words are unchanged.
+Run the five CPU suites with ctest -R
+'native_gpu_(integer_patcher|atomic_patcher|float_patcher|shader_patcher|shader_scan)'.
+Run tools/bc250-native-probe/run_native_patch_tests.sh for full reproduction.
+Hardware tests execute only generated opcode-scanned native programs;
+no original unsupported encoding was submitted. These tests do not prove
+physical capability of original encodings, game compatibility or performance.
+Detailed records: docs/native-integer-validation.json.
 
-Run CPU tests with:
+## Image candidates still pending
 
-    ctest --test-dir _Build/native-instructions -R 'native_gpu_(integer_patcher|shader_patcher|shader_scan)' --output-on-failure
-
-The hardware scripts use llvm-mc, llvm-objcopy and two small test binaries;
-Build and run these tests with tools/bc250-native-probe/run_integer_patch_tests.sh;
-their input is synthetic and contains no game shader bytes. Results are
-written under _Build/instruction-tests/hardware*.
+The remaining 26 inventory entries are image operations. Eight BY/PCK stores
+are explicitly unimplemented in the pinned AnyPS5 translator. Decoder
+presence does not establish a completed implementation.
+Four BY-load experiments are isolated under
+tools/bc250-native-probe/experimental-image-by and are disabled.
+A two-component R32_UINT read exposed a native missing-channel result
+different from the AnyPS5/Vulkan model; nonzero mip/base-level and other
+descriptor cases need validation. Adjust sampling, packed gathers and PCK
+loads require their own descriptor/format/sampler handling.
 
 ## SharpEmu installation
 
-The live selector is /home/david/ps5-sharp-ui-bridge-20261103/kyty-conditional-emu.sh.
-ASTRO BOT and Ghost of Yotei use its normal Upstream profile, now selecting
-/home/david/kyty-native-instructions-20261106/release/kyty_emulator.
-It retains /home/david/kyty-upstream-clean-47857b4-20261104/release as the working
-directory for existing saves, caches and assets. No GUI or game settings change.
-
-The older optional recovery/audio executables and Fast profile retain their
-original routes. Their code is not added to this native instruction build.
-The original binary and selector backup remain available for rollback.
+The normal Upstream profiles for ASTRO BOT and Ghost of Yotei select
+/home/david/kyty-native-instructions-20261106/release/kyty_emulator through
+/home/david/ps5-sharp-ui-bridge-20261103/kyty-conditional-emu.sh.
+Working directory remains the original 47857b4 release directory for saves,
+caches and assets. Yotei's GHOST2APP0000000 / GHOST2BASE000000 registrations
+remain in the selector. Fast and old optional recovery/audio routes retain
+their original executables. The original and ten-replacement binaries are
+retained for comparison/rollback. No issue was published.

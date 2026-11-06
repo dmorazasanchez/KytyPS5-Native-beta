@@ -4,11 +4,12 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/native_gpu/gemBacking.h"
-#include "graphics/native_gpu/shaderIntegerPatcher.h"
+#include "graphics/native_gpu/shaderNativePatcher.h"
 #include "graphics/native_gpu/shaderScan.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,7 +19,7 @@
 #include <vector>
 
 namespace Libs::Graphics::NativeGpu {
-bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
+bool PrepareNativeShader(Shader* shader, uint32_t* patched_size) {
 	if (patched_size) *patched_size = 0;
 #if KYTY_GEM_BACKING_SUPPORTED
 	const char* primary = std::getenv("KYTY_NATIVE_GPU_PRIMARY");
@@ -40,12 +41,15 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 	const auto scan                           = ScanShader(original, options);
 	bool       needs_patch                    = false;
 	for (const auto& finding: scan.findings)
-		needs_patch |=
-		    finding.kind == ScanKind::DotOther &&
-		    (finding.enc == ScanEnc::VOP2 || (finding.enc == ScanEnc::VOP3P && finding.op >= 0x14));
+		needs_patch |= (finding.kind == ScanKind::DotOther || finding.kind == ScanKind::Dot2c) &&
+		               (finding.enc == ScanEnc::VOP2 || finding.enc == ScanEnc::VOP3P);
 	for (const auto& finding: scan.findings)
 		needs_patch |= finding.kind == ScanKind::UnknownOpcode && finding.enc == ScanEnc::GLOBAL &&
 		               (finding.op == 0x16 || finding.op == 0x17);
+	for (const auto& finding: scan.findings)
+		needs_patch |= finding.kind == ScanKind::UnknownOpcode &&
+		               (finding.enc == ScanEnc::MUBUF || finding.enc == ScanEnc::GLOBAL) &&
+		               finding.op == 0x34;
 	const bool needs_scratch = needs_patch;
 	for (const auto& finding: scan.findings)
 		needs_patch |= finding.kind == ScanKind::UnknownOpcode && finding.enc == ScanEnc::VOP3 &&
@@ -53,7 +57,7 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 	if (!needs_patch) return true;
 
 	auto refuse = [&](const char* why) {
-		std::fprintf(stderr, "native shader: integer patch refused for %p: %s\n",
+		std::fprintf(stderr, "native shader: instruction patch refused for %p: %s\n",
 		             const_cast<const void*>(shader->code), why);
 		return false;
 	};
@@ -105,7 +109,7 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 		if (needs_scratch && shader->sh_registers[i].offset == shared_offset &&
 		    ((shader->sh_registers[i].value >> shared_shift) & 15u) != 0)
 			return refuse("shared VGPR allocation requires whole-program register planning");
-	const auto plan = PlanNativeVgprs(resource->value, wave, needs_scratch ? 4 : 0);
+	const auto plan = PlanNativeVgprs(resource->value, wave, 0);
 	if (!plan) return refuse("no free VGPRs");
 
 	using Key = std::pair<uint32_t, std::vector<uint32_t>>;
@@ -113,6 +117,7 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 		uint64_t address;
 		uint32_t size;
 		uint32_t sites;
+		uint32_t scratch;
 	};
 	// Never evict code while a submitted IB can still refer to it. Kernel/OS
 	// process teardown owns these mappings; no static destructor unmaps them.
@@ -124,9 +129,12 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 	Key                              key {plan->original_count, original};
 	auto                             it = cache.find(key);
 	if (it == cache.end()) {
-		auto patched = PatchNativeIntegerInstructions(original, plan->original_count);
-		if (!patched.patched_sites || patched.unsupported_sites || patched.decode_error)
-			return refuse("unsupported operand form, register use or branch range");
+		auto patched = PatchNativeInstructions(original, plan->original_count);
+		if (patched.unsupported_sites || patched.decode_error)
+			return refuse("unsupported operand form, control flow or register allocation");
+		if (!patched.patched_sites ||
+		    !PlanNativeVgprs(resource->value, wave, patched.scratch_vgprs))
+			return refuse("no replacement or insufficient private VGPRs");
 		const uint64_t bytes = (uint64_t(patched.code.size()) * 4 + 4095) & ~uint64_t(4095);
 		if (bytes + original_bytes > limit - retained)
 			return refuse("shader cache budget exhausted");
@@ -143,11 +151,11 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 		it = cache
 		         .emplace(std::move(key),
 		                  Allocation {address, static_cast<uint32_t>(patched.code.size() * 4),
-		                              patched.patched_sites})
+		                              patched.patched_sites, patched.scratch_vgprs})
 		         .first;
 		retained += bytes + original_bytes;
 		std::fprintf(stderr,
-		             "native shader: lowered %u integer instruction site(s), wave%u, VGPRs %u -> "
+		             "native shader: lowered %u instruction site(s), wave%u, VGPRs %u -> "
 		             "%u, %p -> %p\n",
 		             patched.patched_sites, wave, plan->original_count,
 		             plan->original_count + patched.scratch_vgprs,
@@ -155,7 +163,7 @@ bool PrepareNativeIntegerShader(Shader* shader, uint32_t* patched_size) {
 	}
 	shader->code = reinterpret_cast<const void*>(it->second.address);
 	if (patched_size) *patched_size = it->second.size;
-	resource->value = plan->resource1;
+	resource->value = PlanNativeVgprs(resource->value, wave, it->second.scratch)->resource1;
 #endif
 	return true;
 }
