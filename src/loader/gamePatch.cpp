@@ -9,6 +9,9 @@
 #include "loader/systemContent.h"
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <system_error>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -31,7 +34,19 @@ struct Write {
 	std::vector<uint8_t> on;
 };
 
+struct CheatRecord {
+    std::string name;
+    bool enabled = false;
+    std::vector<Write> writes;
+};
+struct LiveCheat {
+    CheatInfo info;
+    uint64_t target = 0;
+    uint8_t original = 0;
+    uint8_t modified = 0;
+};
 struct Plan {
+    std::vector<CheatRecord> cheats;
 	std::string              title_id;
 	std::string              version;
 	std::string              process;
@@ -44,6 +59,10 @@ using Json = nlohmann::json;
 
 std::unique_ptr<Plan> g_pending_plan;
 std::vector<uint64_t> g_applied_cave_pages;
+std::mutex g_live_mutex;
+std::vector<LiveCheat> g_live_cheats;
+std::filesystem::path g_plan_path;
+std::string g_live_status = "No JSON cheat plan loaded";
 
 bool Fail(std::string* error, std::string message) {
 	*error = std::move(message);
@@ -77,23 +96,24 @@ bool LoadPlan(const std::filesystem::path& path, Plan* plan, std::string* error)
 	plan->version  = root["version"].get<std::string>();
 	plan->process  = root["process"].get<std::string>();
 
-	for (const auto& mod: root["mods"]) {
-		if (!mod.value("enabled", true)) {
-			continue;
-		}
-		const auto name = mod["name"].get<std::string>();
-		plan->mod_names.push_back(name);
-		for (const auto& entry: mod["memory"]) {
-			Write write;
-			write.source_address = std::stoull(entry["offset"].get<std::string>(), nullptr, 16);
-			if (!ParseBytes(entry["off"].get<std::string>(), &write.off) ||
-			    !ParseBytes(entry["on"].get<std::string>(), &write.on) ||
-			    write.off.size() != write.on.size()) {
-				return Fail(error, "invalid mod memory bytes");
-			}
-			plan->writes.push_back(std::move(write));
-		}
-	}
+    for (const auto& mod: root["mods"]) {
+        CheatRecord cheat;
+        cheat.name = mod["name"].get<std::string>();
+        cheat.enabled = mod.value("enabled", true);
+        if (cheat.enabled) plan->mod_names.push_back(cheat.name);
+        for (const auto& entry: mod["memory"]) {
+            Write write;
+            write.source_address = std::stoull(entry["offset"].get<std::string>(), nullptr, 16);
+            if (!ParseBytes(entry["off"].get<std::string>(), &write.off) ||
+                !ParseBytes(entry["on"].get<std::string>(), &write.on) ||
+                write.off.size() != write.on.size()) {
+                return Fail(error, "invalid mod memory bytes");
+            }
+            if (cheat.enabled) plan->writes.push_back(write);
+            cheat.writes.push_back(std::move(write));
+        }
+        plan->cheats.push_back(std::move(cheat));
+    }
 	return true;
 }
 
@@ -243,16 +263,162 @@ bool ApplyWrites(Plan* plan, const Program& program, std::string* error) {
 	return true;
 }
 
+// Called only after the loader has matched and translated the current module.
+// Runtime toggling is restricted to exactly one changed instruction byte,
+// with all other bytes checked and the module mapping verified.
+void PublishCheats(const Plan& plan, const Program* program, uint64_t source_base) {
+    std::vector<LiveCheat> items;
+    for (const auto& entry : plan.cheats) {
+        LiveCheat c;
+        c.info.name = entry.name;
+        c.info.enabled = entry.enabled;
+        c.info.applied = entry.enabled && program != nullptr;
+        if (program && entry.writes.size() == 1) {
+            const auto& w = entry.writes.front();
+            uint64_t target = 0;
+            Translate(*program, source_base, w.source_address, &target);
+            if (IsInsideProgram(*program, target, w.off.size())) {
+                size_t changed = w.off.size();
+                for (size_t k = 0; k < w.off.size(); ++k) {
+                    if (w.off[k] != w.on[k]) {
+                        if (changed != w.off.size()) { changed = w.off.size(); break; }
+                        changed = k;
+                    }
+                }
+                if (changed < w.off.size() &&
+                    std::memcmp(reinterpret_cast<const void*>(target),
+                                entry.enabled ? w.on.data() : w.off.data(),
+                                w.off.size()) == 0) {
+                    c.info.live = true;
+                    c.target = target + changed;
+                    c.original = w.off[changed];
+                    c.modified = w.on[changed];
+                }
+            }
+        }
+        items.push_back(std::move(c));
+    }
+    std::scoped_lock lock(g_live_mutex);
+    g_live_cheats = std::move(items);
+    g_live_status = program ? "Matched game; code-hook changes require a restart" : "Cheat plan loaded; waiting for a matching game module";
+}
+
+bool SaveSelection(size_t index, bool enabled, std::string* error) {
+    if (g_plan_path.empty()) return Fail(error, "No active JSON patch file");
+    std::ifstream input(g_plan_path, std::ios::binary);
+    if (!input) return Fail(error, "Could not open the JSON cheat file");
+    auto json = Json::parse(input, nullptr, false);
+    if (!json.is_object() || !json.contains("mods") || !json["mods"].is_array() ||
+        index >= json["mods"].size()) {
+        return Fail(error, "Cheat plan changed externally; relaunch to reload it");
+    }
+    auto& entry = json["mods"][index];
+    if (!entry.is_object() || !entry.contains("name") ||
+        entry["name"].get<std::string>() != g_live_cheats[index].info.name) {
+        return Fail(error, "Cheat order changed externally; relaunch to reload");
+    }
+    entry["enabled"] = enabled;
+    const auto temp = g_plan_path.string() + ".kyty-live.tmp";
+    {
+        std::ofstream output(temp, std::ios::binary | std::ios::trunc);
+        if (!output) return Fail(error, "Cannot write the updated cheat plan");
+        output << json.dump(2) << '\n';
+        output.flush();
+        if (!output) {
+            std::error_code ec;
+            std::filesystem::remove(temp, ec);
+            return Fail(error, "Failed to save the updated cheat plan");
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, g_plan_path, ec);
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return Fail(error, "Failed to replace the cheat plan");
+    }
+    return true;
+}
+
 } // namespace
+
+std::vector<CheatInfo> ListCheats() {
+    std::scoped_lock lock(g_live_mutex);
+    std::vector<CheatInfo> result;
+    result.reserve(g_live_cheats.size());
+    for (const auto& c : g_live_cheats) result.push_back(c.info);
+    return result;
+}
+
+std::string CheatStatus() {
+    std::scoped_lock lock(g_live_mutex);
+    return g_live_status;
+}
+
+CheatToggleResult ToggleCheat(size_t index) {
+    std::scoped_lock lock(g_live_mutex);
+    if (index >= g_live_cheats.size())
+        return {false, false, "No cheat at this position"};
+    auto& c = g_live_cheats[index];
+    const bool next = !c.info.enabled;
+    bool changed_live = false;
+    if (c.info.live) {
+        // x86 instruction-byte replacement is atomic. Reject unexpected
+        // bytes; never rewrite a live multi-byte jump or release its code cave.
+        auto& byte = *reinterpret_cast<uint8_t*>(c.target);
+        std::atomic_ref<uint8_t> atomic_byte(byte);
+        uint8_t expected = c.info.applied ? c.modified : c.original;
+        const uint8_t desired = next ? c.modified : c.original;
+        if (!atomic_byte.compare_exchange_strong(expected, desired,
+                    std::memory_order_seq_cst)) {
+            return {false, false, "Guest code changed; refusing an unsafe live write"};
+        }
+        if (!Common::VirtualMemory::FlushInstructionCache(c.target, 1)) {
+            uint8_t rollback = desired;
+            (void)atomic_byte.compare_exchange_strong(rollback,
+                 c.info.applied ? c.modified : c.original);
+            return {false, false, "Instruction-cache refresh failed"};
+        }
+        changed_live = true;
+    }
+    std::string error;
+    if (!SaveSelection(index, next, &error)) {
+        if (changed_live) {
+            auto& byte = *reinterpret_cast<uint8_t*>(c.target);
+            std::atomic_ref<uint8_t> atomic_byte(byte);
+            uint8_t rollback = next ? c.modified : c.original;
+            (void)atomic_byte.compare_exchange_strong(rollback,
+                c.info.applied ? c.modified : c.original);
+            (void)Common::VirtualMemory::FlushInstructionCache(c.target, 1);
+        }
+        return {false, false, error};
+    }
+    c.info.enabled = next;
+    if (changed_live) c.info.applied = next;
+    g_live_status = changed_live ?
+        "Applied immediately. Selection saved for next launch." :
+        "Saved. Restart the game to apply this code-hook change.";
+    return {true, changed_live, g_live_status};
+}
 
 bool Apply(const std::filesystem::path& plan_path, Program* main_program,
            const std::vector<Program*>& programs) {
+    {
+        std::scoped_lock lock(g_live_mutex);
+        g_plan_path = plan_path;
+        g_live_status = "Reading JSON cheat plan";
+        g_live_cheats.clear();
+    }
 	Plan        plan;
 	std::string error;
 	if (!LoadPlan(plan_path, &plan, &error) || !ValidateGame(plan, main_program, &error)) {
+        {
+            std::scoped_lock lock(g_live_mutex);
+            g_live_status = "Cheat loading failed: " + error;
+        }
 		::printf("Game cheat error: %s\n", error.c_str());
 		return false;
 	}
+    PublishCheats(plan, nullptr, 0);
 	if (plan.writes.empty()) {
 		return true;
 	}
@@ -288,6 +454,7 @@ bool ApplyPending(Program* program) {
 		return false;
 	}
 
+    PublishCheats(*g_pending_plan, program, source_base);
 	for (const auto& name: g_pending_plan->mod_names) {
 		::printf("Successfully applied cheat: %s\n", name.c_str());
 	}
@@ -297,6 +464,12 @@ bool ApplyPending(Program* program) {
 }
 
 void Clear() {
+    {
+        std::scoped_lock lock(g_live_mutex);
+        g_live_cheats.clear();
+        g_plan_path.clear();
+        g_live_status = "No JSON cheat plan loaded";
+    }
 	if (g_pending_plan != nullptr) {
 		ReleaseCaves(&g_pending_plan->cave_pages);
 	}

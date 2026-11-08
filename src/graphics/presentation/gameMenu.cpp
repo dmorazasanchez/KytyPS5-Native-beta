@@ -2,6 +2,7 @@
 
 #include "graphics/native_gpu/nativeShadow.h"
 #include "graphics/presentation/exitVideo.h"
+#include "loader/gamePatch.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "imgui.h"
 
@@ -10,14 +11,15 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <string>
 
 namespace Libs::Graphics {
 
 namespace {
 
-enum class Page : uint8_t { Closed, Main, ConfirmExit };
+enum class Page : uint8_t { Closed, Main, Cheats, ConfirmExit };
 
-enum MainItem : int { ItemResume, ItemMonitoring, ItemExit, MainItemCount };
+enum MainItem : int { ItemResume, ItemMonitoring, ItemCheats, ItemExit, MainItemCount };
 enum ConfirmItem : int { ConfirmExitGame, ConfirmCancel, ConfirmItemCount };
 
 struct MenuState {
@@ -29,6 +31,7 @@ std::mutex            g_mutex;
 MenuState             g_state;
 std::atomic<bool>     g_open {false};
 std::atomic<uint64_t> g_revision {0};
+std::string g_cheat_message;
 
 // Window thread only: Share and Options held, for the combination.
 bool g_back_down  = false;
@@ -49,7 +52,23 @@ void SetState(MenuState state) {
 }
 
 int ItemCount(Page page) {
-	return page == Page::ConfirmExit ? ConfirmItemCount : MainItemCount;
+    if (page == Page::Cheats) {
+        return static_cast<int>(Loader::GamePatch::ListCheats().size()) + 1; // Back
+    }
+    return page == Page::ConfirmExit ? static_cast<int>(ConfirmItemCount) :
+                                      static_cast<int>(MainItemCount);
+}
+
+std::string CheatMessage() {
+    std::scoped_lock lock(g_mutex);
+    return g_cheat_message;
+}
+void SetCheatMessage(std::string message) {
+    {
+        std::scoped_lock lock(g_mutex);
+        g_cheat_message = std::move(message);
+    }
+    g_revision.fetch_add(1, std::memory_order_acq_rel);
 }
 
 const char* MonitoringLabel(int mode) {
@@ -76,22 +95,40 @@ void Activate(const MenuState& state) {
 		switch (state.selected) {
 			case ItemResume: SetState({}); break;
 			case ItemMonitoring: StepMonitoring(1); break;
+            case ItemCheats:
+                SetCheatMessage("");
+                SetState({Page::Cheats, 0});
+                break;
 			case ItemExit: SetState({Page::ConfirmExit, ConfirmExitGame}); break;
 			default: break;
 		}
 		return;
 	}
+    if (state.page == Page::Cheats) {
+        const auto cheats = Loader::GamePatch::ListCheats();
+        if (state.selected < static_cast<int>(cheats.size())) {
+            const auto result = Loader::GamePatch::ToggleCheat(static_cast<size_t>(state.selected));
+            SetCheatMessage(result.message);
+        } else {
+            SetState({Page::Main, ItemCheats});
+        }
+        return;
+    }
 	if (state.selected == ConfirmExitGame) {
 		SetState({});
-		MarkUserExit();
-		LeaveGame();
+        MarkUserExit();
+        LeaveGame();
 	} else {
 		SetState({Page::Main, ItemExit});
 	}
 }
 
 void Back(const MenuState& state) {
-	SetState(state.page == Page::ConfirmExit ? MenuState {Page::Main, ItemExit} : MenuState {});
+    if (state.page == Page::Cheats) {
+        SetState({Page::Main, ItemCheats});
+    } else {
+	    SetState(state.page == Page::ConfirmExit ? MenuState {Page::Main, ItemExit} : MenuState {});
+    }
 }
 
 // Navigation shared by the gamepad and the keyboard. True when the menu took the input.
@@ -185,15 +222,14 @@ void DrawGameMenu(vk::Extent2D extent) {
 	const ImVec2 display(static_cast<float>(extent.width), static_cast<float>(extent.height));
 	const float  scale = std::max(std::min(display.x / 1280.0f, display.y / 720.0f), 0.5f);
 	ImGui::GetBackgroundDrawList()->AddRectFilled({0.0f, 0.0f}, display, IM_COL32(0, 0, 0, 170));
-	constexpr const char* hint = "Cross / Enter: select    Circle / Esc: back    PS / F10: close";
-	// As wide as the controls line under the items needs, so it is not cut at the edge.
-	ImGui::PushFont(nullptr, 17.0f * scale);
-	const float hint_width = ImGui::CalcTextSize(hint).x + 2.0f * 24.0f * scale;
-	ImGui::PopFont();
 	ImGui::SetNextWindowPos({display.x * 0.5f, display.y * 0.5f}, ImGuiCond_Always, {0.5f, 0.5f});
-	ImGui::SetNextWindowSize(
-	    {std::max(std::min(std::max(460.0f * scale, hint_width), display.x - 32.0f), 1.0f), 0.0f},
-	    ImGuiCond_Always);
+    constexpr const char* hint = "Cross / Enter: select    Circle / Esc: back    PS / F10: close";
+    ImGui::PushFont(nullptr, 17.0f * scale);
+    const float hint_width = ImGui::CalcTextSize(hint).x + 2.0f * 24.0f * scale;
+    ImGui::PopFont();
+    ImGui::SetNextWindowSize(
+        {std::max(std::min(std::max(460.0f * scale, hint_width), display.x - 32.0f), 1.0f), 0.0f},
+        ImGuiCond_Always);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {24.0f * scale, 22.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {12.0f * scale, 12.0f * scale});
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * scale);
@@ -227,7 +263,35 @@ void DrawGameMenu(vk::Extent2D extent) {
 	if (state.page == Page::Main) {
 		row(ItemResume, "Resume", nullptr);
 		row(ItemMonitoring, "Monitoring", MonitoringLabel(PerformanceOverlayMode()));
+        row(ItemCheats, "Cheats / Patches", nullptr);
 		row(ItemExit, "Exit game", nullptr);
+    } else if (state.page == Page::Cheats) {
+        ImGui::TextUnformatted("Cheats / Patches");
+        const auto cheats = Loader::GamePatch::ListCheats();
+        if (cheats.empty())
+            ImGui::TextDisabled("%s", Loader::GamePatch::CheatStatus().c_str());
+        for (size_t index = 0; index < cheats.size(); ++index) {
+            const auto& c = cheats[index];
+            // Applied is what is running; enabled is saved for the next launch.
+            std::string value;
+            if (c.applied != c.enabled) {
+                value = c.enabled ? "ON (next)" : "OFF (next)";
+            } else if (c.live) {
+                value = c.enabled ? "ON  LIVE" : "OFF LIVE";
+            } else {
+                value = c.applied ? "ON  ACTIVE" : "OFF";
+            }
+            row(static_cast<int>(index), c.name.c_str(), value.c_str());
+        }
+        row(static_cast<int>(cheats.size()), "Back", nullptr);
+        ImGui::Separator();
+        ImGui::PushFont(nullptr, 16.0f * scale);
+        const auto message = CheatMessage();
+        if (!message.empty())
+            ImGui::TextWrapped("%s", message.c_str());
+        else
+            ImGui::TextWrapped("LIVE: safe one-byte patch only. Code hooks require game restart.");
+        ImGui::PopFont();
 	} else {
 		ImGui::TextUnformatted("Exit the game?");
 		ImGui::TextDisabled("Progress the game has not saved is lost.");
@@ -236,7 +300,7 @@ void DrawGameMenu(vk::Extent2D extent) {
 	}
 	ImGui::Separator();
 	ImGui::PushFont(nullptr, 17.0f * scale);
-	ImGui::TextDisabled("%s", hint);
+	ImGui::TextDisabled("Cross / Enter: select    Circle / Esc: back    PS / F10: close");
 	ImGui::PopFont();
 	ImGui::End();
 	ImGui::PopFont();
