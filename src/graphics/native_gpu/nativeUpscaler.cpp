@@ -3,6 +3,7 @@
 #if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
 #include "graphics/native_gpu/gemBacking.h"
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/upscaler/titleProfile.h"
 #include "graphics/native_gpu/upscaler/upscalerShaders.h"
 #include "graphics/shader/shaderBindings.h"
 #include "kernel/memory.h"
@@ -36,6 +37,8 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -181,6 +184,26 @@ double MonoSec() {
 	timespec ts {};
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+}
+
+// ---- Title profile (upscaler/titleProfile.h) ------------------------------------------------------------------
+using Profiles::Json;
+using Profiles::JGet;
+using Profiles::JStr;
+using Profiles::TitleProfile;
+TitleProfile LoadProfile() {
+	const char* path = std::getenv("KYTY_UPSCALER_PROFILE");
+	return path == nullptr || path[0] == 0 ? Profiles::BuiltinYotei() : Profiles::LoadProfileFile(path);
+}
+
+const TitleProfile& Prof() {
+	static const TitleProfile p = [] {
+		TitleProfile q = LoadProfile();
+		LogJson("{\"event\":\"profile\",\"source\":\"%s\",\"title\":\"%s\",\"usable\":%d,\"returns\":%u,\"drs\":%d,\"why\":\"%s\"}",
+		        q.builtin ? "builtin" : q.path.c_str(), q.title.c_str(), q.usable ? 1 : 0, q.return_count, q.drs ? 1 : 0, q.why.c_str());
+		return q;
+	}();
+	return p;
 }
 
 // ---- Kyty-owned GPU memory: code + descriptor tables (uncached) and linear staging (cached) ------
@@ -1533,8 +1556,15 @@ void StartWorker() {
 } // namespace
 
 namespace {
-constexpr uint64_t    kDrsTable     = 0x901af8190ull; // 16 levels (w, h), rodata
-constexpr uint64_t    kDrsOverride  = 0x905093580ull + 0x32ee10;
+// The title's render-resolution controller (Yotei: 16 levels (w, h) in rodata and the renderer's fixed-level
+// override), from the profile. Without one nothing is written and presets stay the game's dynamic resolution.
+
+// Automatic mode (KYTY_UPSCALER=auto, the launcher's default for a game whose profile has a supported route): the
+// game's own upscaler runs until the runtime self-check has passed (RuntimeVerified), then HLX FSR 4 (or
+// KYTY_UPSCALER_AUTO=hlx_dlss_e) and the requested frame generation start by themselves.
+std::atomic<bool> g_auto {false};
+std::atomic<int>  g_auto_upscaler {static_cast<int>(UpscalerKind::Hlx)};
+std::atomic<int>  g_auto_framegen {0};
 
 // The per-game profile of the frontend (SharpEmu bridge) passes KYTY_UPSCALER=game|hlx_fsr4 and
 // KYTY_UPSCALE_PRESET=dynamic|dlaa|quality|balanced|performance|ultra_performance. KYTY_NATIVE_UPSCALER=hlx and
@@ -1542,6 +1572,12 @@ constexpr uint64_t    kDrsOverride  = 0x905093580ull + 0x32ee10;
 void LoadSettings() {
 	if (const char* u = std::getenv("KYTY_UPSCALER")) {
 		g_upscaler = std::strcmp(u, "hlx_fsr4") == 0 ? 1 : std::strcmp(u, "hlx_dlss_e") == 0 ? 2 : 0;
+		if (std::strcmp(u, "auto") == 0) {
+			g_auto = true;
+			const char* a = std::getenv("KYTY_UPSCALER_AUTO");
+			g_auto_upscaler = a != nullptr && std::strcmp(a, "hlx_dlss_e") == 0 ? static_cast<int>(UpscalerKind::HlxDlss)
+			                                                                    : static_cast<int>(UpscalerKind::Hlx);
+		}
 	}
 	if (const char* o = std::getenv("KYTY_UPSCALE_OUTPUT")) { // 2160 (or native) | 1800 | 1440: HLX's output resolution
 		const int h = std::atoi(o);
@@ -1573,17 +1609,33 @@ void LoadSettings() {
 			}
 		}
 	}
-	LogJson("{\"event\":\"settings\",\"upscaler\":\"%s\",\"preset\":\"%s\",\"level\":%d,\"output_h\":%d,\"framegen\":\"%s\"}",
-	        UpscalerName(static_cast<UpscalerKind>(g_upscaler.load())), PresetName(static_cast<Preset>(g_preset.load())), g_level.load(),
-	        g_output_h.load(), FrameGenName(static_cast<FrameGenMode>(g_framegen.load())));
+	if (!Prof().drs) { // no resolution controller for this executable: the game's own dynamic resolution
+		if (g_level.load() >= 0 || g_preset.load() != static_cast<int>(Preset::Dynamic)) {
+			LogJson("{\"event\":\"settings\",\"preset_ignored\":\"%s\",\"why\":\"render-resolution controller not mapped for this executable\"}",
+			        PresetName(static_cast<Preset>(g_preset.load())));
+		}
+		g_level    = -1;
+		g_preset   = static_cast<int>(Preset::Dynamic);
+		g_output_h = 0;
+	}
+	if (g_auto.load()) { // the game's upscaler until the self-check passes; frame generation waits for it too
+		g_upscaler       = static_cast<int>(UpscalerKind::Game);
+		g_auto_framegen  = g_framegen.load();
+		g_framegen       = static_cast<int>(FrameGenMode::Off);
+	}
+	LogJson("{\"event\":\"settings\",\"upscaler\":\"%s\",\"auto\":%d,\"preset\":\"%s\",\"level\":%d,\"output_h\":%d,\"framegen\":\"%s\"}",
+	        UpscalerName(static_cast<UpscalerKind>(g_upscaler.load())), g_auto.load() ? 1 : 0, PresetName(static_cast<Preset>(g_preset.load())),
+	        g_level.load(), g_output_h.load(),
+	        FrameGenName(static_cast<FrameGenMode>(g_auto.load() ? g_auto_framegen.load() : g_framegen.load())));
 }
 // Writes the title's own fixed-level override every frame (game thread, at prepare_inputs). A level below the
 // title's table (16+: 1792x1008 .. 768x432, same 128x72 grid) replaces level 15's entry while selected, and
-// 1920x1080 is put back after.
+// 1920x1080 is put back after. Only for an executable whose profile maps the controller.
 void ApplyLevel() {
+	if (!Prof().drs) return;
 	static int  patched = 15;
-	auto*       entry   = reinterpret_cast<volatile uint32_t*>(kDrsTable + 15 * 8);
-	auto*       over    = reinterpret_cast<volatile int32_t*>(kDrsOverride);
+	auto*       entry   = reinterpret_cast<volatile uint32_t*>(Prof().drs_table + 15 * 8);
+	auto*       over    = reinterpret_cast<volatile int32_t*>(Prof().drs_override);
 	int         level   = g_level.load(std::memory_order_relaxed);
 	// The table is the 4K output's; another output (1080p through resolution detection) keeps the game's choice
 	// until its own table is mapped.
@@ -1640,6 +1692,7 @@ int TargetHeight(UpscalerKind u, int output_h) {
 // Ultra Quality 7 (2944x1656, 1.30x), Quality 10 (2560x1440, 1.5x), Balanced 12 (2304x1296, 1.67x), Performance
 // 15 (1920x1080, 2.0x), Ultra Performance 20 (1280x720, 3.0x). At 1440p: 10, 15, 17 (1664x936), 18, 20, 23.
 int PresetLevelFor(Preset p, int target_h) {
+	if (!Prof().drs) return -1; // the levels are the title's own controller's
 	double ratio = 0;
 	switch (p) {
 		case Preset::Dlaa: ratio = 1.0; break;
@@ -1691,24 +1744,42 @@ std::atomic<int> g_title_state {0}; // 1 this build, -1 another executable, 0 no
 // lock. Data only: PS5 code pages are execute-only. The first FSR3 shader record (relocated pointer to its header),
 // that header's magic, and the DRS table.
 void CheckTitle() {
-	uint32_t magic = 0, table[32] {};
-	uint64_t record = 0;
-	if (!Read(0x901c98880ull, &record, 8) || !Read(0x901e84c40ull, &magic, 4) || !Read(kDrsTable, table, sizeof(table))) {
+	const TitleProfile& P = Prof();
+	if (!P.usable) {
 		g_title_state = -1;
-		LogJson("{\"event\":\"fingerprint\",\"ok\":0,\"why\":\"unreadable\"}");
+		LogJson("{\"event\":\"fingerprint\",\"ok\":0,\"why\":\"%s\"}", P.why.c_str());
 		return;
 	}
-	bool ok = record == 0x901e84c40ull && magic == 0x34333231u;
-	for (unsigned l = 0; l < 15 && ok; l++) {
-		ok = table[l * 2] == 3840u - 128u * l && table[l * 2 + 1] == 2160u - 72u * l;
+	bool     ok    = true;
+	uint64_t first = 0;
+	for (const auto& c: P.fingerprint) {
+		uint64_t v = 0;
+		if (!Read(c.va, &v, c.bytes)) {
+			g_title_state = -1;
+			LogJson("{\"event\":\"fingerprint\",\"ok\":0,\"why\":\"unreadable\",\"va\":\"0x%llx\"}", static_cast<unsigned long long>(c.va));
+			return;
+		}
+		ok    = ok && v == c.value;
+		first = first == 0 ? v : first;
 	}
-	bool grid15 = false;
-	for (int l = 15; l <= kLevelLowest; l++) {
-		grid15 = grid15 || (table[30] == LevelSize(l).first && table[31] == LevelSize(l).second);
+	if (P.drs) { // the resolution controller's table must be the 128x72 grid the presets are computed for
+		uint32_t table[32] {};
+		if (!Read(P.drs_table, table, sizeof(table))) {
+			g_title_state = -1;
+			LogJson("{\"event\":\"fingerprint\",\"ok\":0,\"why\":\"resolution table unreadable\"}");
+			return;
+		}
+		for (unsigned l = 0; l < 15 && ok; l++) {
+			ok = table[l * 2] == 3840u - 128u * l && table[l * 2 + 1] == 2160u - 72u * l;
+		}
+		bool grid15 = false;
+		for (int l = 15; l <= kLevelLowest; l++) {
+			grid15 = grid15 || (table[30] == LevelSize(l).first && table[31] == LevelSize(l).second);
+		}
+		ok = ok && grid15;
 	}
-	ok = ok && grid15;
-	LogJson("{\"event\":\"fingerprint\",\"ok\":%d,\"record\":\"0x%llx\",\"magic\":\"0x%x\"}", ok ? 1 : 0,
-	        static_cast<unsigned long long>(record), magic);
+	LogJson("{\"event\":\"fingerprint\",\"ok\":%d,\"profile\":\"%s\",\"record\":\"0x%llx\",\"checks\":%zu}", ok ? 1 : 0, P.title.c_str(),
+	        static_cast<unsigned long long>(first), P.fingerprint.size());
 	if (ok) {
 		LoadSettings();
 		// KYTY_NATIVE_UPSCALER_EXPOSURE_PROBE=<guest address> (diagnostic): the two floats there, once a second, from
@@ -1749,6 +1820,7 @@ long HlxNeedMiB(int output_h) {
 
 void ApplySettings(const Settings& in) {
 	if (!TitleSupported()) return;
+	g_auto.store(false); // an explicit choice (the menu, or auto mode itself) replaces the automatic one
 	static const bool refuse = [] { // KYTY_HLX_MEMORY_GUARD=1: refuse a start that would not fit
 		const char* v = std::getenv("KYTY_HLX_MEMORY_GUARD");
 		return v != nullptr && v[0] == '1';
@@ -1823,9 +1895,182 @@ void ApplySettings(const Settings& in) {
 	        PresetName(in.preset), level, output_h);
 }
 
+namespace {
+// ---- Runtime self-check: the live bindings agree with the profile before anything replaces the game's work ----
+// Every captured invocation has already matched its jobs' named bindings (r_input_color_jittered, ...) against the
+// dispatch description's descriptors (CaptureHost). On top, each is checked for what the HLX path needs: all inputs
+// and the output present as plain 2D images in formats the copy shaders handle, the render size inside the colour
+// input, the output size equal to the output image. After kVerifyNeeded such invocations (about two seconds) the
+// route counts as verified for this run: HLX and frame generation may start (automatically in auto mode), and the
+// result is written next to the profile (<profile>.runtime.json) for the launcher. A route that keeps failing is
+// recorded with the reason and the game's own upscaler stays.
+constexpr int         kVerifyNeeded = 60;
+constexpr int         kFailRecord   = 600;
+std::atomic<bool>     g_runtime_verified {false};
+std::atomic<int>      g_verified_n {0}, g_rejected_n {0}, g_mismatch_n {0};
+std::atomic<bool>     g_fail_written {false};
+std::mutex            g_check_mutex;
+std::string           g_check_reason; // the last rejection or mismatch
+std::array<uint32_t, kResCount> g_check_formats {};
+uint32_t              g_check_render = 0, g_check_output = 0;
+
+bool RuntimeVerified() {
+	return g_runtime_verified.load(std::memory_order_acquire);
+}
+
+std::string Implausible(const Snapshot& s) {
+	static constexpr unsigned kNeed[] = {kColor, kDepth, kMotion, kReactive, kComposition, kOutput};
+	for (unsigned i: kNeed) {
+		if (!s.res[i].present) return std::string(kNames[i]) + " not supplied";
+		if (!Plain2D(s.res[i].t)) {
+			char b[160];
+			std::snprintf(b, sizeof(b), "%s is not a plain 2D image in a handled format (format %u)", kNames[i],
+			              static_cast<unsigned>(s.res[i].t.Format()));
+			return b;
+		}
+	}
+	const uint32_t rw = s.Field<uint32_t>(0x6f8), rh = s.Field<uint32_t>(0x6fc), ow = s.Field<uint32_t>(0x700), oh = s.Field<uint32_t>(0x704);
+	const auto&    c = s.res[kColor].t;
+	const auto&    o = s.res[kOutput].t;
+	if (rw == 0 || rh == 0 || rw > c.Width5() + 1u || rh > c.Height5() + 1u) return "render size outside the colour input";
+	if (ow != o.Width5() + 1u || oh != o.Height5() + 1u) return "output size differs from the output image";
+	if (ow < rw || oh < rh || ow > 8192 || oh > 8192) return "implausible output size";
+	return {};
+}
+
+void SetCheckReason(std::string why) {
+	std::lock_guard lock(g_check_mutex);
+	g_check_reason = std::move(why);
+}
+
+void WriteRuntimeResults(bool verified) {
+	const TitleProfile& P = Prof();
+	std::string         out;
+	if (const char* e = std::getenv("KYTY_UPSCALER_RUNTIME_RESULTS")) {
+		out = e;
+	} else if (!P.path.empty()) {
+		out = P.path;
+		if (out.size() > 5 && out.compare(out.size() - 5, 5, ".json") == 0) out.resize(out.size() - 5);
+		out += ".runtime.json";
+	}
+	if (out.empty()) return;
+	nlohmann::json j;
+	{
+		std::lock_guard lock(g_check_mutex);
+		j["reason"] = verified ? "" : g_check_reason;
+		auto& f     = j["formats"];
+		for (unsigned i = 0; i < kSourceCount; i++) f[kNames[i]] = g_check_formats[i];
+		j["render_size"] = {g_check_render >> 16u, g_check_render & 0xffffu};
+		j["output_size"] = {g_check_output >> 16u, g_check_output & 0xffffu};
+	}
+	j["schema"]                    = "kyty-upscaler-runtime";
+	j["schema_version"]            = 1;
+	j["sha256"]                    = P.sha256;
+	j["title"]                     = P.title;
+	j["adapter"]                   = "ffx_agc_fsr3upscaler_v1";
+	j["runtime_bindings_verified"] = verified;
+	j["verified_invocations"]      = g_verified_n.load();
+	j["rejected_invocations"]      = g_rejected_n.load();
+	j["binding_mismatches"]        = g_mismatch_n.load();
+	char      when[32];
+	time_t    now = time(nullptr);
+	struct tm tm {};
+	gmtime_r(&now, &tm);
+	std::strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tm);
+	j["at"] = when;
+	// Keep an earlier success: a later run whose check failed (another scene, a changed setting) does not erase it.
+	if (std::ifstream old(out); old && !verified) {
+		const std::string text((std::istreambuf_iterator<char>(old)), std::istreambuf_iterator<char>());
+		const Json        prev = Json::parse(text, nullptr, false);
+		const Json*       was  = JGet(&prev, "runtime_bindings_verified");
+		if (was != nullptr && was->is_boolean() && was->get<bool>()) {
+			j["runtime_bindings_verified"] = true;
+			j["last_failure"]              = j["reason"];
+			j["reason"]                    = "";
+			j["at"]                        = JStr(JGet(&prev, "at"));
+		}
+	}
+	const std::string tmp = out + ".tmp" + std::to_string(getpid());
+	if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+		const std::string text = j.dump(1, ' ', false, Json::error_handler_t::replace) + "\n";
+		std::fwrite(text.data(), 1, text.size(), f);
+		std::fclose(f);
+		std::rename(tmp.c_str(), out.c_str());
+	}
+}
+
+void OnVerified() {
+	LogJson("{\"event\":\"runtime_check\",\"verified\":1,\"invocations\":%d,\"rejected\":%d,\"mismatches\":%d}", g_verified_n.load(),
+	        g_rejected_n.load(), g_mismatch_n.load());
+	// Off the game thread: the settings change starts the helper, the result is a file write.
+	std::thread([] {
+		WriteRuntimeResults(true);
+		// (A choice made in the menu meanwhile cancels the automatic one: ApplySettings / SetFrameGen clear it.)
+		const int fg = g_auto_framegen.exchange(0);
+		if (g_auto.exchange(false)) {
+			Settings s = CurrentSettings();
+			s.upscaler = static_cast<UpscalerKind>(g_auto_upscaler.load());
+			ApplySettings(s);
+			LogJson("{\"event\":\"auto\",\"upscaler\":\"%s\"}", UpscalerName(s.upscaler));
+		}
+		if (fg != 0) {
+			SetFrameGen(static_cast<FrameGenMode>(fg));
+			LogJson("{\"event\":\"auto\",\"framegen\":\"%s\"}", FrameGenName(static_cast<FrameGenMode>(fg)));
+		}
+	}).detach();
+}
+
+void NoteFailure(bool mismatch, std::string why) {
+	(mismatch ? g_mismatch_n : g_rejected_n).fetch_add(1);
+	static std::atomic<int> logged {0};
+	if (logged.fetch_add(1) < 8) {
+		LogJson("{\"event\":\"runtime_check\",\"%s\":\"%s\"}", mismatch ? "mismatch" : "rejected", why.c_str());
+	}
+	SetCheckReason(std::move(why));
+	if (!RuntimeVerified() && g_rejected_n.load() + g_mismatch_n.load() >= kFailRecord && !g_fail_written.exchange(true)) {
+		LogJson("{\"event\":\"runtime_check\",\"verified\":0,\"verified_invocations\":%d}", g_verified_n.load());
+		std::thread([] { WriteRuntimeResults(false); }).detach();
+	}
+}
+
+// Caller holds g_mutex. A complete invocation (all four jobs' bindings matched).
+void NoteInvocation(const Snapshot& s) {
+	const std::string why = Implausible(s);
+	if (!why.empty()) {
+		NoteFailure(false, why);
+		return;
+	}
+	{
+		std::lock_guard lock(g_check_mutex);
+		for (unsigned i = 0; i < kSourceCount; i++) g_check_formats[i] = static_cast<uint32_t>(s.res[i].t.Format());
+		g_check_render = (s.Field<uint32_t>(0x6f8) << 16u) | (s.Field<uint32_t>(0x6fc) & 0xffffu);
+		g_check_output = (s.Field<uint32_t>(0x700) << 16u) | (s.Field<uint32_t>(0x704) & 0xffffu);
+	}
+	if (g_verified_n.fetch_add(1) + 1 == kVerifyNeeded && !RuntimeVerified()) {
+		g_runtime_verified.store(true, std::memory_order_release);
+		OnVerified();
+	}
+}
+} // namespace
+
 std::string Status() {
 	if (!TitleSupported()) {
+		if (!Prof().why.empty()) return "Not available for this game: " + Prof().why;
 		return "Not available for this game: no verified upscaler contract for this executable.";
+	}
+	if (!RuntimeVerified()) {
+		char line[256];
+		const std::string why = [] {
+			std::lock_guard lock(g_check_mutex);
+			return g_check_reason;
+		}();
+		if (g_fail_written.load()) {
+			std::snprintf(line, sizeof(line), "Game FSR3 kept: the live inputs did not match the profile (%s).", why.c_str());
+		} else {
+			std::snprintf(line, sizeof(line), "%sChecking the game's upscaler inputs (%d/%d)...", g_auto.load() ? "Automatic: " : "",
+			              std::min(g_verified_n.load(), kVerifyNeeded), kVerifyNeeded);
+		}
+		return line;
 	}
 	{
 		std::lock_guard lock(g_up_note_mutex);
@@ -1896,7 +2141,7 @@ void DrsWatch() {
 	static const uint64_t addr = [] {
 		const char* v = std::getenv("KYTY_NATIVE_UPSCALER_DRS_WATCH");
 		const auto  a = v != nullptr ? std::strtoull(v, nullptr, 0) : 0ull;
-		return a > 0x10000 ? a : 0x9053c20f0ull;
+		return a > 0x10000 ? a : Prof().drs_render_size;
 	}();
 	std::map<pid_t, std::pair<int, uint8_t*>> fds;
 	std::map<uint64_t, unsigned>             seen;
@@ -1955,7 +2200,8 @@ void DrsWatch() {
 						std::snprintf(b, sizeof(b), "%s\"0x%llx\"", k ? "," : "", static_cast<unsigned long long>(c));
 						chain += b;
 					}
-					const auto* rs = reinterpret_cast<volatile uint32_t*>(0x9053c20f0ull);
+					uint32_t rs[2] {};
+					Read(addr & ~3ull, rs, sizeof(rs));
 					LogJson("{\"event\":\"drs_write\",\"ip\":\"0x%llx\",\"tid\":%u,\"render_now\":[%u,%u],\"count\":%u,\"chain\":[%s]}",
 					        static_cast<unsigned long long>(ip), pidtid[1], rs[0], rs[1], seen[ip], chain.c_str());
 				}
@@ -1983,6 +2229,14 @@ void DrsWatch() {
 // before each FSR3 invocation; KYTY_NATIVE_UPSCALER_DRS_DUMP=n logs the region for the first n invocations.
 // Runtime memory only, like the title patch file; the executable is not modified.
 void DrsHook() {
+	if (!Prof().drs) { // diagnostics and the level override exist only for a mapped resolution controller
+		if (std::getenv("KYTY_NATIVE_UPSCALER_DRS_WATCH") != nullptr) {
+			static std::once_flag watch;
+			std::call_once(watch, [] { std::thread(DrsWatch).detach(); });
+		}
+		return;
+	}
+	const TitleProfile& P = Prof();
 	static const char* spec = std::getenv("KYTY_NATIVE_UPSCALER_DRS");
 	static const unsigned dump = [] {
 		const char* v = std::getenv("KYTY_NATIVE_UPSCALER_DRS_DUMP");
@@ -1991,7 +2245,7 @@ void DrsHook() {
 	static float    lo = 0, hi = 0;
 	static bool     parsed = spec != nullptr && std::sscanf(spec, "%f,%f", &lo, &hi) == 2 && lo > 0.2f && hi <= 1.0f && lo <= hi;
 	static unsigned n      = 0;
-	auto* region = reinterpret_cast<volatile uint32_t*>(0x9053c2040ull);
+	auto* region = reinterpret_cast<volatile uint32_t*>(P.drs_render_size - 0xb0);
 	if (n < dump || (n % 600 == 0 && (dump || parsed))) {
 		std::string words;
 		for (unsigned i = 0; i < 48; i++) {
@@ -2008,8 +2262,8 @@ void DrsHook() {
 	// The render size is renderer(0x905093580)+0x32eb70 = table[index] (writer 0x900ddf5b0: table pointer at
 	// +0x32edc0, index at +0x32ee08), copied every frame. Log both for the dumped invocations.
 	if (n < dump || (n % 600 == 0 && dump)) {
-		const uint64_t table = *reinterpret_cast<volatile uint64_t*>(0x905093580ull + 0x32edc0);
-		const int32_t  index = *reinterpret_cast<volatile int32_t*>(0x905093580ull + 0x32ee08);
+		const uint64_t table = *reinterpret_cast<volatile uint64_t*>(P.drs_table_ptr);
+		const int32_t  index = *reinterpret_cast<volatile int32_t*>(P.drs_index);
 		std::string    list;
 		for (unsigned i = 0; table >= 0x10000 && i < 40; i++) {
 			uint32_t wh[2] {};
@@ -2034,7 +2288,7 @@ void DrsHook() {
 		return v != nullptr && std::sscanf(v, "%ux%u", &rw, &rh) == 2 && rw >= 640 && rh >= 360 && rw <= 3840 && rh <= 2160;
 	}();
 	if (render) {
-		auto* r = reinterpret_cast<volatile uint32_t*>(0x9053c20f0ull);
+		auto* r = reinterpret_cast<volatile uint32_t*>(P.drs_render_size);
 		if (r[0] != rw || r[1] != rh) {
 			if (n < 4 || n % 600 == 0) LogJson("{\"event\":\"render_forced\",\"n\":%u,\"was\":[%u,%u],\"now\":[%u,%u]}", n, r[0], r[1], rw, rh);
 			r[0] = rw;
@@ -2042,7 +2296,7 @@ void DrsHook() {
 		}
 	}
 	if (parsed) {
-		auto* f = reinterpret_cast<volatile float*>(0x9053c20b4ull);
+		auto* f = reinterpret_cast<volatile float*>(P.drs_scale);
 		f[0]    = lo;
 		f[1]    = hi;
 	}
@@ -2050,7 +2304,7 @@ void DrsHook() {
 } // namespace
 
 void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
-	if (pc != 0x900005eefULL && pc != 0x900005fcdULL) {
+	if (!Prof().IsExecutorReturn(pc)) {
 		return;
 	}
 	if (g_title_state.load(std::memory_order_acquire) == 0) {
@@ -2060,21 +2314,20 @@ void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
 	if (!Enabled()) {
 		return;
 	}
-	{
-		const auto f = At<uint64_t>(host_frame), j = At<uint64_t>(f - 0xb0), pl = At<uint64_t>(j + 0xa0);
-		if (At<uint32_t>(j) == 2 && At<uint32_t>(pl) == 17 && At<uint32_t>(pl + 4) == 0) {
-			DrsHook(); // once per invocation: the prepare_inputs job
-		}
+	const TitleProfile& P = Prof();
+	// The executor's frame (its RBP): the job and backend in its stack slots, the FSR3 dispatcher's frame above it.
+	const auto frame = At<uint64_t>(host_frame), job = At<uint64_t>(frame + P.job_slot), pipeline = At<uint64_t>(job + 0xa0);
+	if (At<uint32_t>(job) == 2 && At<uint32_t>(pipeline) == 17 && At<uint32_t>(pipeline + 4) == 0) {
+		DrsHook(); // once per invocation: the prepare_inputs job
 	}
-	const auto frame = At<uint64_t>(host_frame), job = At<uint64_t>(frame - 0xb0), pipeline = At<uint64_t>(job + 0xa0);
-	if (At<uint32_t>(job) != 2 || At<uint32_t>(pipeline) != 17 || At<uint64_t>(frame + 8) != 0x900016284ULL) {
+	if (At<uint32_t>(job) != 2 || At<uint32_t>(pipeline) != 17 || !P.DispatcherReturn(At<uint64_t>(frame + 8))) {
 		return;
 	}
 	const auto cache = At<uint64_t>(pipeline + 8), shader = At<uint64_t>(cache + 8);
-	if (shader < 0x901e84c40ULL || shader > 0x901e85838ULL || At<uint32_t>(shader) != 0x34333231) {
+	if (shader < P.shader_lo || shader > P.shader_hi || At<uint32_t>(shader) != P.magic) {
 		return;
 	}
-	const auto      params = At<uint64_t>(At<uint64_t>(frame) - 0x9b30);
+	const auto      params = At<uint64_t>(At<uint64_t>(frame) + P.desc_slot);
 	const auto      pass   = At<uint32_t>(pipeline + 4);
 	std::lock_guard guard(g_mutex);
 	if (pass == 0) {
@@ -2100,15 +2353,20 @@ void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
 	auto&              s          = it->second;
 	constexpr unsigned kExpected[] = {0, 4, 5, 6}; // prepare_inputs, prepare_reactivity, luma_instability, accumulate
 	if (s.stage >= 4 || pass != kExpected[s.stage]) {
+		char why[96];
+		std::snprintf(why, sizeof(why), "FSR3 pass %u where pass %u was expected (another FSR3 pass sequence)", pass,
+		              s.stage < 4 ? kExpected[s.stage] : 99u);
 		g_building.erase(it);
+		NoteFailure(true, why);
 		return;
 	}
 	// Recheck the job's named bindings against the dispatch description's descriptors.
-	const auto backend = At<uint64_t>(frame - 0xb8), table = At<uint64_t>(backend + 0x30);
+	const auto backend = At<uint64_t>(frame + P.backend_slot), table = At<uint64_t>(backend + 0x30);
 	for (unsigned kind = 0; kind < 2; kind++) {
 		const auto n = At<uint32_t>(job + (kind ? 0xa8 : 0xac));
 		if (n > 64) {
 			g_building.erase(it);
+			NoteFailure(true, "binding count out of range");
 			return;
 		}
 		for (unsigned b = 0; b < n; b++) {
@@ -2173,6 +2431,7 @@ void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
 				if (h < 0 || h >= 65536 || !Read(table + static_cast<uint64_t>(h) * 0x54, words, 32) ||
 				    std::memcmp(words, s.res[i].t.fields, 32) != 0) {
 					g_building.erase(it);
+					NoteFailure(true, std::string("binding ") + name + " differs from the dispatch description");
 					return;
 				}
 			}
@@ -2186,6 +2445,7 @@ void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
 		s.id     = ++g_sequence;
 		s.packet = packet;
 		s.shader = At<uint64_t>(shader + 16);
+		NoteInvocation(s);
 		if (g_pending.size() >= 32) {
 			g_pending.pop_front();
 		}
@@ -2241,7 +2501,8 @@ bool DeviceReady(const Snapshot& s) {
 // Whether HLX handles this invocation; once per invocation, so the four jobs agree. Caller holds g_mutex.
 bool Decide(Snapshot& s) {
 	if (s.use_hlx < 0) {
-		const bool hlx_wanted = GetMode() == Mode::Hlx && g_hlx_healthy.load() && !g_hlx_retire.load();
+		// (Only once the runtime self-check has passed: until then the title's FSR3 runs untouched.)
+		const bool hlx_wanted = GetMode() == Mode::Hlx && g_hlx_healthy.load() && !g_hlx_retire.load() && RuntimeVerified();
 		if (!hlx_wanted || !DeviceReady(s)) { // (no helper is started while HLX is not wanted: after a failure, a stop)
 			s.use_hlx = 0;
 		} else {
@@ -2298,7 +2559,7 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 	g_pending.erase(it);
 	const Mode mode = GetMode();
 	// The title's own FSR3 (Mode::Off) inserts nothing unless frame generation wants this frame's guides.
-	const bool fg      = FgWanted() && FgReady(*s) && g_dev.control.cpu != nullptr;
+	const bool fg      = FgWanted() && RuntimeVerified() && FgReady(*s) && g_dev.control.cpu != nullptr;
 	const bool upscale = mode == Mode::Off ? false : mode == Mode::Hlx ? Decide(*s) : (DeviceReady(*s) && ActiveWindow());
 	if (!upscale && PoolBlocksFsr3()) {
 		// FSR3's working memory is released (or moving back): its accumulate pass must not run. Nothing is inserted
@@ -2463,6 +2724,7 @@ FrameGenMode FrameGen() {
 }
 void SetFrameGen(FrameGenMode m) {
 	if (!TitleSupported()) return;
+	g_auto_framegen.store(0); // (the menu's choice replaces a pending automatic start)
 	const MemState ms     = ReadMemState(m != FrameGenMode::Off);
 	const bool     memory = ms.headroom >= 0 && ms.headroom < kFgResumeMiB;
 	const bool     gpu    = !GpuRoomFor(ms, kFgGpuMiB);

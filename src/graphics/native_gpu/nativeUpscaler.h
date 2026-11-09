@@ -1,4 +1,7 @@
-// Experimental native upscaler boundary for Ghost of Yotei (PPSA26344 02.002.000), BC-250 only.
+// Experimental native upscaler boundary for games with FidelityFX FSR 3.1 on the PS5 AGC backend, BC-250 only.
+// Where the boundary is in a given executable comes from its title profile (KYTY_UPSCALER_PROFILE, written by
+// tools/upscaler-scan when the game is added; built in: Ghost of Yotei PPSA26344 02.002.000, where it was first
+// verified). Nothing replaces the game's work before the runtime self-check has matched the live bindings.
 //
 // At the game's own FSR3 dispatch boundary (the four named host jobs verified at AgcCbDispatch, the
 // same contract as experiments/fsr3-fg YOTEI_FSR3_HOST_INTERFACE_FINDINGS.md), the translator inserts:
@@ -47,7 +50,7 @@ struct Settings {
 	int          level    = -1; // -1: the title's own dynamic resolution
 	int          output_h = 0;  // HLX's output resolution: 1800 (3200x1800) or 1440 (2560x1440); 0 the title's (4K)
 };
-// True when the running executable is the build the upscaler contract was verified on (checked in memory).
+// True when the running executable is the one its title profile describes (checked in guest memory).
 bool                          TitleSupported();
 Settings                      CurrentSettings();
 void                          ApplySettings(const Settings& s);
