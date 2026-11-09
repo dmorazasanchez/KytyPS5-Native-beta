@@ -30,7 +30,8 @@ IMPLEMENTED_ADAPTERS = {
 
 
 def default_store() -> Path:
-    env = os.environ.get('KYTY_UPSCALER_PROFILE_DIR')
+    # (KYTYPS5_*: survives the runtime selector's removal of KYTY_* overrides before it runs the scanner.)
+    env = os.environ.get('KYTY_UPSCALER_PROFILE_DIR') or os.environ.get('KYTYPS5_UPSCALER_PROFILE_DIR')
     if env:
         return Path(env).expanduser()
     return Path.home() / '.config' / 'KytyPS5-Native' / 'upscaler-profiles'

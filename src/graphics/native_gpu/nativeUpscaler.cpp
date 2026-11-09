@@ -1565,6 +1565,11 @@ namespace {
 std::atomic<bool> g_auto {false};
 std::atomic<int>  g_auto_upscaler {static_cast<int>(UpscalerKind::Hlx)};
 std::atomic<int>  g_auto_framegen {0};
+// KYTY_FRAMEGEN=auto: FSR 3 2x paces the title at half the refresh rate, so it starts only for a title that stays
+// below kFgAutoBelowFps real frames a second with its upscaler running (a 60 FPS title keeps its own frames).
+std::atomic<bool> g_fg_when_slow {false};
+std::atomic<int>  g_fg_changes {0}; // SetFrameGen calls: a choice in the menu ends the automatic watch
+constexpr double  kFgAutoBelowFps = 50.0;
 
 // The per-game profile of the frontend (SharpEmu bridge) passes KYTY_UPSCALER=game|hlx_fsr4 and
 // KYTY_UPSCALE_PRESET=dynamic|dlaa|quality|balanced|performance|ultra_performance. KYTY_NATIVE_UPSCALER=hlx and
@@ -1594,10 +1599,11 @@ void LoadSettings() {
 			}
 		}
 	}
-	if (const char* f = std::getenv("KYTY_FRAMEGEN")) { // per-game profile: off | fsr3
-		g_framegen = std::strcmp(f, "fsr3") == 0           ? static_cast<int>(FrameGenMode::Fsr3)
-		             : std::strcmp(f, "fsr3_dynamic") == 0 ? static_cast<int>(FrameGenMode::Fsr3Dynamic)
-		                                                   : 0;
+	if (const char* f = std::getenv("KYTY_FRAMEGEN")) { // per-game profile: off | fsr3 | auto
+		g_framegen = std::strcmp(f, "fsr3") == 0 || std::strcmp(f, "auto") == 0 ? static_cast<int>(FrameGenMode::Fsr3)
+		             : std::strcmp(f, "fsr3_dynamic") == 0                      ? static_cast<int>(FrameGenMode::Fsr3Dynamic)
+		                                                                        : 0;
+		g_fg_when_slow = std::strcmp(f, "auto") == 0;
 	}
 	if (const char* v = std::getenv("KYTY_NATIVE_UPSCALER_DRS_INDEX")) {
 		const int l = std::atoi(v);
@@ -1618,10 +1624,10 @@ void LoadSettings() {
 		g_preset   = static_cast<int>(Preset::Dynamic);
 		g_output_h = 0;
 	}
-	if (g_auto.load()) { // the game's upscaler until the self-check passes; frame generation waits for it too
-		g_upscaler       = static_cast<int>(UpscalerKind::Game);
-		g_auto_framegen  = g_framegen.load();
-		g_framegen       = static_cast<int>(FrameGenMode::Off);
+	if (g_auto.load()) g_upscaler = static_cast<int>(UpscalerKind::Game); // the game's upscaler until the self-check passes
+	if (g_auto.load() || g_fg_when_slow.load()) { // frame generation starts from OnVerified
+		g_auto_framegen = g_framegen.load();
+		g_framegen      = static_cast<int>(FrameGenMode::Off);
 	}
 	LogJson("{\"event\":\"settings\",\"upscaler\":\"%s\",\"auto\":%d,\"preset\":\"%s\",\"level\":%d,\"output_h\":%d,\"framegen\":\"%s\"}",
 	        UpscalerName(static_cast<UpscalerKind>(g_upscaler.load())), g_auto.load() ? 1 : 0, PresetName(static_cast<Preset>(g_preset.load())),
@@ -2013,9 +2019,27 @@ void OnVerified() {
 			ApplySettings(s);
 			LogJson("{\"event\":\"auto\",\"upscaler\":\"%s\"}", UpscalerName(s.upscaler));
 		}
-		if (fg != 0) {
+		if (fg != 0 && !g_fg_when_slow.load()) {
 			SetFrameGen(static_cast<FrameGenMode>(fg));
 			LogJson("{\"event\":\"auto\",\"framegen\":\"%s\"}", FrameGenName(static_cast<FrameGenMode>(fg)));
+		} else if (fg != 0) {
+			// Real frames a second = completed upscaler invocations a second (one per frame). Measured once the
+			// upscaler has settled (an HLX start takes ~10 s), then every 10 s until the title is slow or the menu
+			// changes frame generation; once on, it stays on.
+			const int changes = g_fg_changes.load();
+			std::this_thread::sleep_for(std::chrono::seconds(15));
+			for (int window = 0; g_fg_changes.load() == changes; window++) {
+				const int    n0 = g_verified_n.load();
+				const double t0 = MonoSec();
+				std::this_thread::sleep_for(std::chrono::seconds(10));
+				const double fps = (g_verified_n.load() - n0) / (MonoSec() - t0);
+				if (window < 3 || window % 30 == 0) LogJson("{\"event\":\"auto_framegen\",\"real_fps\":%.1f}", fps);
+				if (fps > 1.0 && fps < kFgAutoBelowFps && g_fg_changes.load() == changes) {
+					SetFrameGen(static_cast<FrameGenMode>(fg));
+					LogJson("{\"event\":\"auto\",\"framegen\":\"%s\",\"real_fps\":%.1f}", FrameGenName(static_cast<FrameGenMode>(fg)), fps);
+					break;
+				}
+			}
 		}
 	}).detach();
 }
@@ -2725,6 +2749,7 @@ FrameGenMode FrameGen() {
 void SetFrameGen(FrameGenMode m) {
 	if (!TitleSupported()) return;
 	g_auto_framegen.store(0); // (the menu's choice replaces a pending automatic start)
+	g_fg_changes.fetch_add(1);
 	const MemState ms     = ReadMemState(m != FrameGenMode::Off);
 	const bool     memory = ms.headroom >= 0 && ms.headroom < kFgResumeMiB;
 	const bool     gpu    = !GpuRoomFor(ms, kFgGpuMiB);
