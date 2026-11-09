@@ -976,6 +976,23 @@ public:
 		return n;
 	}
 
+	// ReadGuest without waiting: 0 when the lock is held elsewhere. For the PM4 translator, which must never wait on
+	// this lock (its holder may be waiting on GPU work the translator still owes). Returns the bytes copied.
+	uint64_t TryReadGuest(uint64_t vaddr, void* dst, uint64_t size) const {
+		std::unique_lock<std::mutex> lock(m_lock, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			return 0;
+		}
+		auto it = FindViewUnlocked(vaddr);
+		if (it == m_views.end()) {
+			return 0;
+		}
+		const uint64_t skip = vaddr - it->first;
+		const uint64_t n    = std::min(size, it->second.size - skip);
+		std::memcpy(dst, m_alias + it->second.offset + skip, n);
+		return n;
+	}
+
 	// Copies `size` bytes to guest memory at `vaddr` (clipped to the view holding it) through the
 	// alias, which is always writable whatever the guest's own protection. Returns the bytes copied.
 	uint64_t WriteGuest(uint64_t vaddr, const void* src, uint64_t size) {

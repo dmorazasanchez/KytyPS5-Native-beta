@@ -1,5 +1,6 @@
 #include "libs/agc.h"
 #include "libs/agcDiff.h"
+#include "graphics/native_gpu/nativePassCapture.h"
 #include "graphics/native_gpu/nativeUpscaler.h"
 
 #include "common/assert.h"
@@ -102,6 +103,7 @@ void Initialize() {
 	NativeGpu::ShadowSetHost([](int event_id, uint32_t context_id) { g_renderer->TriggerInterrupt(event_id, context_id); },
 	                         [] { return Sync::ReadReferenceClock(); });
 	NativeGpu::ShadowSetFlipHost([](int handle, int index, int flip_mode, int64_t flip_arg) {
+		NativePassCapture::NoteFlip(4);
 		g_renderer->GetGpu().SubmitEopFlip(handle, index, flip_mode, flip_arg);
 	});
 	// The GPU order of the flip releases so far, for the WaitUntilSafeForRendering pads of a native

@@ -13,7 +13,8 @@ logs = here / 'logs'; logs.mkdir(exist_ok=True)
 sources = ['src/libs/agc.cpp', 'src/graphics/native_gpu/nativePm4.cpp', 'src/graphics/native_gpu/nativeShadow.cpp',
            'src/graphics/presentation/gameMenu.cpp', 'src/graphics/presentation/window/swapchain.cpp',
            'src/graphics/presentation/videoOut.cpp']
-new_sources = ['src/graphics/native_gpu/nativeUpscaler.cpp', 'src/graphics/presentation/window/frameGen.cpp']
+new_sources = ['src/graphics/native_gpu/nativeUpscaler.cpp', 'src/graphics/presentation/window/frameGen.cpp',
+               'src/graphics/native_gpu/nativePassCapture.cpp']
 # AMD FidelityFX SDK 1.1.4 (MIT): frame interpolation + optical flow, Vulkan backend, with Kyty's BC-250 shader changes.
 ffx = work / '3rdparty/fidelityfx'
 ffx_sources = ['src/backends/vk/ffx_vk.cpp', 'src/backends/vk/kyty_swapchain_stub.cpp', 'src/backends/shared/ffx_shader_blobs.cpp',

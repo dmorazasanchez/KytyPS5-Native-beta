@@ -248,6 +248,8 @@ constexpr uint64_t kTables       = 0x1000; // kSlots * kTablesPerSlot * 64 bytes
 constexpr uint64_t kFlags        = 0x10000; // one dword per slot: 1 = run the unpack
 constexpr uint64_t kStamps       = 0x10400; // KYTY_NATIVE_UPSCALER_STALL: two GPU clocks per slot (16 bytes)
 constexpr uint64_t kCodeScale4A0 = 0x11000;
+constexpr uint64_t kCodeClear1   = 0x12000; // clear1.s: HLX's reactive / composition masks for titles without them (TAA)
+constexpr uint64_t kCodeCopy4Scale = 0x12100; // copy4_scale.s: HLX output x the TAA's exposure into the title's output
 bool StallWanted() {
 	static const bool v = [] {
 		const char* e = std::getenv("KYTY_NATIVE_UPSCALER_STALL");
@@ -509,6 +511,7 @@ bool ConnectHlx(uint64_t total) {
 	// of play, logs/yotei-off-C2WzrB) with the title's own pre-exposure; auto exposure would bind the per-frame FRAME_INFO.
 	// (HDR, inverted and infinite depth are not verified from the title's context flags.)
 	l.flags = 0x1u | 0x8u | 0x10u | 0x40u;
+	if (Prof().taa && Prof().taa_hlx_flags != 0) l.flags = Prof().taa_hlx_flags; // (the TAA title's depth / HDR conventions)
 	if (const char* f = std::getenv("KYTY_NATIVE_UPSCALER_HLX_FLAGS")) l.flags = static_cast<uint32_t>(std::strtoul(f, nullptr, 0));
 	for (unsigned k = 0; k < 6; k++) {
 		const auto& r = g_dev.region[kHlxOrder[k]];
@@ -579,6 +582,10 @@ bool EnsureControl() {
 	std::memcpy(control.cpu + kCodeFgGuides, k_upscaler_fg_guides, sizeof(k_upscaler_fg_guides));
 	static_assert(sizeof(k_upscaler_scale4_a0) <= 0x1000 && kCodeScale4A0 + 0x1000 <= kControlSize);
 	std::memcpy(control.cpu + kCodeScale4A0, k_upscaler_scale4_a0, sizeof(k_upscaler_scale4_a0));
+	static_assert(sizeof(k_upscaler_clear1) <= 0x100 && kCodeClear1 + 0x100 <= kControlSize);
+	std::memcpy(control.cpu + kCodeClear1, k_upscaler_clear1, sizeof(k_upscaler_clear1));
+	static_assert(sizeof(k_upscaler_copy4_scale) <= 0x100 && kCodeCopy4Scale + 0x100 <= kControlSize);
+	std::memcpy(control.cpu + kCodeCopy4Scale, k_upscaler_copy4_scale, sizeof(k_upscaler_copy4_scale));
 	__builtin_ia32_sfence();
 	g_dev.control = control; // (readers test control.cpu, written last below)
 	return true;
@@ -604,13 +611,30 @@ bool InitDevice(const Snapshot& s) {
 	const auto target = TargetSize();
 	uint64_t   at     = 0;
 	for (unsigned i = 0; i < kResCount; i++) {
-		if (i == kExposure || !s.res[i].present || !Plain2D(s.res[i].t) ||
+		// A TAA title supplies no reactive / composition masks: HLX gets its own, cleared every frame (clear1.s).
+		const bool mask = GetMode() == Mode::Hlx && Prof().taa && (i == kReactive || i == kComposition) && !s.res[i].present;
+		if (i == kExposure || (!mask && (!s.res[i].present || !Plain2D(s.res[i].t))) ||
 		    (GetMode() == Mode::Hlx && (i == kDilatedMotion || i == kDilatedDepth))) {
 			continue;
 		}
 		auto& r  = g_dev.region[i];
+		if (mask) {
+			r.w      = std::max<uint32_t>({s.res[kColor].t.Width5() + 1u, std::min<uint32_t>(out_w, 8192), 3840u});
+			r.h      = std::max<uint32_t>({s.res[kColor].t.Height5() + 1u, std::min<uint32_t>(out_h, 8192), 2160u});
+			r.format = 1; // 8_UNORM
+			r.bpp    = 1;
+			r.pitch  = ((r.w * r.bpp + 255u) & ~255u) / r.bpp;
+			r.offset = at;
+			r.bytes  = static_cast<uint64_t>(r.pitch) * r.h * r.bpp;
+			at       = (at + r.bytes + 0xffffu) & ~0xffffull;
+			continue;
+		}
 		r.w      = std::max<uint32_t>(s.res[i].t.Width5() + 1u, std::min<uint32_t>(out_w, 8192));
 		r.h      = std::max<uint32_t>(s.res[i].t.Height5() + 1u, std::min<uint32_t>(out_h, 8192));
+		if (Prof().taa) { // a TAA title changes its frame size (Demon's Souls: 2560x1440 in its intro, then 3840x2160)
+			r.w = std::max<uint32_t>(r.w, 3840);
+			r.h = std::max<uint32_t>(r.h, 2160);
+		}
 		if (fixed && i != kOutput) {
 			r.w = level.first;
 			r.h = level.second;
@@ -636,6 +660,11 @@ bool InitDevice(const Snapshot& s) {
 	} else if (at == 0 || !g_dev.staging.Create(at, false)) {
 		LogJson("{\"event\":\"error\",\"what\":\"staging buffer\",\"bytes\":%llu}", static_cast<unsigned long long>(at));
 		return false;
+	} else if (std::getenv("KYTY_NATIVE_UPSCALER_STAGING_FILL") != nullptr) {
+		// (diagnostic) a recognisable pattern: a dump still showing it means no pack dispatch wrote there
+		g_dev.staging.Sync(true, false);
+		std::memset(g_dev.staging.cpu, 0xAB, at);
+		g_dev.staging.Sync(false, false);
 	}
 	g_dev.staging_need = at;
 	g_dev.ok           = true;
@@ -752,8 +781,16 @@ void Dump(const Snapshot& s, unsigned which) {
 	if (r.bytes == 0 || r.w == 0 || r.h == 0) {
 		return;
 	}
+	// Copied out first (tens of ms), then analysed on a thread of its own: the GPU waits on this boundary's gate
+	// until the Worker releases it, and statistics plus a PFM over 4K images take seconds (Demon's Souls stopped on
+	// the watchdog while a dump held its gate).
 	g_dev.staging.Sync(true, true);
-	const uint8_t* base = g_dev.staging.cpu + r.offset;
+	auto copy = std::make_shared<std::vector<uint8_t>>(g_dev.staging.cpu + r.offset,
+	                                                   g_dev.staging.cpu + r.offset + static_cast<uint64_t>(r.pitch) * r.h * r.bpp);
+	g_dev.staging.Sync(false, true);
+	std::thread([copy, r, id, which, dir_s = std::string(dir != nullptr ? dir : "")] {
+	const char*    dir  = dir_s.empty() ? nullptr : dir_s.c_str();
+	const uint8_t* base = copy->data();
 	// Statistics over every pixel (CPU, diagnostic only).
 	double         sum[4] {}, mn[4], mx[4];
 	uint64_t       nonzero = 0, finite = 0;
@@ -808,7 +845,7 @@ void Dump(const Snapshot& s, unsigned which) {
 			std::fclose(f);
 		}
 	}
-	g_dev.staging.Sync(false, true);
+	}).detach();
 }
 
 // ---- Worker: everything after the boundary EOP, off the tracker thread ----------------------------
@@ -1927,6 +1964,7 @@ bool RuntimeVerified() {
 std::string Implausible(const Snapshot& s) {
 	static constexpr unsigned kNeed[] = {kColor, kDepth, kMotion, kReactive, kComposition, kOutput};
 	for (unsigned i: kNeed) {
+		if (Prof().taa && (i == kReactive || i == kComposition)) continue; // (a TAA title has none: HLX gets cleared masks)
 		if (!s.res[i].present) return std::string(kNames[i]) + " not supplied";
 		if (!Plain2D(s.res[i].t)) {
 			char b[160];
@@ -2478,6 +2516,178 @@ void CaptureHost(uint64_t pc, uint64_t host_frame, uint64_t packet) {
 	}
 }
 
+// ---- adapter taa_paths_v1: the title's own TAA pass ------------------------------------------------------------
+// The translator calls TaaCapture at every DISPATCH_DIRECT while a TAA profile is loaded. The pass is recognised by
+// its shader's code hash; its inputs are read where the shader's own instructions read them (the profile's paths),
+// and a Snapshot carrying the same fields as an FSR3 description goes to the same boundary, HLX and frame
+// generation code as Yotei's FSR3 (TakeBoundary picks it up at this very dispatch, which HLX then replaces).
+namespace {
+// Guest reads on the translator thread: never wait for GemBacking's lock (its holder may wait on GPU work the
+// translator still owes). Busy lock: this frame keeps the title's TAA.
+size_t TryRead(uint64_t va, void* dst, size_t n) {
+	if (va < 0x10000 || va > 0x7fffffffffffULL || n > 0x10000) return 0;
+	if (auto* gem = Libs::LibKernel::Memory::GetGemBacking(); gem != nullptr) {
+		if (gem->TryReadGuest(va, dst, n) == n) return n;
+	}
+	iovec local {dst, n}, remote {reinterpret_cast<void*>(va), n};
+	return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(n) ? n : 0;
+}
+// Address of the value at the end of `path`: ud pair -> pointer loads -> final offset (48-bit addresses).
+bool ResolvePath(const uint32_t* ud, uint32_t have, const TitleProfile::Path& path, uint64_t* out) {
+	if (!path.Valid() || path.ud + 1 >= 16 || (have >> path.ud & 3u) != 3u) return false;
+	uint64_t ptr = (static_cast<uint64_t>(ud[path.ud]) | (static_cast<uint64_t>(ud[path.ud + 1]) << 32u)) & 0xffffffffffffull;
+	for (size_t i = 0; i + 1 < path.offs.size(); i++) {
+		uint32_t two[2] {};
+		if (ptr < 0x10000 || TryRead(ptr + path.offs[i], two, 8) != 8) return false;
+		ptr = (static_cast<uint64_t>(two[0]) | (static_cast<uint64_t>(two[1]) << 32u)) & 0xffffffffffffull;
+	}
+	if (ptr < 0x10000) return false;
+	*out = ptr + path.offs.back();
+	return true;
+}
+// The same hash as the pass capture (nativePassCapture.cpp CodeHash): FNV-1a 64 over the first 64 code dwords.
+uint64_t CodeHash64(uint64_t code) {
+	uint32_t w[64] {};
+	if (TryRead(code, w, sizeof(w)) != sizeof(w)) return 0;
+	uint64_t h = 0xcbf29ce484222325ull;
+	for (uint32_t x: w) h = (h ^ x) * 0x100000001b3ull;
+	return h;
+}
+std::mutex                 g_taa_mutex;
+std::map<uint64_t, bool>   g_taa_shaders; // shader address -> is the profile's TAA pass
+double                     g_taa_last = 0;
+std::atomic<uint64_t>      g_taa_busy {0}; // invocations left to the title (a guest read could not be made)
+template <class T>
+void SetField(Snapshot& s, unsigned o, T v) {
+	std::memcpy(s.p.data() + o, &v, sizeof(v));
+}
+} // namespace
+
+bool TaaWanted() {
+	return Prof().taa;
+}
+
+void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t ud_have) {
+	const TitleProfile& P = Prof();
+	if (!P.taa) return;
+	{
+		std::lock_guard lock(g_taa_mutex);
+		auto it = g_taa_shaders.find(shader);
+		if (it == g_taa_shaders.end()) {
+			const uint64_t h = CodeHash64(shader);
+			if (h == 0) return; // (unreadable now: asked again at its next dispatch)
+			it = g_taa_shaders.emplace(shader, h == P.taa_hash).first;
+			if (g_taa_shaders.size() > 65536) g_taa_shaders.clear();
+			if (it->second) {
+				LogJson("{\"event\":\"taa_shader\",\"address\":\"0x%llx\",\"hash\":\"0x%016llx\"}", static_cast<unsigned long long>(shader),
+				        static_cast<unsigned long long>(h));
+			}
+		}
+		if (!it->second) return;
+	}
+	static std::once_flag found;
+	std::call_once(found, [&] {
+		LogJson("{\"event\":\"fingerprint\",\"ok\":1,\"profile\":\"%s\",\"taa_shader\":\"0x%016llx\"}", P.title.c_str(),
+		        static_cast<unsigned long long>(P.taa_hash));
+		LoadSettings();
+		g_title_state = 1;
+	});
+	Snapshot                   s {};
+	const TitleProfile::Path*  paths[4] = {&P.taa_color, &P.taa_depth, &P.taa_motion, &P.taa_output};
+	const unsigned             slot[4]  = {kColor, kDepth, kMotion, kOutput};
+	for (unsigned k = 0; k < 4; k++) {
+		uint64_t at = 0;
+		auto&    r  = s.res[slot[k]];
+		if (!ResolvePath(ud, ud_have, *paths[k], &at) || TryRead(at, r.t.fields, 32) != 32) {
+			g_taa_busy.fetch_add(1);
+			return;
+		}
+		r.handle  = at;
+		r.present = true;
+		if (P.taa_format[k] != 0 && static_cast<uint32_t>(r.t.Format()) != P.taa_format[k]) {
+			char why[128];
+			std::snprintf(why, sizeof(why), "TAA %s format %u, profile says %u", kNames[slot[k]], static_cast<unsigned>(r.t.Format()), P.taa_format[k]);
+			std::lock_guard guard(g_mutex);
+			NoteFailure(false, why);
+			return;
+		}
+	}
+	float    jitter[2] {};
+	uint64_t ja = 0;
+	if (!ResolvePath(ud, ud_have, P.taa_jitter, &ja) || TryRead(ja, jitter, 8) != 8 || !std::isfinite(jitter[0]) || !std::isfinite(jitter[1])) {
+		jitter[0] = jitter[1] = 0.0f;
+	}
+	uint32_t rw = s.res[kColor].t.Width5() + 1u, rh = s.res[kColor].t.Height5() + 1u;
+	uint32_t ow = s.res[kOutput].t.Width5() + 1u, oh = s.res[kOutput].t.Height5() + 1u;
+	// The TAA's own sizes (dynamic resolution renders into part of the colour image), when the profile names them.
+	auto size_at = [&](const TitleProfile::Path& path, uint32_t* w, uint32_t* h) {
+		float    v[2] {};
+		uint64_t a = 0;
+		if (path.Valid() && ResolvePath(ud, ud_have, path, &a) && TryRead(a, v, 8) == 8 && std::isfinite(v[0]) && std::isfinite(v[1]) &&
+		    v[0] >= 64.0f && v[1] >= 64.0f && v[0] <= static_cast<float>(*w) && v[1] <= static_cast<float>(*h)) {
+			*w = static_cast<uint32_t>(v[0] + 0.5f);
+			*h = static_cast<uint32_t>(v[1] + 0.5f);
+		}
+	};
+	size_at(P.taa_render_size, &rw, &rh);
+	size_at(P.taa_output_size, &ow, &oh);
+	// The factor between HLX's output (the input's space) and what the title's TAA writes (exposure): a float in a
+	// constant buffer the TAA reads, at the profile's V# path.
+	float scale = 1.0f;
+	if (P.taa_scale.Valid()) {
+		uint64_t a = 0;
+		uint32_t v[4] {};
+		float    f = 0;
+		if (ResolvePath(ud, ud_have, P.taa_scale, &a) && TryRead(a, v, 16) == 16) {
+			const uint64_t base = static_cast<uint64_t>(v[0]) | (static_cast<uint64_t>(v[1] & 0xffffu) << 32u);
+			if (TryRead(base + P.taa_scale_off, &f, 4) == 4 && std::isfinite(f) && f > 0.0f && f < 1e6f) scale = f;
+		}
+	}
+	const double   now = MonoSec();
+	double         dt  = 0;
+	{
+		std::lock_guard lock(g_taa_mutex);
+		dt         = g_taa_last == 0 ? 0 : now - g_taa_last;
+		g_taa_last = now;
+	}
+	SetField<float>(s, 0x6e8, jitter[0] * (P.taa_jitter_uv ? static_cast<float>(rw) : 1.0f) * P.taa_jitter_sign[0]);
+	SetField<float>(s, 0x6ec, jitter[1] * (P.taa_jitter_uv ? static_cast<float>(rh) : 1.0f) * P.taa_jitter_sign[1]);
+	SetField<float>(s, 0x6f0, P.taa_mv_sign * static_cast<float>(rw));
+	SetField<float>(s, 0x6f4, P.taa_mv_sign * static_cast<float>(rh));
+	SetField<uint32_t>(s, 0x6f8, rw);
+	SetField<uint32_t>(s, 0x6fc, rh);
+	SetField<uint32_t>(s, 0x700, ow);
+	SetField<uint32_t>(s, 0x704, oh);
+	SetField<uint8_t>(s, 0x708, 0);    // sharpening off
+	SetField<float>(s, 0x70c, 0.0f);
+	SetField<float>(s, 0x710, dt > 0.001 && dt < 0.1 ? static_cast<float>(dt * 1e3) : 16.6667f);
+	SetField<float>(s, 0x714, 1.0f);   // pre-exposure
+	SetField<uint8_t>(s, 0x718, dt == 0 || dt > 0.5 ? 1 : 0); // a first frame or a pause: new history
+	SetField<float>(s, 0x71c, P.taa_near);
+	SetField<float>(s, 0x720, P.taa_far);
+	SetField<float>(s, 0x724, P.taa_fov);
+	SetField<float>(s, 0x728, 1.0f);
+	SetField<float>(s, 0x72c, scale);  // (HLX output -> the title's output; copy4_scale.s)
+	std::lock_guard guard(g_mutex);
+	g_last_render = (rw << 16u) | (rh & 0xffffu);
+	g_last_output = (ow << 16u) | (oh & 0xffffu);
+	s.stage       = 4;
+	s.id          = ++g_sequence;
+	s.packet      = packet;
+	s.shader      = shader;
+	NoteInvocation(s);
+	if (s.id <= 3 || s.id % 600 == 0) {
+		LogJson("{\"event\":\"taa_capture\",\"invocation\":%llu,\"render\":[%u,%u],\"output\":[%u,%u],\"jitter_px\":[%.4f,%.4f],\"scale\":%.5g,"
+		        "\"color\":\"0x%llx\",\"depth\":\"0x%llx\",\"motion\":\"0x%llx\",\"output_va\":\"0x%llx\",\"busy\":%llu}",
+		        static_cast<unsigned long long>(s.id), rw, rh, ow, oh, s.Field<float>(0x6e8), s.Field<float>(0x6ec), scale,
+		        static_cast<unsigned long long>(s.res[kColor].t.Base40()), static_cast<unsigned long long>(s.res[kDepth].t.Base40()),
+		        static_cast<unsigned long long>(s.res[kMotion].t.Base40()), static_cast<unsigned long long>(s.res[kOutput].t.Base40()),
+		        static_cast<unsigned long long>(g_taa_busy.load()));
+	}
+	if (g_pending.size() >= 32) g_pending.pop_front();
+	g_pending.push_back(std::make_shared<Snapshot>(s));
+}
+
 namespace {
 // While FSR3's memory is released (or moving) and HLX is not producing frames (starting, restarting after a switch),
 // nothing would write the title's output: what it draws over it afterwards (rain, particles) would pile up for
@@ -2661,8 +2871,11 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 	}
 	if (mode == Mode::Hlx) {
 		// The title's inputs straight into HLX's textures, HLX's output straight into the title's output.
+		auto synthetic_mask = [&](unsigned i) {
+			return (i == kReactive || i == kComposition) && !s->res[i].present && Prof().taa && g_dev.region[i].bytes != 0;
+		};
 		for (unsigned i: {kColor, kDepth, kMotion, kReactive, kComposition}) {
-			if (!fits(i)) {
+			if (!synthetic_mask(i) && !fits(i)) {
 				return guides_only(); // all or nothing: the title's FSR3 output stays
 			}
 		}
@@ -2677,13 +2890,26 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 		}
 		for (unsigned i: {kColor, kDepth, kMotion, kReactive, kComposition}) {
 			const uint64_t t = kTables + (slot * kTablesPerSlot + table++) * 64u;
+			if (synthetic_mask(i)) { // cleared at the colour's extent
+				WriteCopyTable(t, g_dev.hlx[i], g_dev.hlx[i]);
+				EmitDispatch(out->before, kCodeClear1, t, g_dev.region[i], s->dims[kColor][0], s->dims[kColor][1], compute_ring);
+				continue;
+			}
 			WriteCopyTable(t, s->res[i].t, g_dev.hlx[i]);
 			EmitDispatch(out->before, CopyCode(g_dev.region[i].format), t, g_dev.region[i], s->dims[i][0], s->dims[i][1], compute_ring);
 		}
-		const uint64_t t = kTables + (slot * kTablesPerSlot + table) * 64u;
-		table += scaled ? 2 : 1;
+		const uint64_t t          = kTables + (slot * kTablesPerSlot + table) * 64u;
+		const bool     taa_scaled = !scaled && Prof().taa && Prof().taa_scale.Valid();
+		table += scaled || taa_scaled ? 2 : 1;
 		std::vector<uint32_t> d;
-		if (scaled) {
+		if (taa_scaled) { // HLX's output x the TAA's exposure (the colour HLX saw is before it), alpha 1
+			WriteCopyTable(t, g_dev.hlx[kOutput], s->res[kOutput].t);
+			const float f = s->Field<float>(0x72c);
+			uint32_t    u = 0;
+			std::memcpy(&u, &f, 4);
+			*reinterpret_cast<volatile uint32_t*>(g_dev.control.cpu + t + 64) = u;
+			EmitDispatch(d, kCodeCopy4Scale, t, out_r, s->dims[kOutput][0], s->dims[kOutput][1], compute_ring);
+		} else if (scaled) {
 			WriteScaleTable(t, g_dev.hlx[kOutput], out_r.w, out_r.h, s->res[kOutput].t, s->dims[kOutput][0], s->dims[kOutput][1]);
 			EmitDispatch(d, kCodeScale4A0, t, out_r, s->dims[kOutput][0], s->dims[kOutput][1], compute_ring, 64);
 		} else {
@@ -2925,6 +3151,10 @@ bool Enabled() {
 	return false;
 }
 void CaptureHost(uint64_t, uint64_t, uint64_t) {}
+bool TaaWanted() {
+	return false;
+}
+void TaaCapture(uint64_t, uint64_t, const uint32_t*, uint32_t) {}
 bool TakeBoundary(uint64_t, uint64_t, bool, Boundary*) {
 	return false;
 }

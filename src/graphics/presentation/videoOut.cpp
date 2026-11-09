@@ -1,4 +1,5 @@
 #include "graphics/presentation/videoOut.h"
+#include "graphics/native_gpu/nativePassCapture.h"
 
 #include "common/abi.h"
 #include "common/assert.h"
@@ -2877,6 +2878,7 @@ KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int set_index) {
 }
 
 KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg) {
+	NativePassCapture::NoteFlip(1); // (KYTY_PASS_CAPTURE: frames are counted by flip requests)
 	PRINT_NAME();
 
 	uint64_t  request_id = 0;
@@ -2901,6 +2903,7 @@ KYTY_SYSV_ABI int VideoOutSubmitEopFlip(int handle, int index, int flip_mode, in
                                         uint32_t* ctx) {
 	PRINT_NAME();
 	EXIT_IF(g_video_out_driver == nullptr);
+	NativePassCapture::NoteFlip(3); // (libSceAgc's SetFlip: the flip most titles use)
 
 	const int result = g_video_out_driver->SubmitEopFlip(handle, index, flip_mode, flip_arg, ctx, false);
 	if (result == VIDEO_OUT_ERROR_INVALID_FLIP_MODE) {
@@ -2926,6 +2929,7 @@ KYTY_SYSV_ABI int VideoOutGetBufferLabelAddress(int handle, void** address) {
 
 int VideoOutDriver::SubmitFlipFromGpu(Graphics::CommandBuffer& buffer, int handle, int index,
                                       int flip_mode, int64_t flip_arg, uint64_t& request_id) {
+	NativePassCapture::NoteFlip(2);
 	EXIT_IF(buffer.IsInvalid());
 
 	const int result = ReserveFlipRequest(*m_impl, handle, index, flip_mode, flip_arg,

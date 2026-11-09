@@ -1,4 +1,5 @@
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/nativePassCapture.h"
 #include "graphics/native_gpu/nativeUpscaler.h"
 
 #include "graphics/native_gpu/nativePm4.h"
@@ -7989,6 +7990,7 @@ private:
 			case TrackerPoint::Kind::Flip:
 				if (p.data.size() == 5) {
 					NativeUpscaler::FgNoteFlip(static_cast<int>(p.data[1])); // (frame generation: this flip's boundary)
+					NativePassCapture::NoteFlip(5);
 				}
 				if (HostCallbacks().flip && p.data.size() == 5) {
 					HostCallbacks().flip(static_cast<int>(p.data[0]), static_cast<int>(p.data[1]), static_cast<int>(p.data[2]),
@@ -8712,6 +8714,7 @@ void DumpRenderTargets(const char* dir, unsigned long long flip,
 void ShadowOnFlip(uint64_t address, uint64_t size, uint32_t width, uint32_t height,
                   uint32_t bytes_per_pixel, uint32_t pixel_format, uint32_t tile_mode,
                   const std::function<uint32_t(uint64_t, uint64_t)>& download_region) {
+	NativePassCapture::NoteFlip(6); // (every displayed flip, whatever path requested it)
 	static std::atomic<uint64_t> flips {0};
 	const uint64_t               n    = flips.fetch_add(1, std::memory_order_relaxed);
 	if (address != 0 && size != 0 && Shadow::Instance().Active()) {

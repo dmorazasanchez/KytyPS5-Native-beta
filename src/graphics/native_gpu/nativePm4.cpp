@@ -1,4 +1,5 @@
 #include "graphics/native_gpu/nativePm4.h"
+#include "graphics/native_gpu/nativePassCapture.h"
 #include "graphics/native_gpu/nativeUpscaler.h"
 
 #include <algorithm>
@@ -3684,7 +3685,64 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 	uint32_t log_instances = 1;
 	uint64_t log_set_base  = 0;
 	uint32_t log_draws     = 0;
+	uint32_t cap_grid[3]   = {}; // the current DISPATCH_DIRECT's thread groups (KYTY_PASS_CAPTURE)
+	// KYTY_PASS_CAPTURE (nativePassCapture.h): every dispatch and every full-screen draw (at most 6 vertices, one
+	// instance) of a few frames, as registers only; the capture thread reads the descriptor tables.
+	auto capture_pass = [&](uint32_t op, uint32_t count, uint64_t indirect, bool dispatch) {
+		if (!dispatch && (indirect != 0 || count == 0 || count > 6 || log_instances != 1)) {
+			return;
+		}
+		NativePassCapture::Pass p;
+		p.dispatch     = dispatch;
+		p.compute_ring = m_compute_ring;
+		p.op           = op;
+		p.count        = count;
+		p.instances    = log_instances;
+		p.indirect     = indirect;
+		const uint32_t ud_first = dispatch ? 0x240u : 0x00Cu;
+		p.ud_n                  = dispatch ? 16u : 32u;
+		for (uint32_t i = 0; i < p.ud_n; i++) {
+			if (const uint32_t* v = sh.Find(ud_first + i); v != nullptr) {
+				p.ud[i] = *v;
+				p.ud_have |= 1u << i;
+			}
+		}
+		if (dispatch) {
+			p.shader = (static_cast<uint64_t>(reg(sh, 0x20C)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x20D) & 0xffu) << 40u);
+			for (uint32_t i = 0; i < 3; i++) {
+				p.grid[i]    = op == IT_DISPATCH_DIRECT ? cap_grid[i] : 0u;
+				p.threads[i] = reg(sh, 0x207u + i);
+			}
+		} else {
+			p.shader = (static_cast<uint64_t>(reg(sh, 0x008)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009) & 0xffu) << 40u);
+			p.vs     = (static_cast<uint64_t>(reg(sh, 0x0C8)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x0C9) & 0xffu) << 40u);
+			for (uint32_t i = 0; i < 8; i++) {
+				const uint32_t step = i * kCbColorStride;
+				const uint64_t base = (static_cast<uint64_t>(reg(cx, kCbColor0Base + step)) << 8u) |
+				                      (static_cast<uint64_t>(reg(cx, kCbColor0BaseExt + i) & 0xffu) << 40u);
+				const uint32_t info = reg(cx, kCbColor0Info + step);
+				if (base == 0 || ((info >> 2u) & 0x1fu) == 0) {
+					continue;
+				}
+				auto& t   = p.rt[p.rt_n++];
+				t.base    = base;
+				t.slot    = i;
+				t.info    = info;
+				t.attrib  = reg(cx, kCbColor0Attrib + step);
+				t.attrib2 = reg(cx, kCbColor0Attrib2 + i);
+				t.attrib3 = reg(cx, kCbColor0Attrib3 + i);
+				t.view    = reg(cx, kCbColor0View + step);
+			}
+			p.z_base    = (static_cast<uint64_t>(reg(cx, kDbZReadBase)) << 8u) | (static_cast<uint64_t>(reg(cx, kDbZReadBaseHi) & 0xffu) << 40u);
+			p.z_info    = reg(cx, kDbZInfo);
+			p.z_size_xy = reg(cx, kDbDepthSizeXy);
+		}
+		NativePassCapture::Submit(p);
+	};
 	auto     log_draw      = [&](uint32_t op, uint32_t count, uint64_t indirect, bool dispatch) {
+		if (NativePassCapture::Active()) {
+			capture_pass(op, count, indirect, dispatch);
+		}
 		if (!m_draw_log) {
 			return;
 		}
@@ -6061,8 +6119,22 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 				// Experimental native upscaler (nativeUpscaler.h): Yotei's verified FSR3 accumulate dispatch.
 				NativeUpscaler::Boundary upscaler;
 				bool                     upscaler_hit = false;
-				if (labels && !cond.active && NativeUpscaler::Enabled()) {
+				if (labels && !cond.active && (NativeUpscaler::Enabled() || NativeUpscaler::TaaWanted())) {
 					uint32_t left = 0;
+					// A TAA title (adapter taa_paths_v1): its TAA pass is recognised here and queued for TakeBoundary.
+					if (!m_compute_ring && NativeUpscaler::TaaWanted()) {
+						uint32_t ud[16] = {};
+						uint32_t have   = 0;
+						for (uint32_t i = 0; i < 16; i++) {
+							if (const uint32_t* v = sh.Find(0x240u + i); v != nullptr) {
+								ud[i] = *v;
+								have |= 1u << i;
+							}
+						}
+						NativeUpscaler::TaaCapture(source_va(static_cast<uint32_t>(dw), &left),
+						                           (static_cast<uint64_t>(reg(sh, 0x20Cu)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x20Du) & 0xffu) << 40u),
+						                           ud, have);
+					}
 					// The title's other FSR3 jobs of an invocation HLX replaces: dropped (a packet that emits nothing
 					// ends the direct run before it). Their register writes stay; the boundary below still comes.
 					if (!m_compute_ring && NativeUpscaler::SkipFsr3Dispatch(source_va(static_cast<uint32_t>(dw), &left))) {
@@ -6075,6 +6147,9 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
                         m_compute_ring, &upscaler);
 				}
 #endif
+				cap_grid[0] = body_count >= 1 ? bptr[0] : 0;
+				cap_grid[1] = body_count >= 2 ? bptr[1] : 0;
+				cap_grid[2] = body_count >= 3 ? bptr[2] : 0;
 				log_draw(op, body_count >= 1 ? bptr[0] : 0, 0, true);
 				// KYTY_NATIVE_GPU_INSPECT_PS names a compute shader too: its user data, as for a draw.
 				if (const uint64_t cs = (static_cast<uint64_t>(reg(sh, 0x20Cu)) << 8u) |

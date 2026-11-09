@@ -68,6 +68,12 @@ bool Enabled();
 // From AgcCbDispatch: `pc` its return address, `frame` its frame address, `packet` the guest command
 // buffer cursor where its DISPATCH_DIRECT goes.
 void CaptureHost(uint64_t pc, uint64_t frame, uint64_t packet);
+// A TAA title's profile (adapter taa_paths_v1) is loaded: the translator calls TaaCapture at every DISPATCH_DIRECT.
+bool TaaWanted();
+// From the translator at a DISPATCH_DIRECT (gfx ring), before TakeBoundary: `packet` its guest address, `shader` the
+// compute program, `ud` COMPUTE_USER_DATA_0..15 (bit i of `ud_have`: register i was written). When the shader is the
+// profile's TAA pass, its inputs are read through the profile's paths and queued for TakeBoundary.
+void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t ud_have);
 // From the translator at a DISPATCH_DIRECT: true when it is a verified accumulate boundary.
 bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary* out);
 // From the translator at every DISPATCH_DIRECT: true for the title's prepare_inputs, prepare_reactivity and

@@ -4,6 +4,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -45,6 +46,27 @@ struct TitleProfile {
         return false;
 	}
 	bool DispatcherReturn(uint64_t r) const { return disp_ret != 0 ? r == disp_ret : (r >= disp_lo && r < disp_hi); }
+
+	// ---- adapter taa_paths_v1: a title's own TAA pass, found by tools/upscaler-scan (taa_detect, isa_paths) ----
+	// The pass is the compute shader whose code hash is taa_hash. Each input is reached from its user data the way the
+	// shader's own instructions reach it: ud pair -> 64-bit pointer loads at offs[0..n-2] -> descriptor at offs[n-1].
+	struct Path {
+		uint32_t              ud = 0;
+		std::vector<uint32_t> offs;
+		[[nodiscard]] bool    Valid() const { return !offs.empty(); }
+	};
+	bool     taa      = false;
+	uint64_t taa_hash = 0;
+	Path     taa_color, taa_depth, taa_motion, taa_output, taa_jitter; // taa_jitter: last offset = two floats
+	Path     taa_render_size, taa_output_size; // two floats each (the TAA's own constants), optional
+	Path     taa_scale;                        // a V#: the float at its base + taa_scale_off scales the output (exposure)
+	uint32_t taa_scale_off = 0;
+	uint32_t taa_format[4] {};      // expected formats: color, depth, motion, output (0: any)
+	bool     taa_jitter_uv = true;  // jitter values in UV units (pixels = value * render size)
+	float    taa_jitter_sign[2] {1.0f, 1.0f};
+	float    taa_mv_sign = -1.0f;   // motion vectors in UV units, current minus previous: FSR's scale is -render size
+	float    taa_near = 0.1f, taa_far = 10000.0f, taa_fov = 1.0f;
+	uint32_t taa_hlx_flags = 0;     // 0: Kyty's default
 };
 
 inline TitleProfile BuiltinYotei() {
@@ -99,6 +121,70 @@ inline bool JPair(const Json* v, uint64_t* a, uint64_t* b) {
 	return v != nullptr && v->is_array() && v->size() == 2 && JU64(&(*v)[0], a) && JU64(&(*v)[1], b);
 }
 
+inline bool JPath(const Json* v, TitleProfile::Path* out) {
+	if (v == nullptr || !v->is_array() || v->size() < 2 || v->size() > 6) return false;
+	uint64_t x = 0;
+	if (!JU64(&(*v)[0], &x) || x > 30) return false;
+	out->ud = static_cast<uint32_t>(x);
+	out->offs.clear();
+	for (size_t i = 1; i < v->size(); i++) {
+		if (!JU64(&(*v)[i], &x) || x > 0x100000) return false;
+		out->offs.push_back(static_cast<uint32_t>(x));
+	}
+	return true;
+}
+
+inline float JFloat(const Json* v, float def) {
+	return v != nullptr && v->is_number() ? v->get<float>() : def;
+}
+
+// runtime.taa: {"shader_hash": "0x..", "color": [ud, off...], "depth": [...], "motion": [...], "output": [...],
+//               "jitter": {"path": [...], "units": "uv"|"pixels", "sign": [x, y]}, "motion_vectors": "uv_current_minus_previous",
+//               "formats": {"color": 71, ...}, "camera": {"near":, "far":, "fov":}, "hlx_flags": n}
+inline TitleProfile LoadTaaBlock(TitleProfile p, const Json* r) {
+	const Json* t = JGet(r, "taa");
+	if (t == nullptr || !t->is_object()) {
+		p.why = "profile taa block missing";
+		return p;
+	}
+	const std::string hash = JStr(JGet(t, "shader_hash"));
+	p.taa_hash             = hash.empty() ? 0 : std::strtoull(hash.c_str(), nullptr, 16);
+	const Json* j          = JGet(t, "jitter");
+	bool        ok         = p.taa_hash != 0 && JPath(JGet(t, "color"), &p.taa_color) && JPath(JGet(t, "depth"), &p.taa_depth) &&
+	          JPath(JGet(t, "motion"), &p.taa_motion) && JPath(JGet(t, "output"), &p.taa_output) && JPath(JGet(j, "path"), &p.taa_jitter);
+	p.taa_jitter_uv = JStr(JGet(j, "units")) != "pixels";
+	JPath(JGet(t, "render_size"), &p.taa_render_size);
+	JPath(JGet(t, "output_size"), &p.taa_output_size);
+	if (const Json* sc = JGet(t, "output_scale"); sc != nullptr && JPath(JGet(sc, "path"), &p.taa_scale)) {
+		uint64_t off = 0;
+		JU64(JGet(sc, "buffer_offset"), &off);
+		p.taa_scale_off = static_cast<uint32_t>(off);
+	}
+	if (const Json* sg = JGet(j, "sign"); sg != nullptr && sg->is_array() && sg->size() == 2) {
+		p.taa_jitter_sign[0] = JFloat(&(*sg)[0], 1.0f);
+		p.taa_jitter_sign[1] = JFloat(&(*sg)[1], 1.0f);
+	}
+	const std::string mv = JStr(JGet(t, "motion_vectors"));
+	ok                   = ok && (mv == "uv_current_minus_previous" || mv == "uv_previous_minus_current");
+	p.taa_mv_sign        = mv == "uv_previous_minus_current" ? 1.0f : -1.0f;
+	const Json* f        = JGet(t, "formats");
+	const char* names[4] = {"color", "depth", "motion", "output"};
+	for (int i = 0; i < 4; i++) {
+		uint64_t v = 0;
+		if (JU64(JGet(f, names[i]), &v)) p.taa_format[i] = static_cast<uint32_t>(v);
+	}
+	const Json* c = JGet(t, "camera");
+	p.taa_near    = JFloat(JGet(c, "near"), p.taa_near);
+	p.taa_far     = JFloat(JGet(c, "far"), p.taa_far);
+	p.taa_fov     = JFloat(JGet(c, "fov"), p.taa_fov);
+	uint64_t flags = 0;
+	if (JU64(JGet(t, "hlx_flags"), &flags)) p.taa_hlx_flags = static_cast<uint32_t>(flags);
+	p.taa    = ok;
+	p.usable = ok;
+	if (!ok) p.why = "profile taa block incomplete";
+	return p;
+}
+
 inline TitleProfile LoadProfileFile(const char* path) {
 	TitleProfile p;
 	p.path = path;
@@ -121,6 +207,9 @@ inline TitleProfile LoadProfileFile(const char* path) {
 		const std::string why = JStr(JGet(JGet(JGet(&j, "capabilities"), "upscaler"), "reason"));
 		p.why = why.empty() ? "no supported upscaler interface" : why;
 		return p;
+	}
+	if (JStr(JGet(r, "adapter")) == "taa_paths_v1") {
+		return LoadTaaBlock(std::move(p), r);
 	}
 	if (JStr(JGet(r, "adapter")) != "ffx_agc_fsr3upscaler_v1") {
 		p.why = "profile adapter " + JStr(JGet(r, "adapter")) + " is not implemented in this build";
