@@ -1,4 +1,5 @@
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/nativeUpscaler.h"
 
 #include "graphics/native_gpu/nativePm4.h"
 #include "graphics/native_gpu/nativeSubmit.h" // KYTY_GEM_BACKING_SUPPORTED + NativeSubmitter
@@ -6796,6 +6797,15 @@ public:
 		m_cv.notify_one();
 	}
 
+	// Someone outside the tracker wrote a label a held piece waits on (ShadowWakeHeld).
+	void WakeHeld() {
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_wake = true;
+		}
+		m_cv.notify_one();
+	}
+
 	bool GpuWritable(uint64_t addr) override { return Shadow::Instance().GpuWritable(addr); }
 
 	bool SampleDword(uint64_t addr, uint32_t* out) override { return Shadow::Instance().SampleDword(addr, out); }
@@ -7973,7 +7983,13 @@ private:
 	void Run(Entry& e) {
 		const TrackerPoint& p = e.point;
 		switch (p.kind) {
+			case TrackerPoint::Kind::UpscalerBoundary:
+				NativeUpscaler::GpuComplete(p.addr, m_native && !m_drain && Shadow::Instance().Reached(e.seq, e.slot));
+				break;
 			case TrackerPoint::Kind::Flip:
+				if (p.data.size() == 5) {
+					NativeUpscaler::FgNoteFlip(static_cast<int>(p.data[1])); // (frame generation: this flip's boundary)
+				}
 				if (HostCallbacks().flip && p.data.size() == 5) {
 					HostCallbacks().flip(static_cast<int>(p.data[0]), static_cast<int>(p.data[1]), static_cast<int>(p.data[2]),
 					                     static_cast<int64_t>(p.data[3] | (static_cast<uint64_t>(p.data[4]) << 32u)));
@@ -8271,6 +8287,10 @@ void ShadowEnqueue(const uint32_t* buffer, uint32_t size_in_dwords, uint32_t que
 	                             [then = std::move(then), buffer, size_in_dwords] {
 		                             then(std::span<const uint32_t>(buffer, size_in_dwords));
 	                             });
+}
+
+void ShadowWakeHeld() {
+	LabelPipeline::Instance().WakeHeld();
 }
 
 bool ShadowDmabufPieces(uint64_t vaddr, uint64_t size, std::vector<NativeDmabufPiece>& out) {

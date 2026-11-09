@@ -13,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <mutex>
 #include <span>
 #include <utility>
 
@@ -69,7 +70,7 @@ public:
 		    !q->Alloc(&q->m_eop, va + 0x200000, 4096,
 		              KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE | KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
 		                  KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE) ||
-		    !q->Alloc(&q->m_save, va + 0x1000000, save, gtt)) {
+		    !q->SaveArea(va + 0x1000000, save, gtt)) {
 			std::fprintf(stderr, "KfdQueue: buffers for a queue failed (%u CUs, cwsr %u)\n", cu, cwsr);
 			delete q;
 			return nullptr;
@@ -90,7 +91,7 @@ public:
 		a.queue_priority           = priority;
 		a.eop_buffer_address       = q->m_eop.va;
 		a.eop_buffer_size          = 4096;
-		a.ctx_save_restore_address = q->m_save.va;
+		a.ctx_save_restore_address = q->m_save_va;
 		a.ctx_save_restore_size    = cwsr;
 		a.ctl_stack_size           = ctl;
 		int r = q->KfdIoctl(AMDKFD_IOC_CREATE_QUEUE, &a);
@@ -317,6 +318,7 @@ public:
 	// True when KFD never saves a queue's waves (amdgpu.cwsr_enable=0, a stock option): a preempted
 	// queue drains its waves instead, so the save area's size does not matter.
 	static bool WavesNeverSaved() {
+		static const bool never = [] {
 		int on = 1;
 		if (FILE* f = std::fopen("/sys/module/amdgpu/parameters/cwsr_enable", "re"); f != nullptr) {
 			if (std::fscanf(f, "%d", &on) != 1) {
@@ -325,6 +327,8 @@ public:
 			std::fclose(f);
 		}
 		return on == 0;
+		}();
+		return never;
 	}
 
 private:
@@ -363,6 +367,35 @@ private:
 			r = ::ioctl(m_kfd, request, arg);
 		} while (r == -1 && (errno == EINTR || errno == EAGAIN));
 		return r == -1 ? -errno : 0;
+	}
+
+	// The queue's context save area. KFD checks that one of exactly the node's size is mapped at the address it is
+	// given (kfd_queue_acquire_buffers), and only a queue with wave saving on (amdgpu.cwsr_enable=1) gets that address
+	// in its MQD. With saving off, the CP never writes the area: one, allocated by the first queue and kept for the
+	// process's lifetime, serves every queue (16 queues x 13.3 MiB on the BC-250 was ~200 MiB of RAM). The kernel
+	// counts each queue's reference to its mapping. With saving on, each queue has its own.
+	bool SaveArea(uint64_t va, uint64_t size, uint32_t flags) {
+		if (!WavesNeverSaved() || std::getenv("KYTY_NATIVE_GPU_KFD_OWN_SAVE_AREA") != nullptr) {
+			if (!Alloc(&m_save, va, size, flags)) return false;
+			m_save_va = m_save.va;
+			return true;
+		}
+		static std::mutex m;
+		static uint64_t   shared_va = 0, shared_size = 0;
+		std::lock_guard   lock(m);
+		if (shared_va == 0 || shared_size != size) {
+			Mem area {};
+			if (!Alloc(&area, va, size, flags)) return false; // (the flags a queue's own area has)
+			if (area.cpu != nullptr) {
+				::munmap(area.cpu, area.size); // (never read or written by the CPU)
+			}
+			shared_va   = area.va; // (kept: never freed)
+			shared_size = size;
+			std::fprintf(stderr, "KfdQueue: waves are never saved (amdgpu.cwsr_enable=0): one %llu KiB context save area for every queue\n",
+			             static_cast<unsigned long long>(size >> 10u));
+		}
+		m_save_va = shared_va;
+		return true;
 	}
 
 	bool Alloc(Mem* m, uint64_t va, uint64_t size, uint32_t flags) {
@@ -459,7 +492,8 @@ private:
 	int               m_drm = -1;
 	uint32_t          m_gpu = 0;
 	uint32_t          m_ring_dwords = kRingBytes / 4;
-	Mem               m_ring, m_ptrs, m_eop, m_save;
+	Mem               m_ring, m_ptrs, m_eop, m_save; // m_save: a queue's own save area only (SaveArea)
+	uint64_t          m_save_va = 0;
 	uint32_t          m_queue_id  = 0;
 	bool              m_has_queue = false;
 	void*             m_db_page   = nullptr;

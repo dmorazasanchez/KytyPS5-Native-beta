@@ -785,6 +785,121 @@ public:
 		return promoted;
 	}
 
+	// Kyty (native upscaler): gives the RAM of the resident blocks wholly inside guest addresses [vaddr, vaddr + size)
+	// back to the system while keeping their data, for guest memory the title will not use for a while (the
+	// title's FSR3 working memory while HLX replaces FSR3). The data moves to the memfd, which the kernel pages
+	// out to swap (MADV_PAGEOUT asks for that at once); every CPU view maps the memfd again, every GPU mapping the
+	// dummy (a stray access reads garbage, never faults); the buffer is freed. PromoteGuestRange brings the data
+	// back exactly (promotion copies a block's memfd data). Nothing on the GPU may be using the range. Blocks
+	// with code or display-buffer carves stay. Returns the bytes given back.
+	uint64_t DemoteGuestRange(uint64_t vaddr, uint64_t size) {
+		std::lock_guard<std::mutex> lock(m_lock);
+		VaSync                      va_sync(*this);
+		std::vector<uint64_t>       indices;
+		ForEachViewOverlap(vaddr, size, [&](uint64_t, uint64_t, uint64_t backing, uint64_t len) {
+			const uint64_t first = (backing + BlockSize() - 1) / BlockSize();
+			const uint64_t end   = (backing + len) / BlockSize();
+			for (uint64_t index = first; index < end; index++) {
+				if (std::find(indices.begin(), indices.end(), index) == indices.end()) {
+					indices.push_back(index);
+				}
+			}
+		});
+		uint64_t released = 0;
+		for (const uint64_t index: indices) {
+			Block& block = m_blocks[index];
+			if (!block.resident || block.code) {
+				continue;
+			}
+			uint64_t uncarved = 0;
+			ForEachUncarvedUnlocked(index * BlockSize(), block.size, [&](uint64_t, uint64_t len) { uncarved += len; });
+			if (uncarved != block.size) {
+				continue;
+			}
+			if (DemoteBlockUnlocked(index)) {
+				released += block.size;
+			}
+		}
+		if (released != 0) {
+			MarkVaStale(); // KFD queues may hold translations of the freed buffers
+		}
+		return released;
+	}
+
+	bool DemoteBlockUnlocked(uint64_t index) {
+		Block&         block = m_blocks[index];
+		const uint64_t start = index * BlockSize();
+		uint8_t*       from  = MapBoWhole(block.bo, block.size);
+		if (from == nullptr) {
+			return false;
+		}
+		// The data into the memfd, page by page, skipping pages that are all zeros (they stay holes: no RAM, no swap).
+		constexpr uint64_t kPage = 4096;
+		bool               ok    = true;
+		for (uint64_t at = 0; at < block.size && ok; at += kPage) {
+			const uint64_t* q    = reinterpret_cast<const uint64_t*>(from + at);
+			bool            zero = true;
+			for (uint64_t i = 0; i < kPage / 8 && zero; i++) {
+				zero = q[i] == 0;
+			}
+			if (!zero) {
+				ok = ::pwrite(m_mem_fd, from + at, kPage, static_cast<off_t>(start + at)) == static_cast<ssize_t>(kPage);
+			}
+		}
+		::munmap(from, block.size);
+		if (!ok) {
+			std::fprintf(stderr, "GemBacking: demoting block %llu: memfd write failed: %s\n", static_cast<unsigned long long>(index),
+			             std::strerror(errno));
+			::fallocate(m_mem_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start), static_cast<off_t>(block.size));
+			return false;
+		}
+		// Every CPU mapping onto the memfd (the alias slot, then each view piece with its protection), every GPU
+		// mapping onto the dummy.
+		auto remap = [&](uint64_t addr, uint64_t len, int prot, uint64_t inner) {
+			void* const dst = reinterpret_cast<void*>(addr);
+			if (::mmap(dst, len, prot, MAP_SHARED | MAP_FIXED, m_mem_fd, static_cast<off_t>(start + inner)) != dst) {
+				ok = false;
+			}
+		};
+		ForEachUncarvedUnlocked(start, block.size, [&](uint64_t s, uint64_t len) {
+			remap(reinterpret_cast<uint64_t>(m_alias + s), len, PROT_READ | PROT_WRITE, s - start);
+		});
+		std::optional<HostMaps>                       maps;
+		std::vector<std::array<uint64_t, 3>>          gpu; // (guest address, offset in block, length)
+		for (const auto& [view_addr, view]: m_views) {
+			const uint64_t vs = std::max(view.offset, start);
+			const uint64_t ve = std::min(view.offset + view.size, start + block.size);
+			if (vs >= ve) {
+				continue;
+			}
+			const uint64_t guest = view_addr + (vs - view.offset);
+			if (!maps) {
+				maps.emplace();
+			}
+			maps->ForEach(guest, ve - vs, [&](uint64_t s, uint64_t len, int prot) { remap(s, len, prot, vs - start + (s - guest)); });
+			if (view.gpu) {
+				gpu.push_back({guest, vs - start, ve - vs});
+			}
+		}
+		if (!ok) {
+			// A CPU view could not be moved: the regular promotion maps every view and the GPU onto a fresh copy of
+			// the (intact) buffer, so the block stays consistent and resident.
+			std::fprintf(stderr, "GemBacking: demoting block %llu: a view could not be remapped (%s); kept resident\n",
+			             static_cast<unsigned long long>(index), std::strerror(errno));
+			PromoteBlockUnlocked(index);
+			return false;
+		}
+		for (const auto& g: gpu) {
+			VaReplace(m_dummy.handle, g[0], g[1], start + g[1], g[2]);
+		}
+		RetireBoUnlocked(block.bo);
+		block.bo       = Bo {};
+		block.resident = false;
+		m_resident_bytes -= block.size;
+		::madvise(m_alias + start, block.size, MADV_PAGEOUT);
+		return true;
+	}
+
 	// The presenter reads display buffers through dma-bufs, which an always-valid buffer cannot export:
 	// the always-valid blocks behind guest addresses [vaddr, vaddr + size) move to ordinary buffers
 	// (data copied, views and GPU mappings moved over), listed in every submission again. `idle` runs

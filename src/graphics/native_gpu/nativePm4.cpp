@@ -1,4 +1,5 @@
 #include "graphics/native_gpu/nativePm4.h"
+#include "graphics/native_gpu/nativeUpscaler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -6055,7 +6056,25 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 				cp.num_instances = log_instances;
 				stats.num_instances++;
 				break;
-			case IT_DISPATCH_DIRECT:
+			case IT_DISPATCH_DIRECT: {
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+				// Experimental native upscaler (nativeUpscaler.h): Yotei's verified FSR3 accumulate dispatch.
+				NativeUpscaler::Boundary upscaler;
+				bool                     upscaler_hit = false;
+				if (labels && !cond.active && NativeUpscaler::Enabled()) {
+					uint32_t left = 0;
+					// The title's other FSR3 jobs of an invocation HLX replaces: dropped (a packet that emits nothing
+					// ends the direct run before it). Their register writes stay; the boundary below still comes.
+					if (!m_compute_ring && NativeUpscaler::SkipFsr3Dispatch(source_va(static_cast<uint32_t>(dw), &left))) {
+						stats.dispatches++;
+						break;
+					}
+					upscaler_hit  = NativeUpscaler::TakeBoundary(
+                        source_va(static_cast<uint32_t>(dw), &left),
+                        (static_cast<uint64_t>(reg(sh, 0x20Cu)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x20Du) & 0xffu) << 40u),
+                        m_compute_ring, &upscaler);
+				}
+#endif
 				log_draw(op, body_count >= 1 ? bptr[0] : 0, 0, true);
 				// KYTY_NATIVE_GPU_INSPECT_PS names a compute shader too: its user data, as for a draw.
 				if (const uint64_t cs = (static_cast<uint64_t>(reg(sh, 0x20Cu)) << 8u) |
@@ -6072,11 +6091,59 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 					body.insert(body.end(), dcb.begin() + dw, dcb.begin() + dw + size);
 					body[body.size() - size] |= 2u;
 				} else {
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+					if (upscaler_hit) {
+						if (!upscaler.skip_dispatch) {
+							body.insert(body.end(), dcb.begin() + dw, dcb.begin() + dw + size); // a copy: work follows it
+						}
+					} else
+#endif
 					pass_on(dw, size, body_before, segs_before, in_place);
 				}
 				stats.dispatches++;
 				collect_refs();
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+				if (upscaler_hit) {
+					// Drain the accumulate waves and make every producer's writes visible to the pack's image loads.
+					body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+					body.push_back((4u << 8u) | 7u); // CS_PARTIAL_FLUSH
+					emit_barrier_raw(true);
+					body.insert(body.end(), upscaler.before.begin(), upscaler.before.end());
+					body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+					body.push_back((4u << 8u) | 7u);
+					emit_barrier_raw(true); // GL2 written back: the staging is complete in memory at the EOP
+					const uint64_t stall_stamp = upscaler.gate != 0 ? NativeUpscaler::StallStampAddr(upscaler.id, 0) : 0;
+					if (stall_stamp != 0) {
+						EmitTimestampRelease(body, stall_stamp, m_compute_ring); // (diagnostic: the boundary's end)
+					}
+					TrackerPoint p;
+					p.kind = TrackerPoint::Kind::UpscalerBoundary;
+					p.addr = upscaler.id;
+					tracker_point(std::move(p));
+					flush_points();
+					// Host memory, never GPU-visible: the rest of the frame stays on the CPU and the ring stays free.
+					// (No gate: frame generation's guide copies alone, which only need the EOP above.)
+					if (upscaler.gate != 0) {
+						split_at_wait(WaitCond {upscaler.gate, upscaler.gate_ref, 0xffffffffull, 3, false, false});
+						if (stall_stamp != 0) {
+							EmitTimestampRelease(body, stall_stamp + 8u, m_compute_ring); // (diagnostic: the frame resumes)
+						}
+					}
+					if (!upscaler.after.empty()) {
+						body.insert(body.end(), upscaler.after.begin(), upscaler.after.end());
+						body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+						body.push_back((4u << 8u) | 7u);
+						emit_barrier_raw(true);
+					}
+					// The title's own values for every SH register the inserted dispatches wrote.
+					for (const uint32_t off: NativeUpscaler::kTouchedSh) {
+						const uint32_t* v = sh.Find(off);
+						EmitSet(body, IT_SET_SH_REG, off, PatchSh(off, v != nullptr ? *v : 0u), true);
+					}
+				}
+#endif
 				break;
+			}
 			case IT_ACQUIRE_MEM:
 				if (m_audit) {
 					AuditAcquire(r.sync, std::span<const uint32_t>(bptr, body_count));

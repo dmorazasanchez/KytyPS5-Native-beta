@@ -19,6 +19,7 @@
 #include "graphics/native_gpu/nativeShadow.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
+#include "graphics/native_gpu/nativeUpscaler.h"
 #include "graphics/presentation/renderDoc.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/directPresent.h"
@@ -1117,7 +1118,14 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		}
 
 		VblankBegin();
-		bool presented = m_flip_queue.Flip(0);
+		// Frame generation 2x: the real frame whose generated frame the previous tick showed comes first;
+		// a flip waiting meanwhile is shown at the next tick (so the title runs at half the refresh rate).
+		bool presented = m_presenter.PresentPendingFrame();
+		if (!presented) {
+			presented = m_flip_queue.Flip(0);
+			// Dynamic frame generation: a flip only queued its frame; this vblank's image is presented here.
+			presented = m_presenter.FrameGenTick() || presented;
+		}
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh() && OverlayFrameReady()) {
 			if (m_presenter.PresentLastFrame()) {
 				presented = true;
@@ -1566,6 +1574,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		}
 		const auto prepare_t0 = std::chrono::steady_clock::now();
 		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset);
+		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipBoundary(index));
 		Graphics::NativeGpu::ShadowFlipStats(
 		    std::chrono::duration<double>(std::chrono::steady_clock::now() - prepare_t0).count());
 		if (headset) {
@@ -1762,6 +1771,9 @@ bool FlipQueue::TakeEopFlip(uint32_t ctx, uint64_t& request_id) {
 			// between saw no EOP order yet and cleared it. With the order given, Flip leaves the label alone.
 			if (queue == &m_requests && request->index >= 0 && request->index < VIDEO_OUT_BUFFER_NUM_MAX) {
 				std::atomic_ref<uint64_t>(request->cfg->labels[request->index]).store(1, std::memory_order_release);
+				// Frame generation: this interrupt comes from the label tracker in GPU order, as the tracker's flip points do,
+				// so the last boundary before it is this flip's frame's (titles flip this way through libSceAgc's SetFlip).
+				NativeUpscaler::FgNoteFlip(request->index);
 			}
 			if (LogFlips()) {
 				std::fprintf(stderr, "flip [%.2f] %" PRIu64 ": end-of-pipe interrupt 0x%08" PRIx32 "\n", FlipLogMs(),

@@ -83,6 +83,8 @@ struct NativeDmabufPiece {
 	uint64_t len;
 };
 bool ShadowDmabufPieces(uint64_t vaddr, uint64_t size, std::vector<NativeDmabufPiece>& out);
+// A label a held piece waits on was written outside the tracker (host memory): look at held pieces now.
+void ShadowWakeHeld();
 
 // A video-out buffer registered with DCC: in native primary mode (KYTY_NATIVE_GPU_GEM and
 // KYTY_NATIVE_GPU_PRIMARY, unless KYTY_NATIVE_GPU_DISPLAY_DCC=1) the translator draws it without DCC,

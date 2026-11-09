@@ -1,6 +1,7 @@
 #include "graphics/presentation/gameMenu.h"
 
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/nativeUpscaler.h"
 #include "graphics/presentation/exitVideo.h"
 #include "loader/gamePatch.h"
 #include "graphics/presentation/performanceOverlay.h"
@@ -17,9 +18,10 @@ namespace Libs::Graphics {
 
 namespace {
 
-enum class Page : uint8_t { Closed, Main, Cheats, ConfirmExit };
+enum class Page : uint8_t { Closed, Main, Cheats, Upscaling, ConfirmExit };
 
-enum MainItem : int { ItemResume, ItemMonitoring, ItemCheats, ItemExit, MainItemCount };
+enum MainItem : int { ItemResume, ItemMonitoring, ItemUpscaling, ItemCheats, ItemExit, MainItemCount };
+enum UpscalingItem : int { UpItemUpscaler, UpItemFrameGen, UpItemBack, UpItemCount }; // resolution/preset: per-game settings, before launch
 enum ConfirmItem : int { ConfirmExitGame, ConfirmCancel, ConfirmItemCount };
 
 struct MenuState {
@@ -52,6 +54,9 @@ void SetState(MenuState state) {
 }
 
 int ItemCount(Page page) {
+    if (page == Page::Upscaling) {
+        return NativeUpscaler::TitleSupported() ? static_cast<int>(UpItemCount) : 1; // Back only
+    }
     if (page == Page::Cheats) {
         return static_cast<int>(Loader::GamePatch::ListCheats().size()) + 1; // Back
     }
@@ -84,6 +89,27 @@ void StepMonitoring(int step) {
 	g_revision.fetch_add(1, std::memory_order_acq_rel);
 }
 
+// Upscaling page: the upscaler switches live (next frame). Resolution and preset come from the game's settings in
+// the launcher, because the title sizes its frame for them.
+void StepUpscaling(int item, int step) {
+	using namespace NativeUpscaler;
+	if (item == UpItemFrameGen) { // Off <-> FSR 3 (2x), live: the next flip
+		// (Dynamic uses the same memory as 2x and is not offered: development only, KYTY_FRAMEGEN=fsr3_dynamic.)
+		const int n = FrameGen() == FrameGenMode::Fsr3Dynamic ? static_cast<int>(FrameGenMode::Count) : static_cast<int>(FrameGenMode::Fsr3Dynamic);
+		SetFrameGen(static_cast<FrameGenMode>((static_cast<int>(FrameGen()) + (step < 0 ? n - 1 : 1)) % n));
+		g_revision.fetch_add(1, std::memory_order_acq_rel);
+		return;
+	}
+	if (item != UpItemUpscaler) {
+		return;
+	}
+	auto s     = CurrentSettings();
+	const int n = static_cast<int>(UpscalerKind::Count); // Game FSR3 -> HLX FSR 4 -> HLX DLSS (Model E) -> ...
+	s.upscaler  = static_cast<UpscalerKind>((static_cast<int>(s.upscaler) + (step < 0 ? n - 1 : 1)) % n);
+	ApplySettings(s);
+	g_revision.fetch_add(1, std::memory_order_acq_rel);
+}
+
 void LeaveGame() {
 	SDL_Event quit {};
 	quit.type = SDL_EVENT_QUIT;
@@ -95,6 +121,7 @@ void Activate(const MenuState& state) {
 		switch (state.selected) {
 			case ItemResume: SetState({}); break;
 			case ItemMonitoring: StepMonitoring(1); break;
+			case ItemUpscaling: SetState({Page::Upscaling, 0}); break;
             case ItemCheats:
                 SetCheatMessage("");
                 SetState({Page::Cheats, 0});
@@ -104,6 +131,14 @@ void Activate(const MenuState& state) {
 		}
 		return;
 	}
+    if (state.page == Page::Upscaling) {
+        if (!NativeUpscaler::TitleSupported() || state.selected == UpItemBack) {
+            SetState({Page::Main, ItemUpscaling});
+        } else {
+            StepUpscaling(state.selected, 1);
+        }
+        return;
+    }
     if (state.page == Page::Cheats) {
         const auto cheats = Loader::GamePatch::ListCheats();
         if (state.selected < static_cast<int>(cheats.size())) {
@@ -124,6 +159,10 @@ void Activate(const MenuState& state) {
 }
 
 void Back(const MenuState& state) {
+    if (state.page == Page::Upscaling) {
+        SetState({Page::Main, ItemUpscaling});
+        return;
+    }
     if (state.page == Page::Cheats) {
         SetState({Page::Main, ItemCheats});
     } else {
@@ -143,6 +182,8 @@ bool Navigate(int up_down, int left_right, bool accept, bool back) {
 		SetState(state);
 	} else if (left_right != 0 && state.page == Page::Main && state.selected == ItemMonitoring) {
 		StepMonitoring(left_right);
+	} else if (left_right != 0 && state.page == Page::Upscaling && NativeUpscaler::TitleSupported()) {
+		StepUpscaling(state.selected, left_right);
 	} else if (accept) {
 		Activate(state);
 	} else if (back) {
@@ -183,6 +224,17 @@ bool ProcessGameMenuInput(const SDL_Event& event) {
 	}
 	if (event.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
 		return GameMenuOpen();
+	}
+	// A key the menu took on its way down is the menu's on its way up too: the game must not see a lone release
+	// (Yotei opened its own pause menu from the Enter/arrow releases of a menu session).
+	static std::array<bool, SDL_SCANCODE_COUNT> taken {};
+	if (event.type == SDL_EVENT_KEY_UP && event.key.scancode < SDL_SCANCODE_COUNT && taken[event.key.scancode]) {
+		taken[event.key.scancode] = false;
+		return true;
+	}
+	if (event.type == SDL_EVENT_KEY_DOWN && event.key.scancode < SDL_SCANCODE_COUNT &&
+	    (event.key.key == SDLK_F10 || GameMenuOpen())) {
+		taken[event.key.scancode] = true;
 	}
 	if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F10) {
 		if (!event.key.repeat) {
@@ -263,8 +315,71 @@ void DrawGameMenu(vk::Extent2D extent) {
 	if (state.page == Page::Main) {
 		row(ItemResume, "Resume", nullptr);
 		row(ItemMonitoring, "Monitoring", MonitoringLabel(PerformanceOverlayMode()));
+		row(ItemUpscaling, "Upscaling", NativeUpscaler::TitleSupported()
+		                                    ? NativeUpscaler::UpscalerName(NativeUpscaler::CurrentSettings().upscaler)
+		                                    : "n/a");
         row(ItemCheats, "Cheats / Patches", nullptr);
 		row(ItemExit, "Exit game", nullptr);
+    } else if (state.page == Page::Upscaling) {
+        using namespace NativeUpscaler;
+        ImGui::TextUnformatted("Upscaling");
+        if (!TitleSupported()) {
+            ImGui::PushFont(nullptr, 16.0f * scale);
+            ImGui::TextWrapped("%s", Status().c_str());
+            ImGui::PopFont();
+            row(0, "Back", nullptr);
+        } else {
+            const auto s      = CurrentSettings();
+            const int  level  = s.preset == Preset::Custom ? s.level : PresetLevel(s.preset);
+            const auto size   = LevelSize(level);
+            const auto output = OutputSize();
+            const auto target = TargetSize();
+            char       ratio[160];
+            const std::string up = std::string("< ") + UpscalerName(s.upscaler) + " >";
+            row(UpItemUpscaler, "Upscaler", up.c_str());
+            const std::string fg = std::string("< ") + FrameGenName(FrameGen()) + " >";
+            row(UpItemFrameGen, "Frame generation", fg.c_str());
+            row(UpItemBack, "Back", nullptr);
+            ImGui::Separator();
+            ImGui::PushFont(nullptr, 16.0f * scale);
+            if (level >= 0 && size.first != 0 && target.first != 0 && target.first != output.first) {
+                std::snprintf(ratio, sizeof(ratio), "%s: %u x %u -> %u x %u (%.2fx), scaled to %u x %u", PresetName(s.preset), size.first,
+                              size.second, target.first, target.second, static_cast<double>(target.first) / size.first, output.first,
+                              output.second);
+            } else if (level >= 0 && size.first != 0) {
+                std::snprintf(ratio, sizeof(ratio), "%s: %u x %u -> %u x %u (%.2fx)", PresetName(s.preset), size.first, size.second,
+                              output.first, output.second, static_cast<double>(output.first) / size.first);
+            } else {
+                std::snprintf(ratio, sizeof(ratio), "%s: resolution chosen by the game -> %u x %u", PresetName(s.preset), output.first,
+                              output.second);
+            }
+            ImGui::TextUnformatted(ratio);
+            ImGui::TextWrapped("%s", Status().c_str());
+            if (const std::string fg_status = FrameGenStatus(); !fg_status.empty()) {
+                ImGui::TextWrapped("%s", fg_status.c_str());
+            } else if (FrameGen() == FrameGenMode::Fsr3) {
+                ImGui::TextWrapped("Frame generation: one interpolated frame between real frames (FSR 3.1); the game runs at half the refresh rate.");
+            } else if (FrameGen() == FrameGenMode::Fsr3Dynamic) {
+                ImGui::TextWrapped("Frame generation: interpolated frames (FSR 3.1) only for the refreshes the game misses; none at 60 FPS.");
+            }
+            if (level > 15) {
+                ImGui::TextWrapped("Below 1920 x 1080 (the game's lowest built-in level) is experimental.");
+            }
+            if (s.output_h != 0 && s.upscaler == UpscalerKind::Game) {
+                ImGui::TextWrapped("Output %dp applies to HLX; the game's FSR3 always outputs at the game's resolution.", s.output_h);
+            } else if (s.output_h != 0 && level < 0) {
+                ImGui::TextWrapped("Output %dp needs a fixed preset; with the game's dynamic resolution HLX outputs at the game's resolution.",
+                                   s.output_h);
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.28f, 1.0f)); // amber
+            ImGui::TextWrapped("Warning: changing the upscaler during play restarts it and can crash the system on the BC-250 when memory is "
+                               "tight (with frame generation in particular). Choose it in the launcher before starting the game.");
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Left / Right: switch upscaler (next frame). Preset and output resolution: game settings in the launcher.");
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+        }
     } else if (state.page == Page::Cheats) {
         ImGui::TextUnformatted("Cheats / Patches");
         const auto cheats = Loader::GamePatch::ListCheats();

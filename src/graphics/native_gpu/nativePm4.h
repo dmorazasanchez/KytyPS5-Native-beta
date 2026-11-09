@@ -602,6 +602,7 @@ struct TrackerPoint {
 		FlipMark,  // WaitUntilSafeForRendering's padding, whose wait Kyty's CP does from the CPU tail: note which EOP
 		           // flips have released by the time the GPU gets here, for the padding copy whose token is `ctx`
 		           // (SetWaitFlipMarks)
+		UpscalerBoundary, // experimental native upscaler: the inserted pack has run (NativeUpscaler::GpuComplete, `addr` = id)
 	};
 	Kind                  kind     = Kind::End;
 	uint32_t              dw       = 0; // the point's 32-bit sequence value in the IB (patched before submission)

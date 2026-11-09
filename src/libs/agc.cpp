@@ -1,5 +1,6 @@
 #include "libs/agc.h"
 #include "libs/agcDiff.h"
+#include "graphics/native_gpu/nativeUpscaler.h"
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
@@ -2001,6 +2002,10 @@ uint32_t* KYTY_SYSV_ABI AgcCbDispatch(CommandBuffer* buf, uint32_t thread_group_
 	if (buf == nullptr) {
 		return nullptr;
 	}
+
+	NativeUpscaler::CaptureHost(reinterpret_cast<uint64_t>(__builtin_return_address(0)),
+	                            reinterpret_cast<uint64_t>(__builtin_frame_address(0)),
+	                            reinterpret_cast<uint64_t>(buf->cursor_up));
 
 	auto* cmd = buf->AllocateDW(5);
 

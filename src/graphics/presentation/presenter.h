@@ -38,7 +38,15 @@ public:
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
 	void                         Present(Frame& frame);
 	void                         Present(std::span<const Layer> layers);
+	// VideoOut PresentThread, each tick before flips: frame generation 2x leaves a flip's real frame for the
+	// tick after the one that showed its generated frame. True when it was presented now.
+	[[nodiscard]] bool           PresentPendingFrame();
+	// VideoOut PresentThread, each tick after its flips: dynamic frame generation presents what this vblank shows (a
+	// queued real frame or one generated between two). True when it presented.
+	[[nodiscard]] bool           FrameGenTick();
 	void                         ClearLayer(int bus);
+	// Frame generation: the native upscaler boundary whose guides belong to `frame` (NativeUpscaler::FgFlipBoundary).
+	void                         SetFrameGuides(Frame& frame, uint64_t boundary);
 	void                         Discard(Frame& frame);
 
 	// Direct scan-out flips (window/directPresent.h). Null when unavailable: KYTY_DIRECT_PRESENT not 1,
