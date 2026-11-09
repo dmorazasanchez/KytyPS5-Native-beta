@@ -1722,7 +1722,8 @@ const char* PresetName(Preset p) {
 	}
 }
 const char* UpscalerName(UpscalerKind u) {
-	return u == UpscalerKind::Hlx ? "HLX FSR 4" : u == UpscalerKind::HlxDlss ? "HLX DLSS (Model E)" : "Game FSR3";
+	// (The title's own upscaler: its FSR3, or its TAA for a taa_paths_v1 profile.)
+	return u == UpscalerKind::Hlx ? "HLX FSR 4" : u == UpscalerKind::HlxDlss ? "HLX DLSS (Model E)" : Prof().taa ? "Game TAA" : "Game FSR3";
 }
 namespace {
 // The output height presets are relative to: HLX's chosen output resolution, else the title's (4K) output.
@@ -2152,9 +2153,9 @@ std::string Status() {
 	char line[256];
 	if (o != 0 && o != ((3840u << 16u) | 2160u) && g_level.load() >= 0) {
 		std::snprintf(line, sizeof(line), "%s, %s. Render presets need 3840x2160 output: the game chooses the resolution.",
-		              GetMode() == Mode::Hlx ? hlx : "Game FSR3", size);
+		              GetMode() == Mode::Hlx ? hlx : UpscalerName(UpscalerKind::Game), size);
 	} else if (GetMode() != Mode::Hlx) {
-		std::snprintf(line, sizeof(line), "Game FSR3, %s", size);
+		std::snprintf(line, sizeof(line), "%s, %s", UpscalerName(UpscalerKind::Game), size);
 	} else if (!g_hlx_healthy.load()) {
 		std::snprintf(line, sizeof(line), "%s stopped after an error; game FSR3 is running (%s)", hlx, size);
 	} else if (g_server_state.load() == -1 || g_dev.state.load() == -1) {
