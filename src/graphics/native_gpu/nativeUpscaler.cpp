@@ -2128,7 +2128,7 @@ std::string Status() {
 			return g_check_reason;
 		}();
 		if (g_fail_written.load()) {
-			std::snprintf(line, sizeof(line), "Game FSR3 kept: the live inputs did not match the profile (%s).", why.c_str());
+			std::snprintf(line, sizeof(line), "%s kept: the live inputs did not match the profile (%s).", UpscalerName(UpscalerKind::Game), why.c_str());
 		} else {
 			std::snprintf(line, sizeof(line), "%sChecking the game's upscaler inputs (%d/%d)...", g_auto.load() ? "Automatic: " : "",
 			              std::min(g_verified_n.load(), kVerifyNeeded), kVerifyNeeded);
