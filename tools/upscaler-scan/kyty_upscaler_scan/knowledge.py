@@ -30,3 +30,32 @@ def resolution_controller(sha256: str):
     """Known resolution controller for this exact executable, else None."""
     entry = RESOLUTION_CONTROLLERS.get(sha256)
     return dict(entry) if entry else None
+
+
+# ---- TAA discoveries: a title's own TAA pass, as the discovery pipeline found it (pass capture, descriptor paths from
+# the shader's instructions, temporal ping-pong, jitter, conventions from a probe). Keyed by executable SHA-256; shipped
+# ones live next to this file (discovered/), the user's own under the profile store (discovered/).
+import json as _json
+import os as _os
+from pathlib import Path as _Path
+
+
+def _discovery_dirs():
+    yield _Path(__file__).resolve().parent / 'discovered'
+    env = _os.environ.get('KYTY_UPSCALER_PROFILE_DIR') or _os.environ.get('KYTYPS5_UPSCALER_PROFILE_DIR')
+    root = _Path(env).expanduser() if env else _Path.home() / '.config' / 'KytyPS5-Native' / 'upscaler-profiles'
+    yield root / 'discovered'
+
+
+def taa_discovery(sha256: str):
+    """The TAA discovery for this exact executable, else None."""
+    for d in _discovery_dirs():
+        p = d / f'{sha256}.json'
+        try:
+            data = _json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if data.get('sha256') == sha256 and data.get('adapter') == 'taa_paths_v1' and isinstance(data.get('taa'), dict):
+            data['_file'] = str(p)
+            return data
+    return None

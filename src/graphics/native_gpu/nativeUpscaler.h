@@ -98,6 +98,10 @@ enum class FrameGenMode : int { Off = 0, Fsr3 = 1, Fsr3Dynamic = 2, Count };
 // set from its flip until the generator has read it: 4 recycled a set still waiting for its flip every other frame.
 constexpr int kFgSets = 6;
 FrameGenMode FrameGen();
+// FidelityFX frame interpolation context flags for the title's depth: bit 0 inverted, bit 1 infinite far plane
+// (FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED / _INFINITE). Yotei: inverted, finite; a TAA profile: from its HLX
+// depth flags (Demon's Souls: inverted, infinite).
+uint32_t     FgDepthFlags();
 void         SetFrameGen(FrameGenMode m);
 const char*  FrameGenName(FrameGenMode m);
 // Why frame generation is off (not enough free memory to start, or it stopped itself), else empty.

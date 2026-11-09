@@ -1844,7 +1844,18 @@ void CheckTitle() {
 }
 } // namespace
 
+// A TAA profile names the exact executable (by hash, chosen by the launcher) and its pass is only seen once the game
+// renders 3D: its menu entries and settings are there from the start; nothing is replaced before the pass is found
+// and the runtime self-check has passed.
+void EnsureTaaSettings() {
+	static std::once_flag once;
+	std::call_once(once, [] { LoadSettings(); });
+}
 bool TitleSupported() {
+	if (Prof().taa) {
+		EnsureTaaSettings();
+		return true;
+	}
 	return g_title_state.load(std::memory_order_acquire) == 1;
 }
 
@@ -2590,7 +2601,7 @@ void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t u
 	std::call_once(found, [&] {
 		LogJson("{\"event\":\"fingerprint\",\"ok\":1,\"profile\":\"%s\",\"taa_shader\":\"0x%016llx\"}", P.title.c_str(),
 		        static_cast<unsigned long long>(P.taa_hash));
-		LoadSettings();
+		EnsureTaaSettings();
 		g_title_state = 1;
 	});
 	Snapshot                   s {};
@@ -2973,6 +2984,13 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 FrameGenMode FrameGen() {
 	return static_cast<FrameGenMode>(g_framegen.load());
 }
+uint32_t FgDepthFlags() {
+	const TitleProfile& P = Prof();
+	if (P.taa && P.taa_hlx_flags != 0) { // FSR upscale flags: 0x8 depth inverted, 0x10 depth infinite
+		return ((P.taa_hlx_flags & 0x8u) != 0 ? 1u : 0u) | ((P.taa_hlx_flags & 0x10u) != 0 ? 2u : 0u);
+	}
+	return 1u; // Yotei's FSR3 context flags 0x49: inverted, finite (YOTEI_FSR3_HOST_INTERFACE_FINDINGS.md)
+}
 void SetFrameGen(FrameGenMode m) {
 	if (!TitleSupported()) return;
 	g_auto_framegen.store(0); // (the menu's choice replaces a pending automatic start)
@@ -3193,6 +3211,9 @@ std::string Status() {
 void GpuComplete(uint64_t, bool) {}
 FrameGenMode FrameGen() {
 	return FrameGenMode::Off;
+}
+uint32_t FgDepthFlags() {
+	return 1u;
 }
 void        SetFrameGen(FrameGenMode) {}
 bool        FgMemoryTick() {

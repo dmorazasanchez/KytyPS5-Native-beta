@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import ffx, game, knowledge, psml, selfelf, x86
 
-SCANNER_VERSION = '1.0.0'
+SCANNER_VERSION = '1.1.0'
 SCHEMA = 'kyty-upscaler-profile'
 SCHEMA_VERSION = 2
 MODULE_BASE = 0x900000000      # Kyty maps the game's main executable here (RuntimeLinker: SYSTEM_RESERVED+0x100000000)
@@ -26,6 +26,7 @@ TRINITY_ATTRIBUTE3_BIT = 1 << 22   # param.json attribute3: the title has a PS5 
 # Runtime adapters this emulator build implements (src/graphics/native_gpu/nativeUpscaler.cpp).
 IMPLEMENTED_ADAPTERS = {
     'ffx_agc_fsr3upscaler_v1': {'upscalers': ['hlx_fsr4', 'hlx_dlss_e'], 'frame_generation': ['fsr3']},
+    'taa_paths_v1': {'upscalers': ['hlx_fsr4', 'hlx_dlss_e'], 'frame_generation': ['fsr3']},
 }
 
 
@@ -115,6 +116,16 @@ def build_profile(g: game.GameInput) -> dict:
     prof['psml'] = {k: v for k, v in p.items() if k != 'routes'}
     prof['fidelityfx'] = {k: v for k, v in f.items() if k != 'routes'}
     routes = p['routes'] + f['routes']
+    # The title's own TAA, when the discovery pipeline has found it for this executable (base PS5 mode).
+    disc = knowledge.taa_discovery(g.sha256)
+    if disc is not None:
+        verified = bool(disc.get('provenance', {}).get('runtime_bindings_verified'))
+        routes.append({'family': 'taa', 'adapter': 'taa_paths_v1', 'mode_requirement': 'base',
+                       'runtime_hook': 'translator_dispatch',
+                       'state': 'runtime_bindings_verified' if verified else 'discovered',
+                       'taa': disc['taa'], 'discovery': disc.get('_file'), 'provenance': disc.get('provenance', {}),
+                       'checks': [{'check': 'TAA pass discovered for this executable', 'ok': True,
+                                   'detail': disc.get('provenance', {}).get('method', '')}]})
     for r in routes:
         r['id'] = _route_id(r)
         impl = IMPLEMENTED_ADAPTERS.get(r.get('adapter') or '')
@@ -122,11 +133,20 @@ def build_profile(g: game.GameInput) -> dict:
     prof['routes'] = routes
     drs = knowledge.resolution_controller(g.sha256)
     selected = None
+    # Base-PS5 routes only (the PS5 Pro PSSR route cannot run on this hardware): FidelityFX first, then the title's TAA.
     for r in routes:
         if r['emulator_support'] == 'implemented' and r['state'] == 'static_layout_verified' and r['mode_requirement'] == 'base':
             selected = r
             break
-    if selected is not None:
+    if selected is None:
+        for r in routes:
+            if r['emulator_support'] == 'implemented' and r.get('family') == 'taa' and r['mode_requirement'] == 'base':
+                selected = r
+                break
+    if selected is not None and selected.get('family') == 'taa':
+        prof['selected_route'] = selected['id']
+        prof['runtime'] = {'adapter': 'taa_paths_v1', 'taa': selected['taa'], 'sha256': g.sha256}
+    elif selected is not None:
         prof['selected_route'] = selected['id']
         prof['runtime'] = _runtime_block(selected, g.sha256, drs)
     else:
@@ -140,9 +160,11 @@ def _capabilities(prof, selected, drs=None):
     routes = prof.get('routes', [])
     if selected is not None:
         impl = IMPLEMENTED_ADAPTERS[selected['adapter']]
-        up = {'state': 'available', 'route': selected['id'], 'upscalers': impl['upscalers'],
-              'reason': 'interface found and verified in the executable; Kyty re-checks the live bindings before '
-                        'replacing the game\'s upscaler'}
+        why_up = ('the game\'s own TAA pass was found for this executable; Kyty re-checks its live inputs before replacing it'
+                  if selected.get('family') == 'taa' else
+                  'interface found and verified in the executable; Kyty re-checks the live bindings before replacing the '
+                  'game\'s upscaler')
+        up = {'state': 'available', 'route': selected['id'], 'upscalers': impl['upscalers'], 'reason': why_up}
         fg = {'state': 'available', 'modes': impl['frame_generation'],
               'reason': 'depth and motion vectors come from the same verified boundary'}
         presets = ({'state': 'available', 'reason': 'render-resolution controller known for this executable'}
@@ -154,8 +176,8 @@ def _capabilities(prof, selected, drs=None):
     if why is None and pending:
         r = pending[0]
         if r['family'] == 'psml':
-            why = (f"PSSR interface ({r['abi']}) identified and checked in the game's code; it runs only in PS5 Pro "
-                   f"mode and the PSML-to-HLX boundary is not implemented in this build")
+            why = (f"only a PS5 Pro (PSSR) route was found ({r['abi']}); its base-PS5 TAA has not been discovered yet "
+                   f"(the TAA discovery run finds it)")
         elif r.get('adapter') and r['state'] != 'static_layout_verified':
             failed = [c['check'] for c in r.get('checks', []) if not c['ok']]
             why = f"FidelityFX {r.get('component')} found, adapter checks failed: {'; '.join(failed)}"

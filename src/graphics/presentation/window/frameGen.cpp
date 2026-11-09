@@ -346,8 +346,10 @@ struct Generator::Impl {
 		flow.resolution       = {flow_color.info.extent.width, flow_color.info.extent.height};
 		KYTY_FG_CHECK(ffxOpticalflowContextCreate(&optical_flow, &flow));
 		FfxFrameInterpolationContextDescription description {};
-		// Yotei's FSR3 context flags 0x49: inverted, finite depth (YOTEI_FSR3_HOST_INTERFACE_FINDINGS.md).
-		description.flags                             = FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED;
+		// The title's depth convention, from its profile (Yotei: inverted, finite; Demon's Souls: inverted, infinite).
+		const uint32_t depth_flags = NativeUpscaler::FgDepthFlags();
+		description.flags = ((depth_flags & 1u) != 0 ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED : 0u) |
+		                    ((depth_flags & 2u) != 0 ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INFINITE : 0u);
 		description.maxRenderSize                     = {cap.width, cap.height};
 		description.displaySize                       = {real.extent.width, real.extent.height};
 		description.backBufferFormat                  = ffxGetSurfaceFormatVK(static_cast<VkFormat>(real.format));
