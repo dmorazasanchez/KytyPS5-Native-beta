@@ -14,9 +14,19 @@ records retain original developer build paths and incremental link history;
 they are provenance records, not a claim that an old object-cache path exists
 on a recipient's machine. Runtime packages contain no references to those paths.
 
-The current runtime binaries were packaged byte for byte, not rebuilt during
-packaging. Legacy Fast rollback binaries retain their original behavior. The
-launcher defaults to the current Upstream backend in this beta.
+Beta 1 packaged the retained runtime binaries byte for byte. In Beta 2,
+`packaging/relink-beta2-backends.py` reproduces the original hashes for five
+unique backends, then relinks the same objects against the libm from Ubuntu
+24.04. The original Fast backend uses `packaging/rebind-legacy-libm.py` to
+bind seven imports to their existing older versions. The emulator resolves
+libm from the host at runtime. `packaging/check-native-abi.py` enforces the
+glibc 2.38 baseline. The launcher defaults to the Upstream backend.
+
+The bundled session runtime comes from Debian 13 packages. Build the image with
+`packaging/Dockerfile.minimal`, then run `packaging/export-session-runtime.sh`
+in the image with a writable `/output` mount. Place the exported directory at
+`downloads/session-runtime` for packaging. The installed files include the
+package versions and copyright notices. [Debian labwc source package](https://packages.debian.org/source/trixie/labwc)
 
 Portable upstream runtime URLs and verified hashes are in runtime-downloads.json.
 Proton/Wine source: https://github.com/CachyOS/proton-cachyos (packaged version

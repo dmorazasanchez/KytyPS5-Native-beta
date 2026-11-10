@@ -4,6 +4,8 @@ import argparse, datetime, json, os, pwd, re, shlex, shutil, subprocess
 from pathlib import Path
 
 SYSTEM = Path('/var/lib/kyty-beta-system')
+SESSION_TOOLS = SYSTEM / 'session-runtime'
+SESSION_LOADER = '/lib64/ld-linux-x86-64.so.2'
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('action', choices=['--install-helper','--install-gaming-mode','--uninstall-system']) if False else None
 p.add_argument('--install-helper', action='store_true')
@@ -22,6 +24,26 @@ if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_.-]*\$?', account.pw_name): p.error('U
 launcher = (a.launcher or source / 'AppRun').resolve()
 if any(c in str(launcher) for c in '\n\r%'): p.error('Launcher path cannot contain newlines or percent signs')
 
+def select_session_tools():
+    labwc = Path('/usr/bin/labwc')
+    if os.access(labwc, os.X_OK):
+        try:
+            help_text = subprocess.check_output([str(labwc), '--help'], text=True, stderr=subprocess.STDOUT, timeout=5)
+            if '--session' not in help_text:
+                labwc = SESSION_TOOLS / 'labwc'
+        except (OSError, subprocess.SubprocessError):
+            labwc = SESSION_TOOLS / 'labwc'
+    else:
+        labwc = SESSION_TOOLS / 'labwc'
+    xdotool = Path('/usr/bin/xdotool')
+    if not os.access(xdotool, os.X_OK):
+        xdotool = SESSION_TOOLS / 'xdotool'
+    return {'labwc': labwc, 'xdotool': xdotool}
+
+session_tools = select_session_tools() if a.install_gaming_mode else {}
+bundled_tools = [name for name, path in session_tools.items() if path.parent == SESSION_TOOLS]
+session_payload = source / 'system/session-runtime'
+
 def generated_files():
     files = {}
     def add(path, content, mode=0o644): files[str(path)] = (content.encode() if isinstance(content,str) else content, mode)
@@ -29,12 +51,21 @@ def generated_files():
         add(SYSTEM / 'kyty-lodhw', (source / 'system/kyty-lodhw').read_bytes(), 0o755)
         add('/etc/systemd/system/kyty-lodhw.service', '[Unit]\nDescription=Kyty BC-250 GPU helper (beta)\nAfter=systemd-udev-settle.service\nWants=systemd-udev-settle.service\n[Service]\nType=simple\nExecStart=' + str(SYSTEM) + '/kyty-lodhw /run/kyty-lodhw.sock ' + str(account.pw_gid) + '\nRestart=on-failure\nRestartSec=2\n[Install]\nWantedBy=multi-user.target\n')
     if a.install_gaming_mode:
+        if bundled_tools:
+            for file in sorted(session_payload.rglob('*')):
+                if file.is_symlink():
+                    raise RuntimeError(f'Unexpected link in session runtime payload: {file.name}')
+                if file.is_file():
+                    add(SESSION_TOOLS / file.relative_to(session_payload), file.read_bytes(),
+                        0o755 if file.stat().st_mode & 0o111 else 0o644)
         original = source / 'system/session'
         home = account.pw_dir
         prefix = str(SYSTEM / 'session')
         for f in original.iterdir():
             if not f.is_file() or f.name in ('install-ram-audit.py','ps5-ram-audit','ps5-ram-compare','40-memory-audit.conf','org.bc250.ps5.minimal.policy','ps5-minimal.desktop','ps5-minimal-mode.desktop'): continue
             text = f.read_text()
+            for name, path in session_tools.items():
+                text = text.replace(f'/usr/bin/{name}', str(path))
             text = text.replace('/home/david/sharpemu-upscaling-20261108/run-kytyps5.sh', shlex.quote(str(launcher)))
             text = text.replace('/home/david/sharpemu-upscaling-20261108/artifacts/kytyps5/KytyPS5', str(SYSTEM / 'launch-user'))
             text = text.replace('/usr/local/libexec/', prefix + '/').replace('/usr/local/bin/ps5-minimal-start', prefix + '/ps5-minimal-start')
@@ -72,12 +103,22 @@ def generated_files():
 def host_preflight():
     if not launcher.is_file() or not os.access(launcher, os.X_OK): raise RuntimeError('Keep the launcher/AppImage in a permanent executable location: ' + str(launcher))
     if a.install_gaming_mode:
-        required = ['labwc','Xwayland','xdotool','dbus-run-session','pipewire','pipewire-pulse','wireplumber','pkexec','systemctl','loginctl']
+        required = ['Xwayland','dbus-run-session','pipewire','pipewire-pulse','wireplumber','pkexec','systemctl','loginctl']
         missing = [n for n in required if not shutil.which(n)]
         if missing: raise RuntimeError('Minimal session dependencies missing: ' + ', '.join(missing) + '. Use the desktop/Steam Game Mode launch path until these are installed.')
         version = subprocess.check_output(['systemctl','--version'], text=True).split()[1]
         if int(version) < 256: raise RuntimeError('Minimal session needs systemd >= 256 for user-light PAM sessions')
         if not Path('/etc/pam.d/system-local-login').exists() and not Path('/etc/pam.d/system-auth').exists(): raise RuntimeError('No supported PAM login account policy found')
+        for name in bundled_tools:
+            tool = session_payload / 'bin' / name
+            if not tool.is_file() or not (session_payload / name).is_file():
+                raise RuntimeError(f'Bundled session runtime is incomplete: {name}')
+            try:
+                subprocess.check_output(
+                    [SESSION_LOADER, '--library-path', str(session_payload / 'lib'), '--list', str(tool)],
+                    stderr=subprocess.STDOUT, text=True, timeout=10)
+            except subprocess.CalledProcessError as error:
+                raise RuntimeError(f'Bundled {name} cannot load on this host: {error.output.strip()}') from error
 
 def main():
     if not any((a.install_helper,a.install_gaming_mode,a.uninstall_system)): p.error('Choose an action')
@@ -129,6 +170,8 @@ def main():
         subprocess.run(['systemctl','enable','kyty-lodhw.service'], check=True)
         subprocess.run(['systemctl','restart','kyty-lodhw.service'], check=True)
     if a.install_gaming_mode:
+        if bundled_tools:
+            print('Installed bundled session tools: ' + ', '.join(bundled_tools))
         print('Minimal mode installed but not started. It closes your login/apps and stops background services while active.')
         print('Enter from a local desktop: pkexec ' + str(SYSTEM / 'session/ps5-minimal-control') + ' enter')
         print('Recovery: Ctrl+Alt+F4, log in, then sudo ' + str(SYSTEM / 'session/ps5-minimal-control') + ' desktop')

@@ -30,7 +30,7 @@ def report():
     for p in Path('/sys/class/drm').glob('card[0-9]*/device/mem_info_vram_total'):
         try: data['notes'].append('VRAM: ' + str(int(p.read_text()) // (1024*1024)) + ' MiB (512 MiB recommended for large games)')
         except OSError: pass
-    data['notes'].append('Standalone minimal mode needs systemd >= 256, labwc, Xwayland, xdotool, PipeWire/Pulse, WirePlumber, PAM and polkit. Steam Game Mode can run the AppImage as a non-Steam application.')
+    data['notes'].append('Standalone minimal mode includes labwc and xdotool fallbacks. The host provides systemd >= 256, Xwayland, PipeWire/Pulse, WirePlumber, PAM and polkit. Steam Game Mode can run the AppImage as a non-Steam application.')
     data['ok'] = all(c['ok'] for c in data['checks'])
     return data
 

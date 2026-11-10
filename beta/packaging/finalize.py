@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib, json, shutil, subprocess
 base = Path(__file__).resolve().parent.parent
 root = base/'work/KytyPS5-Beta.AppDir'
+subprocess.run(["python3", str(Path(__file__).with_name("check-native-abi.py")), str(root)], check=True)
 dist = base/'dist'; dist.mkdir(exist_ok=True)
 checks = json.loads((base/'validation/package-checks.json').read_text())
 ui = json.loads((base/'validation/ui/result.json').read_text())

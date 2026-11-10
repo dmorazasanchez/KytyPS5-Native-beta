@@ -3,8 +3,9 @@ from pathlib import Path
 import os, stat, sys, tarfile, zipfile
 base = Path(__file__).resolve().parent.parent
 kind = sys.argv[1]
-name = 'KytyPS5-BC250-2026.11.10-beta1-x86_64'
 root = base/'work/KytyPS5-Beta.AppDir'
+version = (root/'VERSION').read_text().strip()
+name = f'KytyPS5-BC250-{version}-x86_64'
 dist = base/'dist'; dist.mkdir(exist_ok=True)
 if kind == 'tar':
     with tarfile.open(dist/(name+'.tar.gz'),'w:gz',compresslevel=6) as t: t.add(root,arcname=name)
@@ -22,7 +23,8 @@ elif kind == 'source':
         if any(part in ('artifacts','bin','obj','__pycache__','.git','.packages') for part in Path(info.name).parts): return None
         if info.name.endswith(('.pyc','.o','.dll','.exe','.so')): return None
         return info
-    with tarfile.open(dist/'KytyPS5-BC250-2026.11.10-beta1-source.tar.gz','w:gz',compresslevel=6) as t:
-        t.add(base/'work/source',arcname='KytyPS5-BC250-2026.11.10-beta1-source',filter=keep)
+    source_name = f'KytyPS5-BC250-{version}-source'
+    with tarfile.open(dist/(source_name+'.tar.gz'),'w:gz',compresslevel=6) as t:
+        t.add(base/'work/source',arcname=source_name,filter=keep)
 else: raise SystemExit('Choose tar, zip or source')
 print('Created '+kind+' archive',flush=True)

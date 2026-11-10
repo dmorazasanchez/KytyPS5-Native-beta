@@ -2,7 +2,9 @@
 
 This private Linux beta pairs the controller-first KytyPS5 launcher with the native AMD BC-250 emulator. It includes per-game upscaling and frame generation, extracted-game and `.zar` support, and the optional standalone PS5 Minimal session. [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)
 
-**Beta 1** targets CachyOS, Bazzite, and SteamOS. Accept your GitHub invitation and sign in to download the AppImage, portable ZIP or tar.gz, source archive, and checksums. [Beta 1 downloads](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1)
+**Beta 2** targets CachyOS, Bazzite, and SteamOS. Accept your GitHub invitation and sign in to download the AppImage, portable ZIP or tar.gz, source archive, and checksums. [Beta 2 downloads](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta2)
+
+Beta 2 fixes the native backend startup error on hosts without glibc 2.43/2.44 and adds bundled labwc and xdotool for PS5 Minimal Mode.
 
 [First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
 
@@ -17,11 +19,11 @@ This private Linux beta pairs the controller-first KytyPS5 launcher with the nat
 Download the AppImage in **Desktop Mode** and keep it in the folder you plan to launch it from. Open a terminal in that folder and run the following commands as your normal user. The GPU helper installer asks for sudo when it needs it.
 
 ```sh
-chmod +x KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-helper
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --doctor
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-desktop
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage
+chmod +x KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-helper
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --doctor
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-desktop
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
 ```
 
 `--install-desktop` adds **KytyPS5 Beta** to the application menu. The GPU helper runs as `kyty-lodhw.service` and uses `/var/lib/kyty-beta-system` and `/etc/systemd/system`. Installation works with the read-only system root on SteamOS and Bazzite.
@@ -29,6 +31,8 @@ chmod +x KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage
 For the ZIP or tar.gz, extract the package, open a terminal in the extracted folder, and use `./AppRun` in place of the AppImage filename in every command below. If the AppImage reports a FUSE error, use the tar.gz or run the AppImage with `--appimage-extract` and use `./squashfs-root/AppRun`.
 
 Open **Add games** and select the folder containing your extracted games or `.zar` archives. An extracted game folder contains `eboot.bin`. Use your own game files.
+
+**Updating from Beta 1.** Point any Steam shortcut at the Beta 2 AppImage. Run `--install-desktop` again to update the application menu shortcut. If you use PS5 Minimal Mode, rerun `--install-gaming-mode` from Desktop Mode to point the session at Beta 2.
 
 ## Upscaling and frame generation
 
@@ -51,7 +55,7 @@ Set **Native frame generation** on the same page. **FSR 3 · 2×** inserts a fra
 2. Return to the folder containing KytyPS5 and import the prepared HelixSR folder. Replace the example path with the directory containing `HLX-FSR4/` and `HelixSR/`.
 
 ```sh
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --import-upscalers \
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --import-upscalers \
   --helix-release "/path/to/HelixSR-3.2.0"
 ```
 
@@ -64,7 +68,7 @@ Open **Game settings → Frame generation** for the separate Lossless Scaling mo
 For **Ghost of Yōtei (PPSA26344)** in Upstream mode, **Adaptive 60 FPS** uses **MAKO Renderer 4.6.0** and your own **Lossless Scaling 3.2.2** `Lossless.dll`. Extract `MAKO-Renderer-v4.6.0-linux.tar.xz` and point the import at the folder containing `lib/libmako-render.so`. [MAKO Renderer 4.6.0 download](https://github.com/eugeniosegala/MAKO/releases/tag/render-v4.6.0)
 
 ```sh
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --import-upscalers \
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --import-upscalers \
   --lossless-dll "/path/to/your/Lossless.dll" \
   --mako "/path/to/extracted/MAKO-Renderer"
 ```
@@ -83,12 +87,12 @@ Select **Adaptive 60 FPS** and relaunch the game. **Fixed 2×** and Adaptive on 
 
 ## PS5 Minimal Mode
 
-PS5 Minimal Mode starts Kyty in a dedicated labwc session with fewer background services. It is optional. The host must provide **labwc, Xwayland, xdotool, dbus-run-session, PipeWire, PipeWire Pulse, WirePlumber, polkit, and systemd 256 or newer**. The installer checks the dependencies before writing system files. If they are unavailable, you can run the beta from Desktop Mode or [Steam Gaming Mode](#steam-gaming-mode).
+PS5 Minimal Mode starts Kyty in a dedicated labwc session with fewer background services. It is optional. The installer uses the host's labwc when it supports `--session` and its xdotool when available. Beta 2 includes labwc 0.8.3 and xdotool fallbacks under `/var/lib/kyty-beta-system/session-runtime`. The host provides **Xwayland, dbus-run-session, PipeWire, PipeWire Pulse, WirePlumber, polkit, PAM, and systemd 256 or newer**. The installer checks the dependencies before writing system files. If they are unavailable, you can run the beta from Desktop Mode or [Steam Gaming Mode](#steam-gaming-mode).
 
 After completing the first-run setup, run the installer from **Desktop Mode**.
 
 ```sh
-./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-gaming-mode
+./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-gaming-mode
 ```
 
 For an extracted archive, run `./AppRun --install-gaming-mode`. The installer adds **KytyPS5 Beta Minimal Mode** to the application menu. You can check the installed session before entering it.
@@ -119,11 +123,12 @@ In Desktop Mode, run the first-run steps through `--install-desktop`. Add **Kyty
 
 ## Troubleshooting
 
+- If Steam shows only `ELFCLASS32` overlay warnings, run the Beta 2 AppImage in a Desktop Mode terminal and capture the full output. The overlay warnings alone give no backend failure.
 - Run the AppImage with `--doctor` to check the BC-250, render node, KFD, and GPU helper. If the helper is missing, rerun `--install-helper` and check `systemctl status kyty-lodhw.service`.
 - For an HLX launch error, confirm the Helix import completed or select **Game default**. For a Lossless Scaling error, set **Frame generation → Off** and retry.
 - Run with `--verify` for launcher and controller checks. Run with `--collect-report` to save diagnostics locally. Include your distro and version, kernel, game and version, upscaler and frame generation selections, and steps to reproduce.
 
-Beta 1 passed **113 launcher checks** and **111 interface checks**. Bazzite and SteamOS gameplay, live display handoff into PS5 Minimal Mode, and physical controller behavior in that session still need tester validation. The latest recovery integration also needs a gameplay retest. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1)
+All ten Beta 2 backend routes reached `--help` on glibc 2.39, and the launcher passed **113 checks** there. A headless test opened and focused the Kyty window using bundled labwc, Xwayland, and bundled xdotool. Gameplay on Bazzite and SteamOS and the physical display switch into PS5 Minimal Mode still need tester validation. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta2)
 
 ## Data and removal
 

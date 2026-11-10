@@ -49,7 +49,11 @@ HELP
         install_stage="$(mktemp -d "${TMPDIR:-/tmp}/kyty-beta-install.XXXXXXXX")"
         trap 'rm -rf -- "$install_stage"' EXIT
         cp "$bundle_root/install-system.py" "$install_stage/"
-        cp -a "$bundle_root/system" "$install_stage/system"
+        mkdir "$install_stage/system"
+        case "$action" in
+            --install-helper) cp "$bundle_root/system/kyty-lodhw" "$install_stage/system/" ;;
+            --install-gaming-mode) cp -a "$bundle_root/system/session" "$bundle_root/system/session-runtime" "$install_stage/system/" ;;
+        esac
         sudo -- /usr/bin/python3 "$install_stage/install-system.py" "$action" --payload "$install_stage" --launcher "$launcher_path" --user "$(id -un)" "$@"
         if [[ "$action" == --install-gaming-mode ]]; then "$bundle_root/bin/python3" "$bundle_root/install-desktop.py" --gaming-mode; fi
         exit $? ;;
