@@ -1,12 +1,149 @@
 # KytyPS5-Native BC-250 beta
 
-This private beta is based on [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native).
-It includes the BC-250 launcher, the latest native backends from this beta, and an optional minimal gaming session.
+This private Linux beta pairs the controller-first KytyPS5 launcher with the native AMD BC-250 emulator. It includes per-game upscaling and frame generation, extracted-game and `.zar` support, and the optional standalone PS5 Minimal session. [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)
 
-Download the AppImage or a portable archive from [the beta release](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1).
-See the [tester setup guide](beta/README.md) and [source notes](beta/SOURCE.md).
+**Beta 1** targets CachyOS, Bazzite, and SteamOS. Accept your GitHub invitation and sign in to download the AppImage, portable ZIP or tar.gz, source archive, and checksums. [Beta 1 downloads](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1)
 
----
+[First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
+
+## System requirements
+
+- An x86-64 AMD BC-250 system with glibc 2.38 or newer, a working amdgpu/Mesa stack, X11 or Xwayland, and user access to the DRM render node and `/dev/kfd`.
+- For larger games, the upstream baseline is 512 MiB of reserved VRAM and a 14 GiB GTT limit (`ttm.pages_limit=3670016`). The recommended amdgpu settings are `sched_policy=2 vm_update_mode=0 cwsr_enable=0`. Run `--doctor` to see your current values. [Upstream GPU configuration](tools/bc250-amdgpu/README.md)
+- The package bundles the launcher runtimes and Wine 11.0 for the optional Helix helper. PS5 Minimal Mode has its own host dependencies listed below.
+
+## First run
+
+Download the AppImage in **Desktop Mode** and keep it in the folder you plan to launch it from. Open a terminal in that folder and run the following commands as your normal user. The GPU helper installer asks for sudo when it needs it.
+
+```sh
+chmod +x KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-helper
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --doctor
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-desktop
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage
+```
+
+`--install-desktop` adds **KytyPS5 Beta** to the application menu. The GPU helper runs as `kyty-lodhw.service` and uses `/var/lib/kyty-beta-system` and `/etc/systemd/system`. Installation works with the read-only system root on SteamOS and Bazzite.
+
+For the ZIP or tar.gz, extract the package, open a terminal in the extracted folder, and use `./AppRun` in place of the AppImage filename in every command below. If the AppImage reports a FUSE error, use the tar.gz or run the AppImage with `--appimage-extract` and use `./squashfs-root/AppRun`.
+
+Open **Add games** and select the folder containing your extracted games or `.zar` archives. An extracted game folder contains `eboot.bin`. Use your own game files.
+
+## Upscaling and frame generation
+
+Select a game in the library and open **Game settings → Upscaling**. Fresh beta profiles use the **Upstream** renderer, **Game default** upscaling, and frame generation **Off**. Keep the renderer on **Upstream** for the upscaler routes below. The launcher scans each game for a supported interface and shows the result on this settings page.
+
+| Upscaler | What it uses | Setup |
+| --- | --- | --- |
+| **Game default** | The game's own reconstruction, such as TAA or FSR where the title provides it | Bundled |
+| **Automatic** | HLX / FSR 4 on compatible titles after Kyty verifies the game's inputs. Other titles keep their own reconstruction | Import HelixSR before using this on an HLX-compatible title |
+| **HLX / FSR 4** | The Helix FSR 4 path on supported titles | Import HelixSR |
+| **HLX / DLSS (Model E)** | The Helix DLSS Model E path on supported titles | Import HelixSR |
+
+Use **Render resolution preset** to adjust the internal resolution on a supported route. **Native / DLAA** renders at output resolution. **Quality**, **Balanced**, and **Performance** lower the internal resolution in that order. **Upscaled output resolution** sets the target separately. On the 4K HLX path, the 1800p and 1440p options reduce the reconstruction target and scale the result to the game's 4K output. Astro Bot's manual presets require the matching title ID, version, and executable hash.
+
+Set **Native frame generation** on the same page. **FSR 3 · 2×** inserts a frame on supported games. **Automatic** enables it below 50 real FPS and the runtime can pause generation when shared memory is low. The matching manual Astro Bot profile uses fixed 2× when frame generation is enabled. You can adjust native frame generation during play under **PS button → Upscaling**. Set the upscaler and resolution preset before launching, since switching upscalers during play can crash the BC-250 when memory is tight.
+
+### Install HelixSR for HLX
+
+1. Download and extract `HelixSR-3.2.0.zip`, then run `./helixsr-setup.sh` from its extracted folder and follow the vendor's Linux setup prompts. The setup prepares the files needed for the Model E route. [HelixSR 3.2.0 release and setup instructions](https://github.com/lonewolf0622/HelixSR/releases/tag/v3.2.0)
+2. Return to the folder containing KytyPS5 and import the prepared HelixSR folder. Replace the example path with the directory containing `HLX-FSR4/` and `HelixSR/`.
+
+```sh
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --import-upscalers \
+  --helix-release "/path/to/HelixSR-3.2.0"
+```
+
+3. Choose **HLX / FSR 4**, **HLX / DLSS (Model E)**, or **Automatic** in the game's Upscaling settings and launch the game. You can use **Game default** and native FSR 3 frame generation while you set up Helix.
+
+### Optional Lossless Scaling frame generation
+
+Open **Game settings → Frame generation** for the separate Lossless Scaling modes. Kyty switches native FSR 3 frame generation off for a launch using Lossless Scaling.
+
+For **Ghost of Yōtei (PPSA26344)** in Upstream mode, **Adaptive 60 FPS** uses **MAKO Renderer 4.6.0** and your own **Lossless Scaling 3.2.2** `Lossless.dll`. Extract `MAKO-Renderer-v4.6.0-linux.tar.xz` and point the import at the folder containing `lib/libmako-render.so`. [MAKO Renderer 4.6.0 download](https://github.com/eugeniosegala/MAKO/releases/tag/render-v4.6.0)
+
+```sh
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --import-upscalers \
+  --lossless-dll "/path/to/your/Lossless.dll" \
+  --mako "/path/to/extracted/MAKO-Renderer"
+```
+
+Select **Adaptive 60 FPS** and relaunch the game. **Fixed 2×** and Adaptive on other titles use separate LSFG Vulkan layers and profiles from an existing LSFG setup. The launcher reports the missing file or layer when a selected mode is unavailable.
+
+<details>
+<summary>Paths for existing LSFG setups</summary>
+
+| Mode | Config file | Vulkan layer manifest | Profile name |
+| --- | --- | --- | --- |
+| Fixed 2× | `~/.config/lsfg-vk/kyty-bc250-2x-verified.toml` | `~/.local/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json` | `Kyty BC-250 verified 2x` |
+| Adaptive on the experimental LSFG route | `~/.config/lsfg-vk/kyty-bc250-adaptive.toml` | `~/.local/opt/lsfg-vk-experimental/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_experimental_frame_generation.json` | `Kyty BC-250 Adaptive 60 FPS` |
+
+</details>
+
+## PS5 Minimal Mode
+
+PS5 Minimal Mode starts Kyty in a dedicated labwc session with fewer background services. It is optional. The host must provide **labwc, Xwayland, xdotool, dbus-run-session, PipeWire, PipeWire Pulse, WirePlumber, polkit, and systemd 256 or newer**. The installer checks the dependencies before writing system files. If they are unavailable, you can run the beta from Desktop Mode or [Steam Gaming Mode](#steam-gaming-mode).
+
+After completing the first-run setup, run the installer from **Desktop Mode**.
+
+```sh
+./KytyPS5-BC250-2026.11.10-beta1-x86_64.AppImage --install-gaming-mode
+```
+
+For an extracted archive, run `./AppRun --install-gaming-mode`. The installer adds **KytyPS5 Beta Minimal Mode** to the application menu. You can check the installed session before entering it.
+
+```sh
+pkexec /var/lib/kyty-beta-system/session/ps5-minimal-control check
+```
+
+**Save your work before switching.** Entering Minimal Mode closes the configured user's current applications and sessions and temporarily stops background services, including networking. Open **KytyPS5 Beta Minimal Mode** from the application menu or run the following command from a local desktop.
+
+```sh
+pkexec /var/lib/kyty-beta-system/session/ps5-minimal-control enter
+```
+
+To leave, open **Control centre → Return to Desktop Mode** or press **Super+Shift+E**. On hosts with Valve's session switcher, this requests KDE. Other hosts return to the configured display-manager session or login screen. If the session is stuck, press **Ctrl+Alt+F4**, log in, and run this recovery command.
+
+```sh
+sudo /var/lib/kyty-beta-system/session/ps5-minimal-control desktop
+```
+
+## Steam Gaming Mode
+
+In Desktop Mode, run the first-run steps through `--install-desktop`. Add **KytyPS5 Beta** to Steam as a non-Steam game, leave **Force the use of a specific Steam Play compatibility tool** unchecked for this Linux launcher, then open it in Steam Gaming Mode.
+
+## Cheats and recovery
+
+**Game settings → Cheats** shows matching patches for Ghost of Yōtei **02.002.000** and Demon's Souls **01.007.000**. Cheats start disabled and require the matching title ID and version. The Demon's Souls Scream assertion recovery is a separate opt-in per-game workaround.
+
+## Troubleshooting
+
+- Run the AppImage with `--doctor` to check the BC-250, render node, KFD, and GPU helper. If the helper is missing, rerun `--install-helper` and check `systemctl status kyty-lodhw.service`.
+- For an HLX launch error, confirm the Helix import completed or select **Game default**. For a Lossless Scaling error, set **Frame generation → Off** and retry.
+- Run with `--verify` for launcher and controller checks. Run with `--collect-report` to save diagnostics locally. Include your distro and version, kernel, game and version, upscaler and frame generation selections, and steps to reproduce.
+
+Beta 1 passed **113 launcher checks** and **111 interface checks**. Bazzite and SteamOS gameplay, live display handoff into PS5 Minimal Mode, and physical controller behavior in that session still need tester validation. The latest recovery integration also needs a gameplay retest. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1)
+
+## Data and removal
+
+| Data | Default location |
+| --- | --- |
+| Settings | `~/.config/KytyPS5-Beta` |
+| Saves | `~/.local/share/KytyPS5-Beta/runtime/_SaveData` |
+| Shader caches and trophies | Adjacent directories under `~/.local/share/KytyPS5-Beta/runtime` |
+| Upscaler files and logs | `~/.local/share/KytyPS5-Beta/upscalers` |
+
+The launcher respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. You can also set `KYTYPS5_CONFIG_ROOT`, `KYTYPS5_PROFILE_ROOT`, and `KYTYPS5_DATA_ROOT` explicitly.
+
+After returning to Desktop Mode, run the AppImage with `--uninstall-system` to remove the helper and minimal-session system files. Run with `--install-desktop --remove` to remove the shortcuts. The uninstall keeps beta saves and settings.
+
+## Source and credits
+
+The emulator retains Superkeka’s Git history. The release includes the launcher and packaging source snapshot and third-party notices. [Beta source notes](beta/SOURCE.md) · [GPL-2.0 license](LICENSE) · [Original Kyty MIT notice](LICENSES/Kyty-MIT.txt)
+
+<details>
+<summary>Original upstream README and build instructions</summary>
 
 # KytyPS5-Native
 
@@ -126,3 +263,5 @@ Third-party components keep their own licenses.
 - [InoriRus/Kyty](https://github.com/InoriRus/Kyty): the original Kyty
 - [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4): PS4 memory, GPU aliasing, cache
   coherency and AVPlayer reference
+
+</details>
