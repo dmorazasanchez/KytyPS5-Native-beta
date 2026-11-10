@@ -6,6 +6,7 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/hostException.h"
+#include "loader/demonsScreamRecovery.h"
 #include "common/logging/log.h"
 #include "common/platform/sysDbg.h"
 #include "common/profiler.h"
@@ -667,6 +668,9 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+	if (DemonsScreamRecovery::TryRecoverDemonsScreamAssert(info)) return true;
+#endif
 
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {
@@ -1893,6 +1897,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		LOGF("tls_handler_size       = 0x%016" PRIx64 "\n", tls_handler_size);
 	}
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__x86_64__)
+	DemonsScreamRecovery::ConfigureFromEnvironment();
+#endif
 	if (!Common::HostException::InstallHandler(KytyExceptionHandler)) {
 		EXIT("Failed to install the required vectored exception handler\n");
 	}
