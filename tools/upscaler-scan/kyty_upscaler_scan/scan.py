@@ -170,6 +170,10 @@ def _capabilities(prof, selected, drs=None):
         presets = ({'state': 'available', 'reason': 'render-resolution controller known for this executable'}
                    if drs else {'state': 'dynamic_only',
                                 'reason': "the game's own dynamic resolution is kept (controller not mapped)"})
+        startup = selected.get('taa', {}).get('startup_render_presets')
+        if startup and startup.get('kind') == 'mode_render_pair_v1':
+            presets = {'state': 'available', 'application': 'startup', 'modes': list(startup['presets']),
+                       'reason': 'render presets apply at the next game launch; output stays at 4K'}
         return {'upscaler': up, 'frame_generation': fg, 'render_presets': presets}
     why = prof.get('error')
     pending = [r for r in routes if r['state'] in ('static_layout_verified', 'static_partial', 'candidate')]

@@ -118,7 +118,9 @@ void computeInpainting(FfxInt32x2 iPxPos)
         const FfxFloat32x3 fCurrentInterpolationSource = LoadCurrentBackbuffer(iPxPos).rgb;
         const FfxFloat32x3 fPresentColor               = LoadPresentBackbuffer(iPxPos).rgb;
 
-        if (any(FFX_GREATER_THAN(abs(fCurrentInterpolationSource - fPresentColor), FfxFloat32x3(0.0, 0.0, 0.0))))
+        // kyty: a HUD-less frame Kyty rebuilds from the title's own composite can differ from the presented one by a
+        // rounding step (10-bit): only larger differences are UI (in a dark scene one step is a large ratio).
+        if (any(FFX_GREATER_THAN(abs(fCurrentInterpolationSource - fPresentColor), FfxFloat32x3(0.0015, 0.0015, 0.0015))))
         {
             const FfxFloat32 fStaticFactor = CalculateStaticContentFactor(RawRGBToLinear(fCurrentInterpolationSource), RawRGBToLinear(fPresentColor));
 

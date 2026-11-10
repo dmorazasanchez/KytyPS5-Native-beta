@@ -2,6 +2,7 @@
 # Observe-only pass capture (KYTY_PASS_CAPTURE) for finding a title's TAA pass. Private saves; production untouched.
 # usage: run-capture.sh <demons|astro|yotei> [seconds] [extra kyty args...]
 #   START/EVERY/WINDOWS/FRAMES: capture windows (defaults 45 s, 20 s, 4, 6 flips)
+#   PATHS=auto: descriptor paths computed from window 0's shaders and used from window 1 on (one launch)
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")" && pwd)
 which=${1:?game}; shift
@@ -24,6 +25,21 @@ export KYTY_NATIVE_GPU_FLIP_STATS=1
 export KYTY_PASS_CAPTURE="$run" KYTY_PASS_CAPTURE_START=${START:-45} KYTY_PASS_CAPTURE_EVERY=${EVERY:-20}
 export KYTY_PASS_CAPTURE_WINDOWS=${WINDOWS:-4} KYTY_PASS_CAPTURE_FRAMES=${FRAMES:-6}
 if [[ -n ${PASS:-} ]]; then export $PASS; fi
+# PATHS=auto: one launch for both capture steps. Window 0 collects the shaders; as soon as it is written their
+# descriptor paths (isa_paths.py, from each shader's own instructions) go to $run/paths.txt, which the emulator
+# re-reads as each later window opens, so those windows dump the tables and constant buffers on those paths.
+if [[ ${PATHS:-} == auto ]]; then
+  export KYTY_PASS_CAPTURE_PATHS="$run/paths.txt"
+  tools="$(cd -- "$root/../../tools/upscaler-scan" && pwd)"
+  ( for _ in $(seq 1 600); do
+      if grep -q '^\[pass capture\] window 0 written' "$run/emulator.log" 2>/dev/null; then
+        python3 -I "$tools/isa_paths.py" --capture-paths "$run/paths.tmp" "$run"/shader-*.bin >> "$run/paths.log" 2>&1 &&
+          mv -f "$run/paths.tmp" "$run/paths.txt" && echo "$(date +%T) paths written" >> "$run/paths.log"
+        break
+      fi
+      sleep 1
+    done ) &
+fi
 cd "$root/runtime"
 args=(--game "$game" --present-mode Fifo --vblank-frequency 60 --gpu 0
   --shader-optimization-type Performance --console-language 1 --user-name Kyty --user-id 1000 --keyboard-player 0

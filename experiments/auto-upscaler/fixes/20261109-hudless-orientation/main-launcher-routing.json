@@ -1,0 +1,43 @@
+{
+  "demons": [
+    {
+      "upscaler": "game",
+      "framegen": "fsr3",
+      "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+      "native_framegen": "fsr3"
+    },
+    {
+      "upscaler": "hlx_fsr4",
+      "framegen": "fsr3",
+      "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+      "native_framegen": "fsr3"
+    },
+    {
+      "upscaler": "hlx_dlss_e",
+      "framegen": "fsr3",
+      "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+      "native_framegen": "fsr3"
+    },
+    {
+      "upscaler": "hlx_fsr4",
+      "framegen": "auto",
+      "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+      "native_framegen": "auto"
+    },
+    {
+      "upscaler": "hlx_fsr4",
+      "framegen": "off",
+      "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+      "native_framegen": "off"
+    },
+    {
+      "upscaler": "game",
+      "framegen": "off",
+      "executable": "/home/david/kyty-published-upstream-b4496cc-20261103/release/kyty_emulator_b4496cc_screamguard_14fc2fc",
+      "native_framegen": "off"
+    }
+  ],
+  "yotei_executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_auto_upscaler",
+  "launcher_checks": 113,
+  "dashboard_native_fg_summary_verified": true
+}

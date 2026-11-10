@@ -70,6 +70,11 @@ public:
 	// Drops the history: the next frame starts over (a pause, a skipped frame, a switch).
 	void Reset();
 
+	// Diagnostic (KYTY_FRAMEGEN_DUMP): after a Record that returned true, copies `real`, `output` and the guides to
+	// host memory when a dump is due. True: wait for the submission, then DumpWrite.
+	[[nodiscard]] bool DumpRecord(vk::CommandBuffer command, const Target& real, const Target& output);
+	void               DumpWrite();
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;

@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "peak_child_rss_mib": 471.2265625,
+  "build_output": "compiled src/graphics/native_gpu/nativeUpscaler.cpp\nlinked /home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_fg_no_gpu_threshold 36b51e038378435c3df7912cc6ca2d6837aa04612101d2a2d739d82c6600c860\n"
+}

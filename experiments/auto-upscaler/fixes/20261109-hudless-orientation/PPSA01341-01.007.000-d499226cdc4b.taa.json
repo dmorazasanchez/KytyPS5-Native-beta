@@ -1,0 +1,98 @@
+{
+ "schema": "kyty-upscaler-profile",
+ "schema_version": 2,
+ "note": "Hand-assembled from the pass capture, ISA analysis and a gameplay probe (2026-11-09); the automated pipeline will generate this.",
+ "game": {
+  "title_id": "PPSA01341",
+  "version": "01.007.000",
+  "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5"
+ },
+ "capabilities": {
+  "upscaler": {
+   "state": "available"
+  },
+  "frame_generation": {
+   "state": "available"
+  },
+  "render_presets": {
+   "state": "dynamic_only"
+  }
+ },
+ "runtime": {
+  "adapter": "taa_paths_v1",
+  "taa": {
+   "shader_hash": "95523d71c04a6522",
+   "color": [
+    0,
+    8,
+    112
+   ],
+   "depth": [
+    0,
+    0,
+    2432
+   ],
+   "motion": [
+    0,
+    8,
+    176
+   ],
+   "output": [
+    0,
+    8,
+    256
+   ],
+   "jitter": {
+    "path": [
+     0,
+     0,
+     448
+    ],
+    "units": "uv",
+    "sign": [
+     1,
+     1
+    ]
+   },
+   "motion_vectors": "uv_previous_minus_current",
+   "formats": {
+    "color": 71,
+    "depth": 22,
+    "motion": 29,
+    "output": 71
+   },
+   "camera": {
+    "near": 0.1,
+    "far": 10000.0,
+    "fov": 1.0
+   },
+   "render_size": [
+    0,
+    8,
+    48
+   ],
+   "output_size": [
+    0,
+    8,
+    64
+   ],
+   "output_scale": {
+    "path": [
+     0,
+     8,
+     240
+    ],
+    "buffer_offset": 0,
+    "meaning": "the TAA multiplies colour by this exposure before writing"
+   },
+   "hlx_flags": 121,
+   "evidence": {
+    "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+    "motion_vectors": "history uv = (pixel+0.5)/size - mv (ISA): UV units, current minus previous",
+    "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+    "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+    "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified"
+   }
+  }
+ }
+}

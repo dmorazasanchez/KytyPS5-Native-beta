@@ -1560,6 +1560,7 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
 	const FrameGen::Target source {real.image.image, real.image.format, extent, real.image.usage, real.fg_boundary};
 	Frame*                 generated = nullptr;
 	bool                   shown     = false;
+	bool                   dumping   = false;
 	if (fg->Begin(command.Handle(), source)) {
 		generated        = frames.Acquire(extent, real.image.format);
 		generated->hdr   = false;
@@ -1569,12 +1570,17 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
 		generated->Transit(command.Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
 		const FrameGen::Target output {generated->image.image, generated->image.format, extent, generated->image.usage};
 		shown = (generated->image.usage & vk::ImageUsageFlagBits::eStorage) && fg->Record(command.Handle(), source, output);
+		dumping = shown && fg->DumpRecord(command.Handle(), source, output); // (diagnostic, KYTY_FRAMEGEN_DUMP)
 		generated->image.state = {vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
 		                          vk::ImageLayout::eGeneral};
 	}
 	// (Submitted even when nothing was generated: the recorded transitions are the frames' tracked state.)
 	const uint64_t tick = present_scheduler.Submit();
 	fg->Submitted(tick);
+	if (dumping) {
+		present_scheduler.Wait(tick);
+		fg->DumpWrite();
+	}
 	if (generated != nullptr) {
 		generated->present_tick = tick;
 	}

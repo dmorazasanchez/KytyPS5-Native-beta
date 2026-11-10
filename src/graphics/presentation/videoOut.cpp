@@ -784,6 +784,7 @@ Graphics::ImageInfo BufferAttributeGroup::ImageInfo(const VideoOutBuffer& buffer
 	    (buffer.data_address & 65535u) != 0) {
 		EXIT("invalid video-out surface footprint or alignment\n");
 	}
+	NativeUpscaler::FgAddDisplayBuffer(buffer.data_address, info.data.size); // (frame generation: whose image a flip shows)
 	// Natively rendered display buffers hold plain pixels (ShadowDisplayWithoutDcc).
 	if (compression != Graphics::VideoOutCompression::Uncompressed &&
 	    Graphics::NativeGpu::ShadowDisplayWithoutDcc(buffer.data_address, info.data.size)) {
@@ -1575,7 +1576,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 		}
 		const auto prepare_t0 = std::chrono::steady_clock::now();
 		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset);
-		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipBoundary(index));
+		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipGuides(source_info.data.address, index));
 		Graphics::NativeGpu::ShadowFlipStats(
 		    std::chrono::duration<double>(std::chrono::steady_clock::now() - prepare_t0).count());
 		if (headset) {

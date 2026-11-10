@@ -3,6 +3,7 @@
 #include "graphics/native_gpu/gemBacking.h"
 #include "kernel/memory.h"
 
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -14,6 +15,7 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <algorithm>
 #include <set>
@@ -163,36 +165,50 @@ struct PathSet {
 	};
 	std::vector<Path> paths;
 };
-const std::map<uint64_t, PathSet>& Paths() {
-	static const std::map<uint64_t, PathSet> m = [] {
-		std::map<uint64_t, PathSet> out;
-		const char* f = std::getenv("KYTY_PASS_CAPTURE_PATHS");
-		if (f == nullptr) return out;
-		FILE* fh = std::fopen(f, "r");
-		if (fh == nullptr) return out;
-		char line[512];
-		while (std::fgets(line, sizeof(line), fh) != nullptr) {
-			char*              q    = line;
-			const uint64_t     hash = std::strtoull(q, &q, 16);
-			while (*q == ' ') q++;
-			PathSet::Path path;
-			path.image = std::strncmp(q, "image", 5) == 0;
-			while (*q != 0 && *q != ' ') q++;
-			path.ud = static_cast<uint32_t>(std::strtoul(q, &q, 0));
-			for (;;) {
-				char*         e = nullptr;
-				const unsigned long v = std::strtoul(q, &e, 0);
-				if (e == q) break;
-				path.offs.push_back(static_cast<uint32_t>(v));
-				q = e;
-			}
-			if (hash != 0 && !path.offs.empty()) out[hash].paths.push_back(path);
+// Re-read whenever the file changes (checked as each window opens): an automated discovery computes the paths from
+// the first window's shader code (isa_paths.py) while the title keeps running, so one launch serves both steps.
+using PathMap = std::map<uint64_t, PathSet>;
+std::mutex                     g_paths_mutex;
+std::shared_ptr<const PathMap> g_paths = std::make_shared<const PathMap>();
+struct timespec                g_paths_mtime {};
+std::shared_ptr<const PathMap> Paths() {
+	std::lock_guard lock(g_paths_mutex);
+	return g_paths;
+}
+void ReloadPaths() {
+	const char* f = std::getenv("KYTY_PASS_CAPTURE_PATHS");
+	struct stat st {};
+	if (f == nullptr || ::stat(f, &st) != 0) return;
+	{
+		std::lock_guard lock(g_paths_mutex);
+		if (st.st_mtim.tv_sec == g_paths_mtime.tv_sec && st.st_mtim.tv_nsec == g_paths_mtime.tv_nsec) return;
+	}
+	FILE* fh = std::fopen(f, "r");
+	if (fh == nullptr) return;
+	auto out = std::make_shared<PathMap>();
+	char line[512];
+	while (std::fgets(line, sizeof(line), fh) != nullptr) {
+		char*          q    = line;
+		const uint64_t hash = std::strtoull(q, &q, 16);
+		while (*q == ' ') q++;
+		PathSet::Path path;
+		path.image = std::strncmp(q, "image", 5) == 0;
+		while (*q != 0 && *q != ' ') q++;
+		path.ud = static_cast<uint32_t>(std::strtoul(q, &q, 0));
+		for (;;) {
+			char*               e = nullptr;
+			const unsigned long v = std::strtoul(q, &e, 0);
+			if (e == q) break;
+			path.offs.push_back(static_cast<uint32_t>(v));
+			q = e;
 		}
-		std::fclose(fh);
-		std::fprintf(stderr, "[pass capture] descriptor paths for %zu shaders\n", out.size());
-		return out;
-	}();
-	return m;
+		if (hash != 0 && !path.offs.empty()) (*out)[hash].paths.push_back(path);
+	}
+	std::fclose(fh);
+	std::fprintf(stderr, "[pass capture] descriptor paths for %zu shaders\n", out->size());
+	std::lock_guard lock(g_paths_mutex);
+	g_paths       = std::move(out);
+	g_paths_mtime = st.st_mtim;
 }
 
 std::string ResolvePaths(const Pass& p, const PathSet& set) {
@@ -403,7 +419,8 @@ void Write(FILE* f, const Item& it) {
 	// invocation's tables would swamp the capture; per-frame constants are what the analysis needs).
 	static std::map<std::pair<uint64_t, uint32_t>, uint32_t> per_frame;
 	if (per_frame.size() > 200000) per_frame.clear();
-	if (auto it = Paths().find(hash); it != Paths().end() && per_frame[{hash, (static_cast<uint32_t>(it_window) << 24u) | it_flipno}]++ < 2) {
+	const auto paths = Paths();
+	if (auto it = paths->find(hash); it != paths->end() && per_frame[{hash, (static_cast<uint32_t>(it_window) << 24u) | it_flipno}]++ < 2) {
 		line += ",\"tables\":[" + ResolvePaths(p, it->second) + "]";
 	}
 	line += "}\n";
@@ -487,6 +504,7 @@ bool Active() {
 		return !done;
 	}
 	if (g_next_window < c.windows && now >= g_t0 + c.start + g_next_window * c.every) {
+		ReloadPaths(); // (the paths file may have been written since the last window)
 		g_window  = g_next_window++;
 		g_opened  = now;
 		g_flip0   = g_flips.load(std::memory_order_relaxed);

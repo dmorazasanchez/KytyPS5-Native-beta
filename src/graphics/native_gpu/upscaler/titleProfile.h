@@ -65,8 +65,16 @@ struct TitleProfile {
 	bool     taa_jitter_uv = true;  // jitter values in UV units (pixels = value * render size)
 	float    taa_jitter_sign[2] {1.0f, 1.0f};
 	float    taa_mv_sign = -1.0f;   // motion vectors in UV units, current minus previous: FSR's scale is -render size
+	bool     taa_display_mirror_x = false; // final composite reverses X; FG's colour, guides and jitter use display coordinates
+	bool     taa_startup_presets = false; // the launcher applied the profile's render constants before title initialization
+	uint64_t taa_composite_hash = 0; // optional lower-resolution scene/UI composite to replace with HLX's output
+	Path     taa_composite_scene;
 	float    taa_near = 0.1f, taa_far = 10000.0f, taa_fov = 1.0f;
 	uint32_t taa_hlx_flags = 0;     // 0: Kyty's default
+	// Frame generation's HUD-less frame: the title's final composite (pixel shader hash) draws its UI over this scene
+	// (a T# path from the composite's user data); Kyty saves sRGB(scene) there (fg_hudless.s). 0: none.
+	uint64_t taa_hl_hash = 0;
+	Path     taa_hl_scene;
 };
 
 inline TitleProfile BuiltinYotei() {
@@ -167,6 +175,18 @@ inline TitleProfile LoadTaaBlock(TitleProfile p, const Json* r) {
 	const std::string mv = JStr(JGet(t, "motion_vectors"));
 	ok                   = ok && (mv == "uv_current_minus_previous" || mv == "uv_previous_minus_current");
 	p.taa_mv_sign        = mv == "uv_previous_minus_current" ? 1.0f : -1.0f;
+	if (const Json* mirror = JGet(t, "display_mirror_x"); mirror != nullptr && mirror->is_boolean()) {
+		p.taa_display_mirror_x = mirror->get<bool>();
+	}
+	const char* preset_plan = std::getenv("KYTY_RENDER_PRESET_PATCH");
+	p.taa_startup_presets = preset_plan != nullptr && *preset_plan != '\0' &&
+	                        JGet(t, "startup_render_presets") != nullptr;
+	if (const Json* composite = JGet(t, "upscale_composite"); composite != nullptr && JStr(JGet(composite, "kind")) == "scene_ui_bicubic_v1") {
+		const std::string hash = JStr(JGet(composite, "shader_hash"));
+		if (!hash.empty() && JPath(JGet(composite, "scene"), &p.taa_composite_scene)) {
+			p.taa_composite_hash = std::strtoull(hash.c_str(), nullptr, 16);
+		}
+	}
 	const Json* f        = JGet(t, "formats");
 	const char* names[4] = {"color", "depth", "motion", "output"};
 	for (int i = 0; i < 4; i++) {
@@ -179,6 +199,11 @@ inline TitleProfile LoadTaaBlock(TitleProfile p, const Json* r) {
 	p.taa_fov     = JFloat(JGet(c, "fov"), p.taa_fov);
 	uint64_t flags = 0;
 	if (JU64(JGet(t, "hlx_flags"), &flags)) p.taa_hlx_flags = static_cast<uint32_t>(flags);
+	// "hudless": {"composite_shader_hash": "0x..", "scene": [ud, off...], "encoding": "srgb_a2b10g10r10"} (optional)
+	if (const Json* hl = JGet(t, "hudless"); hl != nullptr && JStr(JGet(hl, "encoding")) == "srgb_a2b10g10r10") {
+		const std::string hh = JStr(JGet(hl, "composite_shader_hash"));
+		if (!hh.empty() && JPath(JGet(hl, "scene"), &p.taa_hl_scene)) p.taa_hl_hash = std::strtoull(hh.c_str(), nullptr, 16);
+	}
 	p.taa    = ok;
 	p.usable = ok;
 	if (!ok) p.why = "profile taa block incomplete";

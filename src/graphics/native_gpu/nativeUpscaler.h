@@ -76,6 +76,10 @@ bool TaaWanted();
 void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t ud_have);
 // From the translator at a DISPATCH_DIRECT: true when it is a verified accumulate boundary.
 bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary* out);
+// Startup TAA presets: upscale the post-processed scene at its final UI composite.
+// Returns a boundary to execute before that draw and a private replacement for PS user data 0:1.
+bool TakeComposite(uint64_t packet, uint64_t ps, const uint32_t* ud, uint32_t ud_have,
+                   Boundary* out, uint64_t* replacement_ud);
 // From the translator at every DISPATCH_DIRECT: true for the title's prepare_inputs, prepare_reactivity and
 // luma_instability dispatches of an invocation HLX replaces (KYTY_NATIVE_UPSCALER_SKIP_FSR3=1, hlx mode).
 bool SkipFsr3Dispatch(uint64_t packet);
@@ -126,7 +130,19 @@ struct FgFrame {
 	uint32_t output_w = 0, output_h = 0;
 	float    jitter[2] {}, mv_scale[2] {}, near_plane = 0, far_plane = 0, fov_y = 0, frame_ms = 0;
 	bool     reset = false;
+	// The frame without its UI at output size (A2B10G10R10, as the display buffer holds it), when the title's profile
+	// names its UI composite (FgHudlessDraw saved it before that draw); else hudless_ok false.
+	FgPlane  hudless {};
+	bool     hudless_ok = false;
 };
+// The translator, before each draw into a display buffer: whether FgHudlessDraw wants to see it (frame generation on,
+// a HUD-less composite in the profile, its buffer allocated).
+bool FgHudlessWanted();
+// The translator, at a draw into a display buffer on the graphics ring, with the pixel shader's address and user data:
+// when it is the profile's UI composite, the dispatch saving this frame's HUD-less scene into `ib` (it writes the
+// compute SH registers kTouchedSh; the caller puts the title's back, after a barrier that writes GL2 back). True when
+// emitted.
+bool FgHudlessDraw(uint64_t ps, const uint32_t* ud, uint32_t ud_have, std::vector<uint32_t>& ib);
 // Presenter thread: the guide buffer once allocated (a new DMA-BUF fd the caller owns), else -1.
 int  FgBufferFd(uint64_t* size, uint64_t* generation);
 // Presenter, at a flip: the set of boundary `want` (the boundary that flip follows, FgFlipBoundary), held until
@@ -137,6 +153,16 @@ bool FgTake(uint64_t after, FgFrame* out, uint64_t want = 0);
 void     FgNoteFlip(int index);
 // VideoOut, as it copies display buffer `index` for a flip: that flip's boundary (0: none known).
 uint64_t FgFlipBoundary(int index);
+// VideoOut, as the title registers a display buffer.
+void FgAddDisplayBuffer(uint64_t addr, uint64_t size);
+// The translator, before each draw: whether to report colour targets (frame generation is on, buffers are known).
+bool FgWatchDisplay();
+// The translator, at a draw into colour target `target`: if it lies in a display buffer, the frame of the newest
+// emitted guides drew that buffer.
+bool FgNoteDisplayWrite(uint64_t target); // (true: `target` is in a display buffer)
+// VideoOut, at a flip of the buffer at `buffer` (index `index`): the guides of the frame whose image it holds,
+// else FgFlipBoundary(index).
+uint64_t FgFlipGuides(uint64_t buffer, int index);
 void FgRelease(int set);
 
 } // namespace NativeUpscaler

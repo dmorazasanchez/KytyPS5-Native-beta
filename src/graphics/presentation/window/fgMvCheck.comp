@@ -1,0 +1,197 @@
+#version 450
+// Kyty frame generation: the title's motion vectors checked against the two real frames, at guide size, before
+// FidelityFX reads them. Where a vector claims motion the image does not show, and "did not move" matches clearly
+// better, the vector becomes zero: a character the camera follows whose vectors hold only the camera's motion
+// (Demon's Souls writes no object motion for it), a HUD drawn over a moving scene.
+//   pass 0: per pixel, 5x5 luma patches: the previous frame at the vector's position against the same position;
+//           "did not move" clearly better: zero (mask 1). Otherwise, where the vector fits poorly and the motion is
+//           slow enough for sharp frames, a local search (+-6 guide pixels around it, coarse then fine, small offsets
+//           preferred) may find a clearly better match: its offset into u_corr (mask 0.5). The small errors of a moving
+//           character with no object motion of its own. All thresholds are relative to the patch's texture.
+//   pass 1: zero verdicts spread over their own object (neighbours at the same depth: textureless parts of a
+//           character); flagged vectors become zero; the others take the median of the 3x3 offsets (isolated picks
+//           drop out).
+// Tuned offline on Demon's Souls frame-generation dumps (experiments/auto-upscaler/fg_dump_view.py).
+// Rebuild the header: glslangValidator -V --target-env vulkan1.2 --vn kFgMvCheckSpv -o fgMvCheck.spv.h fgMvCheck.comp
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Reads through samplers and format-less write-only stores (shaderStorageImageWriteWithoutFormat; Kyty's device does
+// not enable the extended storage formats). Each invocation writes only its own pixel.
+layout(binding = 0) uniform sampler2D u_cur;    // this real frame at guide size
+layout(binding = 1) uniform sampler2D u_prev;   // the previous real frame at guide size
+layout(binding = 2) uniform sampler2D u_motion; // the title's vectors (GENERAL)
+layout(binding = 3) uniform sampler2D u_mask;   // pass 0's verdicts (GENERAL)
+layout(binding = 4) uniform sampler2D u_depth;  // device depth, guide size
+layout(binding = 5) writeonly uniform image2D u_motion_out;
+layout(binding = 6) writeonly uniform image2D u_mask_out;
+layout(binding = 7) uniform sampler2D u_corr;   // pass 0's offsets, guide pixels (GENERAL)
+layout(binding = 8) writeonly uniform image2D u_corr_out;
+
+layout(push_constant) uniform Pc {
+	vec2  mv_scale;     // vector to guide pixels: previous position = current + mv * mv_scale
+	ivec2 size;         // this frame's guide size
+	float min_px;       // shorter vectors are never zeroed (guide pixels)
+	float ratio;        // zero: "did not move" has at most this fraction of the vector's error
+	float floor_err;    // zero: the vector's error is above this (mean luma difference per tap)
+	float k_zero;       // zero: and "did not move" below this times the local texture
+	float frac;         // pass 1: share of same-depth neighbours zeroed that zeroes a pixel
+	float depth_tol;    // pass 1: same depth = within this fraction
+	int   prev_valid;   // the previous frame is this one's predecessor
+	int   pass;
+	float refine_floor; // search: the vector's error is above this
+	float refine_ratio; // search: the match found has at most this fraction of it
+	float refine_cost;  // search: per guide pixel of offset (prefers the title's vector)
+	int   refine_range; // search: +- guide pixels
+	float con_min;      // no verdict on a patch with less texture than this (mean absolute deviation)
+	float k_mv;         // zero: the vector's error is above this times the local texture
+	float refine_k;     // search: the vector's error is above this times the local texture
+	float refine_max;   // search: only vectors up to this long (guide pixels: in fast motion the frames are blurred)
+} pc;
+
+float luma(vec3 c) {
+	return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+float at(sampler2D s, ivec2 p) {
+	return luma(texelFetch(s, clamp(p, ivec2(0), pc.size - 1), 0).rgb);
+}
+// Mean absolute luma difference over a 5x5 patch (step 1) or its 3x3 corners (step 2).
+float patch_err(ivec2 p, ivec2 d, int step) {
+	float e = 0.0, n = 0.0;
+	for (int y = -2; y <= 2; y += step) {
+		for (int x = -2; x <= 2; x += step) {
+			const ivec2 q = p + ivec2(x, y);
+			e += abs(at(u_cur, q) - at(u_prev, q + d));
+			n += 1.0;
+		}
+	}
+	return e / n;
+}
+bool moving(ivec2 p) {
+	const vec2 d = texelFetch(u_motion, p, 0).xy * pc.mv_scale;
+	return length(d) >= pc.min_px; // (false for NaN)
+}
+
+void main() {
+	const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	if (p.x >= pc.size.x || p.y >= pc.size.y) {
+		return;
+	}
+	if (pc.pass == 0) {
+		// Every threshold is relative to the patch's own texture: a dark, smooth or motion-blurred patch gets no verdict
+		// and keeps the title's vector (the safe default).
+		float verdict = 0.0;
+		ivec2 off     = ivec2(0);
+		if (pc.prev_valid != 0) {
+			const vec2  d    = texelFetch(u_motion, p, 0).xy * pc.mv_scale;
+			const ivec2 di   = ivec2(round(d));
+			const float len  = length(d);
+			const float e_mv = patch_err(p, di, 1);
+			float       mean = 0.0, con = 0.0;
+			for (int y = -2; y <= 2; y++) {
+				for (int x = -2; x <= 2; x++) {
+					mean += at(u_cur, p + ivec2(x, y));
+				}
+			}
+			mean *= 1.0 / 25.0;
+			for (int y = -2; y <= 2; y++) {
+				for (int x = -2; x <= 2; x++) {
+					con += abs(at(u_cur, p + ivec2(x, y)) - mean);
+				}
+			}
+			con *= 1.0 / 25.0;
+			if (con > pc.con_min && len >= pc.min_px && e_mv > max(pc.floor_err, pc.k_mv * con)) {
+				const float e_zero = patch_err(p, ivec2(0), 1);
+				if (e_zero < e_mv * pc.ratio && e_zero < pc.k_zero * con) {
+					verdict = 1.0;
+				}
+			}
+			if (verdict == 0.0 && con > pc.con_min && len <= pc.refine_max && e_mv > max(pc.refine_floor, pc.refine_k * con) &&
+			    pc.refine_range > 0) {
+				float best = 1e9;
+				ivec2 b    = ivec2(0);
+				for (int y = -pc.refine_range; y <= pc.refine_range; y += 2) {
+					for (int x = -pc.refine_range; x <= pc.refine_range; x += 2) {
+						const float e = patch_err(p, di + ivec2(x, y), 2) + pc.refine_cost * length(vec2(x, y));
+						if (e < best) {
+							best = e;
+							b    = ivec2(x, y);
+						}
+					}
+				}
+				ivec2 fine = b;
+				best       = patch_err(p, di + b, 1) + pc.refine_cost * length(vec2(b));
+				for (int y = -1; y <= 1; y++) {
+					for (int x = -1; x <= 1; x++) {
+						if (x == 0 && y == 0) continue;
+						const ivec2 c = b + ivec2(x, y);
+						const float e = patch_err(p, di + c, 1) + pc.refine_cost * length(vec2(c));
+						if (e < best) {
+							best = e;
+							fine = c;
+						}
+					}
+				}
+				if (best < pc.refine_ratio * e_mv) {
+					verdict = 0.5;
+					off     = fine; // (from the rounded vector)
+				}
+			}
+		}
+		imageStore(u_mask_out, p, vec4(verdict));
+		imageStore(u_corr_out, p, vec4(vec2(off), 0.0, 0.0));
+		return;
+	}
+	if (pc.prev_valid == 0) {
+		return;
+	}
+	bool flag = texelFetch(u_mask, p, 0).x > 0.5;
+	if (!flag && moving(p)) {
+		const float z   = texelFetch(u_depth, p, 0).x;
+		float       cnt = 0.0, tot = 0.0;
+		for (int y = -4; y <= 4; y += 2) {
+			for (int x = -4; x <= 4; x += 2) {
+				const ivec2 q    = clamp(p + ivec2(x, y), ivec2(0), pc.size - 1);
+				const float same = float(abs(texelFetch(u_depth, q, 0).x - z) <= pc.depth_tol * abs(z));
+				tot += same;
+				cnt += same * float(texelFetch(u_mask, q, 0).x > 0.5);
+			}
+		}
+		flag = cnt >= pc.frac * max(tot, 1.0);
+	}
+	if (flag) {
+		imageStore(u_motion_out, p, vec4(0.0));
+		return;
+	}
+	// The median of the 3x3 offsets (pixels without one count as 0), per axis.
+	float ox[9], oy[9];
+	int   n = 0;
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			const ivec2 q = clamp(p + ivec2(x, y), ivec2(0), pc.size - 1);
+			const vec2  o = texelFetch(u_corr, q, 0).xy;
+			ox[n]         = o.x;
+			oy[n]         = o.y;
+			n++;
+		}
+	}
+	for (int i = 1; i < 9; i++) { // (insertion sorts of nine)
+		const float vx = ox[i], vy = oy[i];
+		int         j  = i - 1;
+		while (j >= 0 && ox[j] > vx) {
+			ox[j + 1] = ox[j];
+			j--;
+		}
+		ox[j + 1] = vx;
+		j         = i - 1;
+		while (j >= 0 && oy[j] > vy) {
+			oy[j + 1] = oy[j];
+			j--;
+		}
+		oy[j + 1] = vy;
+	}
+	const vec2 m = vec2(ox[4], oy[4]);
+	if (m != vec2(0.0)) {
+		const vec2 d = round(texelFetch(u_motion, p, 0).xy * pc.mv_scale) + m;
+		imageStore(u_motion_out, p, vec4(d / pc.mv_scale, 0.0, 0.0));
+	}
+}

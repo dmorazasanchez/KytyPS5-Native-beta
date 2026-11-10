@@ -1,0 +1,49 @@
+{
+  "launcher_log": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/logs/frontend-20261109-231003.jsonl",
+  "binary_sha256": "65a6a9c491f8b63d74ef46393401c362d1eca194e6a0524b9b3202c70db54063",
+  "checks": "frameGenGuardTest.cpp passed; native build linked; git diff --check passed",
+  "framegen_transitions": [
+    {
+      "event": "framegen",
+      "paused": 1,
+      "why": "hlx_starting",
+      "available_mib": 455,
+      "swappable_mib": 304,
+      "stall": 2.9,
+      "gtt_mib": 13296,
+      "gpu_limit_mib": 14336,
+      "need_mib": 395
+    },
+    {
+      "event": "framegen",
+      "paused": 1,
+      "why": "gpu_limit",
+      "available_mib": 300,
+      "swappable_mib": 262,
+      "stall": 0.2,
+      "gtt_mib": 13893,
+      "gpu_limit_mib": 14336,
+      "need_mib": 395
+    }
+  ],
+  "helix_latest": {
+    "event": "hlx",
+    "invocation": 3670,
+    "ok": 1,
+    "frames": 301,
+    "failures": 0,
+    "roundtrip_ms_mean": 5.283,
+    "roundtrip_ms_max": 6.74,
+    "gpu_ms_total_mean": 4.704,
+    "gpu_ms_hlx_mean": 4.704,
+    "render": [
+      3840,
+      2160
+    ],
+    "output": [
+      3840,
+      2160
+    ]
+  },
+  "result": "Helix completed frames; FG correctly changes from hlx_starting to gpu_limit. Combined 4K input/output remains memory-limited."
+}

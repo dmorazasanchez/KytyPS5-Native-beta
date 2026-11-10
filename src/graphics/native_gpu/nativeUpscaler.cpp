@@ -3,6 +3,7 @@
 #if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
 #include "graphics/native_gpu/gemBacking.h"
 #include "graphics/native_gpu/nativeShadow.h"
+#include "graphics/native_gpu/upscaler/frameGenGuard.h"
 #include "graphics/native_gpu/upscaler/titleProfile.h"
 #include "graphics/native_gpu/upscaler/upscalerShaders.h"
 #include "graphics/shader/shaderBindings.h"
@@ -250,6 +251,10 @@ constexpr uint64_t kStamps       = 0x10400; // KYTY_NATIVE_UPSCALER_STALL: two G
 constexpr uint64_t kCodeScale4A0 = 0x11000;
 constexpr uint64_t kCodeClear1   = 0x12000; // clear1.s: HLX's reactive / composition masks for titles without them (TAA)
 constexpr uint64_t kCodeCopy4Scale = 0x12100; // copy4_scale.s: HLX output x the TAA's exposure into the title's output
+constexpr uint64_t kCodeFgHudless = 0x12200;  // fg_hudless.s: frame generation's HUD-less frame at the UI composite
+constexpr uint64_t kHudlessTables = 0x12400;  // its tables: one 64-byte table per HUD-less slot
+constexpr uint64_t kCompositeTables = 0x12800; // kSlots private {root pointers, scene/UI composite globals}, 128 bytes each
+constexpr uint64_t kPassthroughTables = 0x14800; // render-sized TAA exposure copies, separate from the final composite
 bool StallWanted() {
 	static const bool v = [] {
 		const char* e = std::getenv("KYTY_NATIVE_UPSCALER_STALL");
@@ -586,6 +591,8 @@ bool EnsureControl() {
 	std::memcpy(control.cpu + kCodeClear1, k_upscaler_clear1, sizeof(k_upscaler_clear1));
 	static_assert(sizeof(k_upscaler_copy4_scale) <= 0x100 && kCodeCopy4Scale + 0x100 <= kControlSize);
 	std::memcpy(control.cpu + kCodeCopy4Scale, k_upscaler_copy4_scale, sizeof(k_upscaler_copy4_scale));
+	static_assert(sizeof(k_upscaler_fg_hudless) <= 0x200 && kCodeFgHudless + 0x200 <= kHudlessTables);
+	std::memcpy(control.cpu + kCodeFgHudless, k_upscaler_fg_hudless, sizeof(k_upscaler_fg_hudless));
 	__builtin_ia32_sfence();
 	g_dev.control = control; // (readers test control.cpu, written last below)
 	return true;
@@ -605,7 +612,7 @@ bool InitDevice(const Snapshot& s) {
 	// Performance. RAM is this machine's tightest resource (Yotei leaves ~1 GB of 16 GB). The title's own
 	// dynamic resolution renders up to the output size.
 	const auto level = LevelSize(g_level.load());
-	const bool fixed = out_w == 3840 && out_h == 2160 && level.first != 0;
+	const bool fixed = level.first != 0 && ((out_w == 3840 && out_h == 2160) || Prof().taa_startup_presets);
 	// HLX's output at the chosen output resolution (a fixed preset only: the title's own dynamic resolution renders
 	// up to 4K): its network and its output texture at that size, scaled into the title's 4K output (scale4_a0).
 	const auto target = TargetSize();
@@ -621,6 +628,10 @@ bool InitDevice(const Snapshot& s) {
 		if (mask) {
 			r.w      = std::max<uint32_t>({s.res[kColor].t.Width5() + 1u, std::min<uint32_t>(out_w, 8192), 3840u});
 			r.h      = std::max<uint32_t>({s.res[kColor].t.Height5() + 1u, std::min<uint32_t>(out_h, 8192), 2160u});
+			if (fixed) {
+				r.w = level.first;
+				r.h = level.second;
+			}
 			r.format = 1; // 8_UNORM
 			r.bpp    = 1;
 			r.pitch  = ((r.w * r.bpp + 255u) & ~255u) / r.bpp;
@@ -1013,11 +1024,11 @@ std::atomic<int> g_framegen {0}; // FrameGenMode
 // It runs continuously: Linux makes room by moving other programs to swap (short stalls while it does are expected and
 // ignored). It pauses (frees its memory) only in an emergency: the headroom (free memory plus what Linux can still swap
 // out, ReadMemState) below kFgPauseMiB (the OOM killer next), thrashing (PSI above kFgStallPause % for
-// kFgStallChecks checks in a row), or the GPU buffers at the kernel's ceiling; it resumes after kFgResumeChecks checks
-// in a row with kFgResumeMiB of headroom, calm memory and GPU room.
+// kFgStallChecks checks in a row); it resumes after kFgResumeChecks checks
+// in a row with kFgResumeMiB of headroom and calm memory. GPU usage is logged, but is not an FG requirement.
 // Checked every 250 ms: a title loading an area can take hundreds of MB within a second.
 // A last resort only: in Gaming Mode (nothing but the emulator) it never acts; it keeps a cluttered session from
-// the kernel's OOM killer and GPU-buffer evictions. KYTY_FRAMEGEN_MEMORY_GUARD=0: off.
+// the kernel's OOM killer. KYTY_FRAMEGEN_MEMORY_GUARD=0: off.
 constexpr long     kFgPauseMiB     = 64;
 constexpr long     kFgResumeMiB    = 320; // the pause level, its own ~200 MB (freed while paused) and a margin
 constexpr int      kFgResumeChecks = 20;  // 5 s
@@ -1116,6 +1127,11 @@ MemState ReadMemState(bool gpu) {
 	return m;
 }
 // A GPU-buffer allocation of `need_mib` would stay below the ceiling with a margin (unknown: assumed fine).
+// Frame generation's GPU memory: kFgGpuMiB, and the HUD-less frames when the profile has them (three 4K slots in GTT
+// and the presenter's copy: ~135 MB).
+long FgGpuMiB() {
+	return kFgGpuMiB + (Prof().taa_hl_hash != 0 ? 135 : 0);
+}
 bool GpuRoomFor(const MemState& m, long need_mib) {
 	return m.gpu < 0 || m.gpu_limit <= 0 || m.gpu + need_mib <= m.gpu_limit - 256;
 }
@@ -1132,7 +1148,18 @@ struct FgState {
 	std::array<std::atomic<int>, kFgSets> set {}; // 0 free, 1 copy queued, 2 complete, 3 held by the presenter
 	std::array<FgFrame, kFgSets>          frame {};
 	std::mutex                            mutex; // frame[]
+	// HUD-less frames (profile's UI composite): kFgHudless slots of hl_bytes after the guide sets, each the frame of
+	// boundary hl_id[i] (written at that frame's composite draw, complete by its flip).
+	uint64_t                                    hl_base = 0, hl_bytes = 0;
+	uint32_t                                    hl_w = 0, hl_h = 0;
+	std::array<std::atomic<uint64_t>, 3>        hl_id {};
+	std::array<uint32_t, 3>                     hl_fw {}, hl_fh {};
+	std::atomic<unsigned>                       hl_next {0};
+	std::atomic<uint64_t>                       hl_last {0}; // the boundary of the last composite saved
 } g_fg;
+// The newest boundary whose guides were emitted, in translation order (FgEmit): a display buffer the title draws
+// into after it holds that frame's image (FgNoteDisplayWrite).
+std::atomic<uint64_t> g_fg_translated {0};
 
 bool FgWanted() {
 	return g_framegen.load(std::memory_order_relaxed) != static_cast<int>(FrameGenMode::Off) &&
@@ -1141,18 +1168,26 @@ bool FgWanted() {
 // Depth and motion planes of kFgSets sets, GTT, at the render size the chosen preset fixes (the output size
 // for the title's own dynamic resolution, which renders up to it). RAM is the BC-250's tightest resource:
 // Yotei leaves about 100 MB of the 16 GB free, so nothing here is sized for 4K unless it renders at 4K.
-bool FgInit(uint32_t out_w, uint32_t out_h) {
+bool FgInit(uint32_t render_w, uint32_t render_h, uint32_t out_w, uint32_t out_h) {
 	if (!EnsureControl()) {
 		return false;
 	}
 	// Planes are 1/factor of the render size with factor = ceil(height / 720): never more than 720 lines, and
 	// never wider than 720 lines at the largest render size's aspect (a margin for the rounding up).
-	const uint32_t rw = std::clamp<uint32_t>(out_w, 64, 8192), rh = std::clamp<uint32_t>(out_h, 64, 8192);
+	const uint32_t rw = std::clamp<uint32_t>(render_w, 64, 8192), rh = std::clamp<uint32_t>(render_h, 64, 8192);
 	g_fg.cap_h       = std::min<uint32_t>(rh, 720);
 	g_fg.cap_w       = std::min<uint32_t>(rw, static_cast<uint32_t>((720ull * rw + rh - 1) / rh) + 2);
 	g_fg.pitch       = ((g_fg.cap_w * 4u + 255u) & ~255u) / 4u;
 	g_fg.plane_bytes = (static_cast<uint64_t>(g_fg.pitch) * g_fg.cap_h * 4u + 0xffffu) & ~0xffffull;
-	if (!g_fg.buf.Create(g_fg.plane_bytes * 2u * kFgSets, false)) {
+	// The HUD-less slots (titles whose profile names their UI composite): output-sized, 4 bytes a pixel, pitch = width.
+	g_fg.hl_base  = g_fg.plane_bytes * 2u * kFgSets;
+	g_fg.hl_bytes = 0;
+	if (Prof().taa_hl_hash != 0) {
+		g_fg.hl_w     = out_w;
+		g_fg.hl_h     = out_h;
+		g_fg.hl_bytes = (static_cast<uint64_t>(out_w) * out_h * 4u + 0xffffu) & ~0xffffull;
+	}
+	if (!g_fg.buf.Create(g_fg.hl_base + g_fg.hl_bytes * g_fg.hl_id.size(), false)) {
 		LogJson("{\"event\":\"error\",\"what\":\"frame generation guide buffer\"}");
 		return false;
 	}
@@ -1166,13 +1201,15 @@ bool FgReady(const Snapshot& s) {
 	int st = g_fg.state.load(std::memory_order_acquire);
 	if (st == 0 && FgWanted()) {
 		g_fg.state.store(1, std::memory_order_release);
-		uint32_t       w = s.Field<uint32_t>(0x700), h = s.Field<uint32_t>(0x704);
+		const uint32_t out_w = Prof().taa_hl_hash != 0 ? std::max(3840u, s.Field<uint32_t>(0x700)) : s.Field<uint32_t>(0x700);
+		const uint32_t out_h = Prof().taa_hl_hash != 0 ? std::max(2160u, s.Field<uint32_t>(0x704)) : s.Field<uint32_t>(0x704);
+		uint32_t       w = out_w, h = out_h;
 		const auto     level = LevelSize(g_level.load()); // (presets apply to 4K output only: see ApplyLevel)
 		if (w == 3840 && h == 2160 && level.first != 0) {
 			w = level.first;
 			h = level.second;
 		}
-		std::thread([w, h] { g_fg.state.store(FgInit(w, h) ? 2 : -1, std::memory_order_release); }).detach();
+		std::thread([w, h, out_w, out_h] { g_fg.state.store(FgInit(w, h, out_w, out_h) ? 2 : -1, std::memory_order_release); }).detach();
 	}
 	return st == 2;
 }
@@ -1248,6 +1285,8 @@ void FgEmit(Snapshot& s, uint32_t slot, unsigned& table, bool compute_ring, std:
 			p[16 + v * 4 + 2] = g_fg.pitch * g_fg.cap_h;                                        // NUM_RECORDS
 			p[16 + v * 4 + 3] = 4u | (5u << 3u) | (6u << 6u) | (7u << 9u) | ((fmts[v] & 0x7fu) << 12u) | (1u << 24u);
 		}
+		p[24] = w - 1u;
+		p[25] = Prof().taa_display_mirror_x && s.stage != 5 ? 1u : 0u;
 	}
 	const uint64_t code = g_dev.control.va + kCodeFgGuides, tva = g_dev.control.va + t;
 	const uint32_t rsrc1 = ((16u / 4u) - 1u) | (0xc0u << 12u) | (1u << 21u) | (1u << 30u); // 16 VGPRs wave64, denorms, DX10_CLAMP, MEM_ORDERED
@@ -1279,6 +1318,12 @@ void FgEmit(Snapshot& s, uint32_t slot, unsigned& table, bool compute_ring, std:
 	f.jitter[1]  = s.Field<float>(0x6ec) * static_cast<float>(oh) / static_cast<float>(h);
 	f.mv_scale[0] = s.Field<float>(0x6f0) * static_cast<float>(ow) / static_cast<float>(w);
 	f.mv_scale[1] = s.Field<float>(0x6f4) * static_cast<float>(oh) / static_cast<float>(h);
+	if (Prof().taa_display_mirror_x && s.stage != 5) {
+		// The guides' samples were mirrored by fg_guides.s. Reflect X displacements and jitter too; their Y convention
+		// stays the title's. Keep the title's native convention for HLX, which operates before the final composite.
+		f.mv_scale[0] = -f.mv_scale[0];
+		f.jitter[0]   = -f.jitter[0];
+	}
 	f.frame_ms   = s.Field<float>(0x710);
 	f.reset      = s.Field<uint8_t>(0x718) != 0;
 	f.near_plane = s.Field<float>(0x71c);
@@ -1289,6 +1334,7 @@ void FgEmit(Snapshot& s, uint32_t slot, unsigned& table, bool compute_ring, std:
 		g_fg.frame[k] = f;
 	}
 	s.fg_set = k;
+	g_fg_translated.store(s.id, std::memory_order_release);
 }
 // From the worker: the boundary's EOP passed (the copies are in memory) or the boundary was abandoned.
 void FgComplete(int k, bool reached) {
@@ -1508,7 +1554,6 @@ void Worker() {
 			// The first frame of a network (start, or a switch: the history reset) builds its pipelines and, for
 			// HLX DLSS, its NGX feature: seconds once. Every other frame keeps the 0.5 s limit.
 			const bool first = static_cast<int>(f.backend) != g_hlx_backend.load();
-			g_hlx_backend.store(static_cast<int>(f.backend));
 			if (first) {
 				timeval slow {15, 0};
 				setsockopt(g_hlx, SOL_SOCKET, SO_RCVTIMEO, &slow, sizeof(slow));
@@ -1528,6 +1573,8 @@ void Worker() {
 			}
 			const double rt = (MonoSec() - t0) * 1e3;
 			if (ok) {
+				// Ready means a completed frame, not merely a request sent to the helper.
+				g_hlx_backend.store(static_cast<int>(f.backend));
 				g_last_hlx_ms = d.gpu_ms_hlx;
 				n++;
 				sum_rt += rt;
@@ -1652,7 +1699,7 @@ void LoadSettings() {
 			}
 		}
 	}
-	if (!Prof().drs) { // no resolution controller for this executable: the game's own dynamic resolution
+	if (!Prof().drs && !Prof().taa_startup_presets) { // otherwise the title keeps its own dynamic resolution
 		if (g_level.load() >= 0 || g_preset.load() != static_cast<int>(Preset::Dynamic)) {
 			LogJson("{\"event\":\"settings\",\"preset_ignored\":\"%s\",\"why\":\"render-resolution controller not mapped for this executable\"}",
 			        PresetName(static_cast<Preset>(g_preset.load())));
@@ -1736,7 +1783,7 @@ int TargetHeight(UpscalerKind u, int output_h) {
 // Ultra Quality 7 (2944x1656, 1.30x), Quality 10 (2560x1440, 1.5x), Balanced 12 (2304x1296, 1.67x), Performance
 // 15 (1920x1080, 2.0x), Ultra Performance 20 (1280x720, 3.0x). At 1440p: 10, 15, 17 (1664x936), 18, 20, 23.
 int PresetLevelFor(Preset p, int target_h) {
-	if (!Prof().drs) return -1; // the levels are the title's own controller's
+	if (!Prof().drs && !Prof().taa_startup_presets) return -1;
 	double ratio = 0;
 	switch (p) {
 		case Preset::Dlaa: ratio = 1.0; break;
@@ -1885,7 +1932,7 @@ void ApplySettings(const Settings& in) {
 		const MemState ms       = ReadMemState(true);
 		const long     free_mib = ms.headroom; // (free, plus what Linux can swap out of other programs)
 		const long     need     = HlxNeedMiB(in.output_h);
-		const long fg_gtt = FgWanted() ? kFgGpuMiB : 0; // (it steps aside while the helper starts)
+		const long fg_gtt = FgWanted() ? FgGpuMiB() : 0; // (it steps aside while the helper starts)
 		if (!GpuRoomFor(ms, need - (PoolBlocksFsr3() ? 0 : 224) - fg_gtt)) { // (FSR3's histories go first: 224 MB)
 			char why[256];
 			std::snprintf(why, sizeof(why), "%s would take GPU buffers past the kernel's limit (%ld of %ld MB in use, about %ld MB more needed).",
@@ -2569,6 +2616,12 @@ std::mutex                 g_taa_mutex;
 std::map<uint64_t, bool>   g_taa_shaders; // shader address -> is the profile's TAA pass
 double                     g_taa_last = 0;
 std::atomic<uint64_t>      g_taa_busy {0}; // invocations left to the title (a guest read could not be made)
+std::shared_ptr<Snapshot>  g_composite_taa; // latest render-sized TAA inputs, under g_mutex
+double                    g_composite_time = 0;
+uint64_t                  g_deferred_taa_sequence = 0;
+bool CompositeRouteWanted() {
+	return Prof().taa_startup_presets && Prof().taa_composite_hash != 0 && g_level.load() > 0 && GetMode() == Mode::Hlx;
+}
 template <class T>
 void SetField(Snapshot& s, unsigned o, T v) {
 	std::memcpy(s.p.data() + o, &v, sizeof(v));
@@ -2578,6 +2631,96 @@ void SetField(Snapshot& s, unsigned o, T v) {
 bool TaaWanted() {
 	return Prof().taa;
 }
+
+// ---- frame generation's HUD-less frame (taa.hudless): the scene the title's final composite draws its UI over ----
+namespace {
+std::mutex               g_hl_mutex;
+std::map<uint64_t, bool> g_hl_shaders; // pixel shader address -> is the profile's UI composite
+} // namespace
+bool FgHudlessWanted() {
+	return g_fg.hl_bytes != 0 && g_fg.state.load(std::memory_order_relaxed) == 2 && FgWanted();
+}
+namespace {
+bool EmitHudless(const ShaderTextureResource& t, uint64_t id, std::vector<uint32_t>& ib, bool mirror_x);
+}
+bool FgHudlessDraw(uint64_t ps, const uint32_t* ud, uint32_t ud_have, std::vector<uint32_t>& ib) {
+	const TitleProfile& P = Prof();
+	if (P.taa_hl_hash == 0 || ps == 0 || !FgHudlessWanted()) return false;
+	{
+		std::lock_guard lock(g_hl_mutex);
+		auto it = g_hl_shaders.find(ps);
+		if (it == g_hl_shaders.end()) {
+			const uint64_t h = CodeHash64(ps);
+			if (h == 0) return false; // (unreadable now: asked again at its next draw)
+			it = g_hl_shaders.emplace(ps, h == P.taa_hl_hash).first;
+			if (g_hl_shaders.size() > 4096) g_hl_shaders.clear();
+			if (it->second) {
+				LogJson("{\"event\":\"hudless_composite\",\"address\":\"0x%llx\",\"hash\":\"0x%016llx\"}",
+				        static_cast<unsigned long long>(ps), static_cast<unsigned long long>(h));
+			}
+		}
+		if (!it->second) return false;
+	}
+	// One HUD-less frame per boundary: the frame whose guides were emitted last (FgEmit) is the one composited now.
+	const uint64_t id = g_fg_translated.load(std::memory_order_acquire);
+	if (id == 0 || g_fg.hl_last.load(std::memory_order_relaxed) == id) return false;
+	ShaderTextureResource t {};
+	uint64_t              at = 0;
+	if (!ResolvePath(ud, ud_have, P.taa_hl_scene, &at) || TryRead(at, t.fields, 32) != 32 || !Plain2D(t) ||
+	    static_cast<uint32_t>(t.Format()) != 71u) { // (16_16_16_16_FLOAT, as the composite's ISA reads it)
+		static std::atomic<unsigned> bad {0};
+		if (bad.fetch_add(1) < 3) {
+			LogJson("{\"event\":\"hudless_skipped\",\"why\":\"scene T# not as the profile says\",\"format\":%u}",
+			        static_cast<unsigned>(t.Format()));
+		}
+		return false;
+	}
+	return EmitHudless(t, id, ib, P.taa_display_mirror_x);
+}
+namespace {
+bool EmitHudless(const ShaderTextureResource& t, uint64_t id, std::vector<uint32_t>& ib, bool mirror_x) {
+	if (!FgHudlessWanted() || id == 0 || g_fg.hl_last.load(std::memory_order_relaxed) == id) return false;
+	const uint32_t w = t.Width5() + 1u, h = t.Height5() + 1u;
+	if (w > g_fg.hl_w || h > g_fg.hl_h) return false;
+	const unsigned k   = g_fg.hl_next.fetch_add(1) % g_fg.hl_id.size();
+	g_fg.hl_id[k].store(0, std::memory_order_release); // (being rewritten: no frame until the new id)
+	const uint64_t off = g_fg.hl_base + k * g_fg.hl_bytes;
+	const uint64_t tab = kHudlessTables + k * 64u;
+	{
+		auto* p = reinterpret_cast<volatile uint32_t*>(g_dev.control.cpu + tab);
+		for (unsigned i = 0; i < 8; i++) p[i] = t.fields[i];
+		const uint64_t base = g_fg.buf.va + off;
+		p[8]  = static_cast<uint32_t>(base);
+		p[9]  = (static_cast<uint32_t>(base >> 32u) & 0xffffu) | (4u << 16u); // STRIDE 4
+		p[10] = w * h;                                                          // NUM_RECORDS (pitch = width)
+		p[11] = 4u | (5u << 3u) | (6u << 6u) | (7u << 9u) | (20u << 12u) | (1u << 24u); // 32_UINT
+		p[12] = mirror_x ? 1u : 0u;
+	}
+	const uint64_t code = g_dev.control.va + kCodeFgHudless, tva = g_dev.control.va + tab;
+	const uint32_t rsrc1 = ((16u / 4u) - 1u) | (0xc0u << 12u) | (1u << 21u) | (1u << 30u); // 16 VGPRs wave64, denorms, DX10_CLAMP, MEM_ORDERED
+	const uint32_t rsrc2 = (5u << 1u) | (1u << 7u) | (1u << 8u);                          // 5 user SGPRs, TGID_X, TGID_Y
+	SetSh(ib, 0x20Cu, {static_cast<uint32_t>(code >> 8u), static_cast<uint32_t>(code >> 40u)});
+	SetSh(ib, 0x212u, {rsrc1, rsrc2});
+	SetSh(ib, 0x228u, {0u});
+	SetSh(ib, 0x204u, {0u, 0u, 0u, 64u, 1u, 1u});
+	SetSh(ib, 0x240u, {static_cast<uint32_t>(tva), static_cast<uint32_t>(tva >> 32u), w, h, w});
+	ib.push_back(Pkt3(0x15, 4, false)); // DISPATCH_DIRECT (graphics ring)
+	ib.push_back((w + 7u) / 8u);
+	ib.push_back((h + 7u) / 8u);
+	ib.push_back(1u);
+	ib.push_back(1u | (1u << 2u) | (1u << 6u));
+	g_fg.hl_fw[k] = w;
+	g_fg.hl_fh[k] = h;
+	g_fg.hl_id[k].store(id, std::memory_order_release);
+	g_fg.hl_last.store(id, std::memory_order_relaxed);
+	static std::atomic<unsigned> logged {0};
+	if (logged.fetch_add(1) < 2) {
+		LogJson("{\"event\":\"hudless\",\"boundary\":%llu,\"slot\":%u,\"size\":[%u,%u],\"scene\":\"0x%llx\"}",
+		        static_cast<unsigned long long>(id), k, w, h, static_cast<unsigned long long>(t.Base40()));
+	}
+	return true;
+}
+} // namespace
 
 void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t ud_have) {
 	const TitleProfile& P = Prof();
@@ -2681,17 +2824,27 @@ void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t u
 	SetField<float>(s, 0x728, 1.0f);
 	SetField<float>(s, 0x72c, scale);  // (HLX output -> the title's output; copy4_scale.s)
 	std::lock_guard guard(g_mutex);
-	g_last_render = (rw << 16u) | (rh & 0xffffu);
-	g_last_output = (ow << 16u) | (oh & 0xffffu);
+	// This shader can also run for an intermediate TAA image. With HLX, report
+	// only the boundary actually accepted for replacement in TakeBoundary below.
+	if (GetMode() != Mode::Hlx) {
+		g_last_render = (rw << 16u) | (rh & 0xffffu);
+		g_last_output = (ow << 16u) | (oh & 0xffffu);
+	}
 	s.stage       = 4;
-	s.id          = ++g_sequence;
+	// Intermediate TAA work is not another displayed frame. Only the final
+	// composite advances the sequence consumed by FG's temporal history.
+	s.id          = CompositeRouteWanted() ? ++g_deferred_taa_sequence : ++g_sequence;
 	s.packet      = packet;
 	s.shader      = shader;
 	NoteInvocation(s);
+	if (CompositeRouteWanted() && rw == s.res[kOutput].t.Width5() + 1u && rh == s.res[kOutput].t.Height5() + 1u) {
+		g_composite_taa = std::make_shared<Snapshot>(s);
+	}
 	if (s.id <= 3 || s.id % 600 == 0) {
-		LogJson("{\"event\":\"taa_capture\",\"invocation\":%llu,\"render\":[%u,%u],\"output\":[%u,%u],\"jitter_px\":[%.4f,%.4f],\"scale\":%.5g,"
+		LogJson("{\"event\":\"taa_capture\",\"invocation\":%llu,\"render\":[%u,%u],\"output\":[%u,%u],\"color_capacity\":[%u,%u],\"output_capacity\":[%u,%u],\"jitter_px\":[%.4f,%.4f],\"scale\":%.5g,"
 		        "\"color\":\"0x%llx\",\"depth\":\"0x%llx\",\"motion\":\"0x%llx\",\"output_va\":\"0x%llx\",\"busy\":%llu}",
-		        static_cast<unsigned long long>(s.id), rw, rh, ow, oh, s.Field<float>(0x6e8), s.Field<float>(0x6ec), scale,
+		        static_cast<unsigned long long>(s.id), rw, rh, ow, oh, s.res[kColor].t.Width5() + 1u, s.res[kColor].t.Height5() + 1u,
+		        s.res[kOutput].t.Width5() + 1u, s.res[kOutput].t.Height5() + 1u, s.Field<float>(0x6e8), s.Field<float>(0x6ec), scale,
 		        static_cast<unsigned long long>(s.res[kColor].t.Base40()), static_cast<unsigned long long>(s.res[kDepth].t.Base40()),
 		        static_cast<unsigned long long>(s.res[kMotion].t.Base40()), static_cast<unsigned long long>(s.res[kOutput].t.Base40()),
 		        static_cast<unsigned long long>(g_taa_busy.load()));
@@ -2804,6 +2957,29 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 	auto s = *it;
 	g_pending.erase(it);
 	const Mode mode = GetMode();
+	if (CompositeRouteWanted() && s->stage != 5) {
+		// The game post-processes at render size. Leave an exposed, jittered scene
+		// there and do temporal reconstruction once, at the final scene/UI composite.
+		// This avoids reconstructing 4K and then shrinking it through the game's TAA target.
+		const auto& c = s->res[kColor].t;
+		const auto& o = s->res[kOutput].t;
+		const uint32_t w = s->Field<uint32_t>(0x6f8), h = s->Field<uint32_t>(0x6fc);
+		if (w != o.Width5() + 1u || h != o.Height5() + 1u || !RuntimeVerified() || !DeviceReady(*s)) return false;
+		const uint32_t slot = static_cast<uint32_t>(s->id % kSlots);
+		const uint64_t tab = kPassthroughTables + slot * 128u;
+		static_assert(kPassthroughTables + kSlots * 128u <= kControlSize);
+		WriteCopyTable(tab, c, o);
+		const float exposure = s->Field<float>(0x72c);
+		uint32_t bits = 0;
+		std::memcpy(&bits, &exposure, sizeof(bits));
+		*reinterpret_cast<volatile uint32_t*>(g_dev.control.cpu + tab + 64) = bits;
+		out->id = 0; // a GPU-only replacement, no helper or FG boundary here
+		out->gate = 0;
+		out->skip_dispatch = true;
+		Region region {};
+		EmitDispatch(out->before, kCodeCopy4Scale, tab, region, w, h, compute_ring);
+		return true;
+	}
 	// The title's own FSR3 (Mode::Off) inserts nothing unless frame generation wants this frame's guides.
 	const bool fg      = FgWanted() && RuntimeVerified() && FgReady(*s) && g_dev.control.cpu != nullptr;
 	const bool upscale = mode == Mode::Off ? false : mode == Mode::Hlx ? Decide(*s) : (DeviceReady(*s) && ActiveWindow());
@@ -2900,6 +3076,8 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 		           : !fits(kOutput)) {
 			return guides_only();
 		}
+		g_last_render = (s->dims[kColor][0] << 16u) | (s->dims[kColor][1] & 0xffffu);
+		g_last_output = (s->dims[kOutput][0] << 16u) | (s->dims[kOutput][1] & 0xffffu);
 		for (unsigned i: {kColor, kDepth, kMotion, kReactive, kComposition}) {
 			const uint64_t t = kTables + (slot * kTablesPerSlot + table++) * 64u;
 			if (synthetic_mask(i)) { // cleared at the colour's extent
@@ -2909,6 +3087,14 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 			}
 			WriteCopyTable(t, s->res[i].t, g_dev.hlx[i]);
 			EmitDispatch(out->before, CopyCode(g_dev.region[i].format), t, g_dev.region[i], s->dims[i][0], s->dims[i][1], compute_ring);
+		}
+		if (s->stage == 5) {
+			// The final composite samples HLX's 4K image directly. No copy back
+			// into the render-sized TAA image, and no second spatial upscale.
+			out->skip_dispatch = true;
+			g_inflight[s->id] = s;
+			StartWorker();
+			return true;
 		}
 		const uint64_t t          = kTables + (slot * kTablesPerSlot + table) * 64u;
 		const bool     taa_scaled = !scaled && Prof().taa && Prof().taa_scale.Valid();
@@ -2981,6 +3167,94 @@ bool TakeBoundary(uint64_t packet, uint64_t shader, bool compute_ring, Boundary*
 	return true;
 }
 
+bool TakeComposite(uint64_t packet, uint64_t ps, const uint32_t* ud, uint32_t ud_have,
+                   Boundary* out, uint64_t* replacement_ud) {
+	if (!CompositeRouteWanted() || !RuntimeVerified() || g_dev.state.load() != 2 || (ud_have & 3u) != 3u) return false;
+	static std::map<uint64_t, bool> shaders;
+	{
+		std::lock_guard lock(g_hl_mutex);
+		auto it = shaders.find(ps);
+		if (it == shaders.end()) {
+			const uint64_t hash = CodeHash64(ps);
+			if (hash == 0) return false;
+			it = shaders.emplace(ps, hash == Prof().taa_composite_hash).first;
+		}
+		if (!it->second) return false;
+	}
+	ShaderTextureResource scene {};
+	uint64_t scene_at = 0;
+	if (!ResolvePath(ud, ud_have, Prof().taa_composite_scene, &scene_at) || TryRead(scene_at, scene.fields, 32) != 32 ||
+	    !Plain2D(scene) || static_cast<uint32_t>(scene.Format()) != 71u) return false;
+	const uint32_t width = scene.Width5() + 1u, height = scene.Height5() + 1u;
+	const auto render = LevelSize(g_level.load());
+	if (width != render.first || height != render.second) return false;
+	const uint64_t root = (static_cast<uint64_t>(ud[0]) | (static_cast<uint64_t>(ud[1]) << 32u)) & 0xffffffffffffull;
+	uint64_t pointers[2] {};
+	uint32_t globals[24] {};
+	if (TryRead(root, pointers, sizeof(pointers)) != sizeof(pointers) ||
+	    TryRead(pointers[0] & 0xffffffffffffull, globals, sizeof(globals)) != sizeof(globals)) return false;
+	float dimensions[4] {};
+	std::memcpy(dimensions, globals, sizeof(dimensions));
+	if (std::fabs(dimensions[0] - width) > 0.1f || std::fabs(dimensions[1] - height) > 0.1f) {
+		static std::atomic<bool> noted {false};
+		if (!noted.exchange(true)) LogJson("{\"event\":\"composite_rejected\",\"why\":\"source dimensions\",\"value\":[%.6g,%.6g],\"scene\":[%u,%u]}",
+		                                   dimensions[0], dimensions[1], width, height);
+		return false;
+	}
+	Snapshot frame {};
+	{
+		std::lock_guard lock(g_mutex);
+		if (!g_composite_taa) return false;
+		frame = *g_composite_taa;
+		if (frame.Field<uint32_t>(0x6f8) != width || frame.Field<uint32_t>(0x6fc) != height) return false;
+		frame.id = ++g_sequence;
+		frame.stage = 5;
+		frame.packet = packet;
+		frame.shader = ps;
+		frame.res[kColor].t = scene;
+		frame.res[kColor].handle = scene_at;
+		frame.res[kOutput].t = g_dev.hlx[kOutput];
+		frame.res[kOutput].handle = 0;
+		SetField<uint32_t>(frame, 0x700, g_dev.region[kOutput].w);
+		SetField<uint32_t>(frame, 0x704, g_dev.region[kOutput].h);
+		SetField<float>(frame, 0x72c, 1.0f); // scene has already passed through exposure/post-processing
+		const double now = MonoSec(), elapsed = g_composite_time == 0 ? 0 : now - g_composite_time;
+		SetField<float>(frame, 0x710, elapsed > 0.001 && elapsed < 0.1 ? static_cast<float>(elapsed * 1000) : 16.6667f);
+		SetField<uint8_t>(frame, 0x718, elapsed == 0 || elapsed > 0.1 ? 1 : 0);
+		g_composite_time = now;
+		g_pending.push_back(std::make_shared<Snapshot>(frame));
+	}
+	if (!TakeBoundary(packet, ps, false, out)) return false;
+	// Clone this verified composite's globals. Its cubic source dimensions become
+	// 4K, so its normalized scene lookup is 1:1; UI and mirror/crop constants stay.
+	const uint64_t table = kCompositeTables + (frame.id % kSlots) * 128u;
+	static_assert(kCompositeTables + kSlots * 128u <= kControlSize);
+	auto* copy = reinterpret_cast<volatile uint32_t*>(g_dev.control.cpu + table);
+	const uint64_t global_address = g_dev.control.va + table + 32u;
+	copy[0] = static_cast<uint32_t>(global_address);
+	copy[1] = static_cast<uint32_t>(global_address >> 32u);
+	copy[2] = static_cast<uint32_t>(pointers[1]);
+	copy[3] = static_cast<uint32_t>(pointers[1] >> 32u);
+	for (unsigned i = 0; i < 24; ++i) copy[8 + i] = globals[i];
+	const float output_dimensions[4] = {static_cast<float>(g_dev.region[kOutput].w), static_cast<float>(g_dev.region[kOutput].h),
+	                                    1.0f / g_dev.region[kOutput].w, 1.0f / g_dev.region[kOutput].h};
+	uint32_t bits[4];
+	std::memcpy(bits, output_dimensions, sizeof(bits));
+	for (unsigned i = 0; i < 4; ++i) copy[8 + i] = bits[i];
+	for (unsigned i = 0; i < 8; ++i) copy[8 + 16 + i] = g_dev.hlx[kOutput].fields[i];
+	*replacement_ud = g_dev.control.va + table;
+	// This composite's explicit U transform cancels the vertex shader's X
+	// reversal. Its displayed scene and guides use the native render orientation.
+	EmitHudless(g_dev.hlx[kOutput], frame.id, out->after, false);
+	static std::atomic<unsigned> logged {0};
+	if (logged.fetch_add(1) < 3 || frame.id % 600 == 0) {
+		LogJson("{\"event\":\"hlx_composite\",\"invocation\":%llu,\"render\":[%u,%u],\"output\":[%u,%u],\"scene_va\":\"0x%llx\",\"sampled_va\":\"0x%llx\"}",
+		        static_cast<unsigned long long>(frame.id), width, height, g_dev.region[kOutput].w, g_dev.region[kOutput].h,
+		        static_cast<unsigned long long>(scene.Base40()), static_cast<unsigned long long>(g_dev.hlx[kOutput].Base40()));
+	}
+	return true;
+}
+
 FrameGenMode FrameGen() {
 	return static_cast<FrameGenMode>(g_framegen.load());
 }
@@ -2997,18 +3271,12 @@ void SetFrameGen(FrameGenMode m) {
 	g_fg_changes.fetch_add(1);
 	const MemState ms     = ReadMemState(m != FrameGenMode::Off);
 	const bool     memory = ms.headroom >= 0 && ms.headroom < kFgResumeMiB;
-	const bool     gpu    = !GpuRoomFor(ms, kFgGpuMiB);
-	const bool     paused = m != FrameGenMode::Off && (memory || gpu);
+	const bool     paused = m != FrameGenMode::Off && memory;
 	g_fg_paused           = paused;
 	g_framegen            = static_cast<int>(m);
 	if (paused) {
 		char why[256];
-		if (gpu) {
-			std::snprintf(why, sizeof(why), "Frame generation waits: GPU buffers at %ld of the kernel's %ld MB limit (it needs about %ld MB).", ms.gpu,
-			              ms.gpu_limit, kFgGpuMiB);
-		} else {
-			std::snprintf(why, sizeof(why), "Frame generation waits for memory: %ld MB free or swappable, %ld MB needed.", ms.headroom, kFgResumeMiB);
-		}
+		std::snprintf(why, sizeof(why), "Frame generation waits for memory: %ld MB free or swappable, %ld MB needed.", ms.headroom, kFgResumeMiB);
 		SetFgStatus(why);
 	} else {
 		SetFgStatus("");
@@ -3019,39 +3287,33 @@ void SetFrameGen(FrameGenMode m) {
 }
 bool FgMemoryTick() {
 	static int        low = 0, high = 0;
+	static FrameGenGuard::Wait last_wait = FrameGenGuard::Wait::None;
 	static const bool guard = [] {
 		const char* v = std::getenv("KYTY_FRAMEGEN_MEMORY_GUARD");
 		return v == nullptr || v[0] != '0';
 	}();
-	if (!guard || FrameGen() == FrameGenMode::Off) return FgWanted();
+	if (!guard || FrameGen() == FrameGenMode::Off) {
+		low = high = 0;
+		last_wait = FrameGenGuard::Wait::None;
+		return FgWanted();
+	}
 	const MemState ms = ReadMemState(true);
 	if (ms.headroom < 0) return FgWanted();
-	// While HLX starts or changes network (a new helper), frame generation steps aside: its ~260 MB of GTT go to the
+	// While HLX starts or changes network (a new helper), frame generation steps aside: its GPU buffers go to the
 	// helper, and it comes back once the helper runs and there is room (the user accepts a pause on a switch).
 	const bool hlx_starting = GetMode() == Mode::Hlx && g_hlx_healthy.load() && (g_dev.state.load() != 2 || g_hlx_retire.load() ||
 	                                                                               g_hlx_backend.load() < 0);
-	if (hlx_starting) {
-		if (!g_fg_paused.load()) {
-			low = high = 0;
-			g_fg_paused = true;
-			SetFgStatus("Frame generation resumes once the upscaler has started.");
-			LogJson("{\"event\":\"framegen\",\"paused\":1,\"why\":\"hlx_starting\",\"gtt_mib\":%ld}", ms.gpu);
-		}
-		return FgWanted();
-	}
+	if (hlx_starting) g_fg_paused = true;
 	if (!g_fg_paused.load()) {
 		// (Running, its own GPU buffers are already in the total.)
 		static int stalled = 0;
 		stalled           = ms.stall > kFgStallPause ? stalled + 1 : 0;
 		const bool memory = ms.headroom < kFgPauseMiB || stalled >= kFgStallChecks;
-		const bool gpu    = !GpuRoomFor(ms, 0);
-		if (memory || gpu) { // at once: its ~200 MB are what stands between a load spike and the OOM killer
+		if (memory) { // at once: its buffers stand between a load spike and the OOM killer
 			low = high = 0;
 			g_fg_paused = true;
 			char why[256];
-			if (gpu) {
-				std::snprintf(why, sizeof(why), "Frame generation paused: GPU buffers reached %ld of the kernel's %ld MB limit.", ms.gpu, ms.gpu_limit);
-			} else if (stalled >= kFgStallChecks) {
+			if (stalled >= kFgStallChecks) {
 				std::snprintf(why, sizeof(why), "Frame generation paused: the system is short of memory (%.0f%% of the time waiting). It resumes by itself.",
 				              ms.stall);
 			} else {
@@ -3063,14 +3325,41 @@ bool FgMemoryTick() {
 			        ms.swappable, ms.stall, ms.gpu);
 		}
 	} else {
-		high = ms.headroom >= kFgResumeMiB && ms.stall < kFgStallResume && GpuRoomFor(ms, kFgGpuMiB) ? high + 1 : 0;
-		if (high >= kFgResumeChecks) {
+		const auto wait = FrameGenGuard::ResumeWait(hlx_starting, ms.headroom, ms.stall,
+		                                               kFgResumeMiB, kFgStallResume, kFgResumeChecks, high);
+		if (wait == FrameGenGuard::Wait::None) {
 			low = high = 0;
 			g_fg_paused = false;
 			SetFgStatus("");
 			LogJson("{\"event\":\"framegen\",\"paused\":0,\"available_mib\":%ld,\"swappable_mib\":%ld,\"stall\":%.1f,\"gtt_mib\":%ld}",
 			        ms.available, ms.swappable, ms.stall, ms.gpu);
+		} else {
+			char why[256];
+			const char* code = "stabilizing";
+			switch (wait) {
+				case FrameGenGuard::Wait::Upscaler:
+					code = "hlx_starting";
+					std::snprintf(why, sizeof(why), "Frame generation waits for the upscaler's first completed frame.");
+					break;
+				case FrameGenGuard::Wait::Memory:
+					code = "memory";
+					std::snprintf(why, sizeof(why), "Frame generation waits for memory: %ld MB free or swappable, %ld MB needed.", ms.headroom, kFgResumeMiB);
+					break;
+				case FrameGenGuard::Wait::Pressure:
+					code = "memory_pressure";
+					std::snprintf(why, sizeof(why), "Frame generation waits for memory pressure to settle (%.1f%% waiting). It resumes automatically.", ms.stall);
+					break;
+				default:
+					std::snprintf(why, sizeof(why), "Frame generation resumes after memory has stayed available for five seconds.");
+					break;
+			}
+			SetFgStatus(why);
+			if (wait != last_wait) {
+				LogJson("{\"event\":\"framegen\",\"paused\":1,\"why\":\"%s\",\"available_mib\":%ld,\"swappable_mib\":%ld,\"stall\":%.1f,\"gtt_mib\":%ld,\"gpu_limit_mib\":%ld,\"need_mib\":%ld}",
+				        code, ms.available, ms.swappable, ms.stall, ms.gpu, ms.gpu_limit, FgGpuMiB());
+			}
 		}
+		last_wait = wait;
 	}
 	(void)low;
 	return FgWanted();
@@ -3108,6 +3397,126 @@ void FgNoteFlip(int index) {
 uint64_t FgFlipBoundary(int index) {
 	return index >= 0 ? g_flip_boundary[static_cast<unsigned>(index) & 15u].load(std::memory_order_acquire) : 0;
 }
+namespace {
+// Per display buffer, the boundaries of the last frames drawn into it (translation order, newest last).
+struct FgDisplayRecord {
+	uint64_t addr = 0;
+	uint64_t ids[4] {};
+	unsigned n = 0;
+};
+std::mutex                       g_fg_display_mutex;
+std::array<FgDisplayRecord, 16> g_fg_display {};
+// The title's video-out buffers (registration order; written before `addr` is published).
+std::array<std::atomic<uint64_t>, 16> g_disp_addr {}, g_disp_size {};
+std::atomic<bool>                     g_disp_any {false};
+struct FgPairing {
+	uint64_t flips = 0, same = 0, earlier = 0, later = 0, no_image = 0, no_tag = 0;
+} g_fg_pairing; // (g_fg_display_mutex)
+} // namespace
+void FgAddDisplayBuffer(uint64_t addr, uint64_t size) {
+	if (addr == 0 || size == 0) {
+		return;
+	}
+	for (unsigned i = 0; i < g_disp_addr.size(); i++) {
+		if (g_disp_addr[i].load(std::memory_order_acquire) == addr) {
+			g_disp_size[i].store(size, std::memory_order_release);
+			return;
+		}
+	}
+	for (unsigned i = 0; i < g_disp_addr.size(); i++) {
+		if (g_disp_addr[i].load(std::memory_order_acquire) == 0) {
+			g_disp_size[i].store(size, std::memory_order_release);
+			g_disp_addr[i].store(addr, std::memory_order_release);
+			g_disp_any.store(true, std::memory_order_release);
+			return;
+		}
+	}
+}
+bool FgWatchDisplay() {
+	return g_disp_any.load(std::memory_order_relaxed) && g_fg.state.load(std::memory_order_relaxed) == 2;
+}
+bool FgNoteDisplayWrite(uint64_t target) {
+	const uint64_t id = g_fg_translated.load(std::memory_order_acquire);
+	if (target == 0 || g_fg.state.load(std::memory_order_relaxed) != 2) {
+		return false;
+	}
+	uint64_t buffer = 0;
+	for (unsigned i = 0; i < g_disp_addr.size() && buffer == 0; i++) {
+		const uint64_t a = g_disp_addr[i].load(std::memory_order_acquire);
+		if (a != 0 && target >= a && target < a + g_disp_size[i].load(std::memory_order_acquire)) {
+			buffer = a;
+		}
+	}
+	if (buffer == 0) {
+		return false;
+	}
+	if (id == 0) {
+		return true;
+	}
+	std::lock_guard  lock(g_fg_display_mutex);
+	FgDisplayRecord* r     = nullptr;
+	FgDisplayRecord* empty = nullptr;
+	for (auto& e: g_fg_display) {
+		if (e.addr == buffer) {
+			r = &e;
+			break;
+		}
+		if (e.addr == 0 && empty == nullptr) {
+			empty = &e;
+		}
+	}
+	if (r == nullptr) {
+		if (empty == nullptr) {
+			return true;
+		}
+		r       = empty;
+		r->addr = buffer;
+	}
+	if (r->n > 0 && r->ids[(r->n - 1) % 4] == id) {
+		return true; // the same frame's further draws (its UI)
+	}
+	r->ids[r->n % 4] = id;
+	r->n++;
+	return true;
+}
+// The image decides: the guides of the frame that drew the flipped buffer, the newest one no later than the flip
+// itself (its GPU-order tag). Titles that flip the previous frame's buffer (the flip follows the next frame's TAA)
+// get their own frame's guides, not the next one's; the tag alone is the fallback.
+uint64_t FgFlipGuides(uint64_t buffer, int index) {
+	const uint64_t tag   = FgFlipBoundary(index);
+	const uint64_t limit = tag != 0 ? tag : g_last_boundary.load(std::memory_order_acquire);
+	uint64_t       image = 0;
+	std::lock_guard lock(g_fg_display_mutex);
+	for (const auto& e: g_fg_display) {
+		if (e.addr != buffer || buffer == 0) {
+			continue;
+		}
+		for (unsigned i = 0; i < std::min(e.n, 4u); i++) {
+			if (e.ids[i] <= limit && e.ids[i] > image) {
+				image = e.ids[i];
+			}
+		}
+		break;
+	}
+	auto& p = g_fg_pairing;
+	p.flips++;
+	p.no_tag += tag == 0 ? 1 : 0;
+	p.no_image += image == 0 ? 1 : 0;
+	if (image != 0 && tag != 0) {
+		p.same += image == tag ? 1 : 0;
+		p.earlier += image < tag ? 1 : 0;
+		p.later += image > tag ? 1 : 0;
+	}
+	if (p.flips <= 6 || p.flips % 600 == 0) {
+		LogJson("{\"event\":\"framegen_pairing\",\"flips\":%llu,\"buffer\":\"0x%llx\",\"index\":%d,\"tag\":%llu,\"image\":%llu,"
+		        "\"same\":%llu,\"image_earlier\":%llu,\"image_later\":%llu,\"no_image\":%llu,\"no_tag\":%llu}",
+		        static_cast<unsigned long long>(p.flips), static_cast<unsigned long long>(buffer), index,
+		        static_cast<unsigned long long>(tag), static_cast<unsigned long long>(image), static_cast<unsigned long long>(p.same),
+		        static_cast<unsigned long long>(p.earlier), static_cast<unsigned long long>(p.later),
+		        static_cast<unsigned long long>(p.no_image), static_cast<unsigned long long>(p.no_tag));
+	}
+	return image != 0 ? image : tag;
+}
 bool FgTake(uint64_t after, FgFrame* out, uint64_t want) {
 	std::lock_guard lock(g_fg.mutex);
 	int best = -1;
@@ -3141,6 +3550,13 @@ bool FgTake(uint64_t after, FgFrame* out, uint64_t want) {
 		return false;
 	}
 	*out = g_fg.frame[best];
+	out->hudless_ok = false;
+	for (unsigned i = 0; i < g_fg.hl_id.size() && g_fg.hl_bytes != 0; i++) {
+		if (g_fg.hl_id[i].load(std::memory_order_acquire) == out->seq) {
+			out->hudless    = {g_fg.hl_base + i * g_fg.hl_bytes, g_fg.hl_fw[i], g_fg.hl_fh[i], g_fg.hl_fw[i]};
+			out->hudless_ok = true;
+		}
+	}
 	return true;
 }
 void FgRelease(int set) {
@@ -3175,6 +3591,9 @@ bool TaaWanted() {
 }
 void TaaCapture(uint64_t, uint64_t, const uint32_t*, uint32_t) {}
 bool TakeBoundary(uint64_t, uint64_t, bool, Boundary*) {
+	return false;
+}
+bool TakeComposite(uint64_t, uint64_t, const uint32_t*, uint32_t, Boundary*, uint64_t*) {
 	return false;
 }
 bool SkipFsr3Dispatch(uint64_t) {
@@ -3233,6 +3652,22 @@ int FgBufferFd(uint64_t*, uint64_t*) {
 }
 void FgNoteFlip(int) {}
 uint64_t FgFlipBoundary(int) {
+	return 0;
+}
+void FgAddDisplayBuffer(uint64_t, uint64_t) {}
+bool FgHudlessWanted() {
+	return false;
+}
+bool FgHudlessDraw(uint64_t, const uint32_t*, uint32_t, std::vector<uint32_t>&) {
+	return false;
+}
+bool FgWatchDisplay() {
+	return false;
+}
+bool FgNoteDisplayWrite(uint64_t) {
+	return false;
+}
+uint64_t FgFlipGuides(uint64_t, int) {
 	return 0;
 }
 bool FgTake(uint64_t, FgFrame*, uint64_t) {

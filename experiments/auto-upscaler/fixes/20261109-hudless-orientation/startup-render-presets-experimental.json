@@ -1,0 +1,50 @@
+{
+  "kind": "mode_render_pair_v1",
+  "output": [
+    3840,
+    2160
+  ],
+  "presets": {
+    "dlaa": [
+      3840,
+      2160
+    ],
+    "ultra_quality": [
+      2944,
+      1656
+    ],
+    "quality": [
+      2560,
+      1440
+    ],
+    "balanced": [
+      2304,
+      1296
+    ],
+    "performance": [
+      1920,
+      1080
+    ],
+    "ultra_performance": [
+      1280,
+      720
+    ]
+  },
+  "setup": [
+    {
+      "offset": "0x90a66d",
+      "off": "c5fb1005bba1be01eb30",
+      "on": "c5fb100dbba1be01eb08"
+    },
+    {
+      "offset": "0x90b1d2",
+      "off": "c5fb10055696be01eb30",
+      "on": "c5fb100d5696be01eb08"
+    }
+  ],
+  "render_pair": {
+    "offset": "0x24f9550",
+    "off": "000a0000a0050000"
+  },
+  "evidence": "1.007 mode-3/4 render constants and two mode-4 instruction paths, verified offline against exact executable bytes. Ultra Quality live HLX input 2944x1656 -> output 3840x2160, no HLX failures; user confirmed image/motion, capture-demons-YINaz8. Startup-only; no executable or cheat-file changes."
+}

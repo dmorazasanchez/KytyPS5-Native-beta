@@ -1,98 +1,173 @@
 {
- "schema": "kyty-upscaler-profile",
- "schema_version": 2,
- "note": "Hand-assembled from the pass capture, ISA analysis and a gameplay probe (2026-11-09); the automated pipeline will generate this.",
- "game": {
-  "title_id": "PPSA01341",
-  "version": "01.007.000",
-  "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5"
- },
- "capabilities": {
-  "upscaler": {
-   "state": "available"
+  "schema": "kyty-upscaler-profile",
+  "schema_version": 2,
+  "note": "Hand-assembled from the pass capture, ISA analysis and a gameplay probe (2026-11-09); the automated pipeline will generate this.",
+  "game": {
+    "title_id": "PPSA01341",
+    "version": "01.007.000",
+    "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5"
   },
-  "frame_generation": {
-   "state": "available"
+  "capabilities": {
+    "upscaler": {
+      "state": "available"
+    },
+    "frame_generation": {
+      "state": "available"
+    },
+    "render_presets": {
+      "state": "dynamic_only"
+    }
   },
-  "render_presets": {
-   "state": "dynamic_only"
+  "runtime": {
+    "adapter": "taa_paths_v1",
+    "taa": {
+      "shader_hash": "95523d71c04a6522",
+      "color": [
+        0,
+        8,
+        112
+      ],
+      "depth": [
+        0,
+        0,
+        2432
+      ],
+      "motion": [
+        0,
+        8,
+        176
+      ],
+      "output": [
+        0,
+        8,
+        256
+      ],
+      "jitter": {
+        "path": [
+          0,
+          0,
+          448
+        ],
+        "units": "uv",
+        "sign": [
+          1,
+          1
+        ]
+      },
+      "motion_vectors": "uv_current_minus_previous",
+      "formats": {
+        "color": 71,
+        "depth": 22,
+        "motion": 29,
+        "output": 71
+      },
+      "camera": {
+        "near": 0.1,
+        "far": 10000.0,
+        "fov": 1.0
+      },
+      "render_size": [
+        0,
+        8,
+        48
+      ],
+      "output_size": [
+        0,
+        8,
+        64
+      ],
+      "output_scale": {
+        "path": [
+          0,
+          8,
+          240
+        ],
+        "buffer_offset": 0,
+        "meaning": "the TAA multiplies colour by this exposure before writing"
+      },
+      "hlx_flags": 121,
+      "evidence": {
+        "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+        "motion_vectors": "UV current minus previous in the native TAA render coordinates (history UV = current UV - motion). The final composite mirrors X, so FG samples mirrored guide positions and uses (+width, -height) in display coordinates. Warp checks of moving real-frame pairs on 2026-11-09 confirm mirror-X with X positive and Y negative (background correlation 0.96-0.98); a single positive sign for both axes was masking the horizontal reflection and was incorrect vertically.",
+        "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+        "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+        "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified",
+        "hudless": "the one draw into the display buffer per frame (pixel shader 4abf9bed9a8ea5fe, 4 vertices) computes sRGB(ui.rgb + scene.rgb * (1 - ui.a)) from two RGBA16F T#s at ptr(ud0)+0x20 (ui: ~105 small quads a frame) and +0x40 (scene: one full-screen pass right after the TAA); exported f16 RTZ into the 2_10_10_10 display buffer (ISA, pass capture capture-demons-Znsv4P). HUD-less = sRGB(scene) (fg_hudless.s). Display scene X = width - 1 - source X; verified from all 18 fghl-demons-211907 captures. FG colour, depth and motion positions must share this display orientation."
+      },
+      "hudless": {
+        "composite_shader_hash": "4abf9bed9a8ea5fe",
+        "scene": [
+          0,
+          0,
+          64
+        ],
+        "ui": [
+          0,
+          0,
+          32
+        ],
+        "encoding": "srgb_a2b10g10r10"
+      },
+      "display_mirror_x": true,
+      "startup_render_presets": {
+        "kind": "mode_render_pair_v1",
+        "output": [
+          3840,
+          2160
+        ],
+        "presets": {
+          "dlaa": [
+            3840,
+            2160
+          ],
+          "ultra_quality": [
+            2944,
+            1656
+          ],
+          "quality": [
+            2560,
+            1440
+          ],
+          "balanced": [
+            2304,
+            1296
+          ],
+          "performance": [
+            1920,
+            1080
+          ],
+          "ultra_performance": [
+            1280,
+            720
+          ]
+        },
+        "setup": [
+          {
+            "offset": "0x90a66d",
+            "off": "c5fb1005bba1be01eb30",
+            "on": "c5fb100dbba1be01eb08"
+          },
+          {
+            "offset": "0x90b1d2",
+            "off": "c5fb10055696be01eb30",
+            "on": "c5fb100d5696be01eb08"
+          }
+        ],
+        "render_pair": {
+          "offset": "0x24f9550",
+          "off": "000a0000a0050000"
+        },
+        "evidence": "1.007 mode-3/4 render constants and two mode-4 instruction paths, verified offline against exact executable bytes. Ultra Quality live HLX input 2944x1656 -> output 3840x2160, no HLX failures; user confirmed image/motion, capture-demons-YINaz8. Startup-only; no executable or cheat-file changes."
+      },
+      "upscale_composite": {
+        "kind": "scene_ui_bicubic_v1",
+        "shader_hash": "7246df104788f9d0",
+        "scene": [
+          0,
+          0,
+          64
+        ]
+      }
+    }
   }
- },
- "runtime": {
-  "adapter": "taa_paths_v1",
-  "taa": {
-   "shader_hash": "95523d71c04a6522",
-   "color": [
-    0,
-    8,
-    112
-   ],
-   "depth": [
-    0,
-    0,
-    2432
-   ],
-   "motion": [
-    0,
-    8,
-    176
-   ],
-   "output": [
-    0,
-    8,
-    256
-   ],
-   "jitter": {
-    "path": [
-     0,
-     0,
-     448
-    ],
-    "units": "uv",
-    "sign": [
-     1,
-     1
-    ]
-   },
-   "motion_vectors": "uv_current_minus_previous",
-   "formats": {
-    "color": 71,
-    "depth": 22,
-    "motion": 29,
-    "output": 71
-   },
-   "camera": {
-    "near": 0.1,
-    "far": 10000.0,
-    "fov": 1.0
-   },
-   "render_size": [
-    0,
-    8,
-    48
-   ],
-   "output_size": [
-    0,
-    8,
-    64
-   ],
-   "output_scale": {
-    "path": [
-     0,
-     8,
-     240
-    ],
-    "buffer_offset": 0,
-    "meaning": "the TAA multiplies colour by this exposure before writing"
-   },
-   "hlx_flags": 121,
-   "evidence": {
-    "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
-    "motion_vectors": "history uv = (pixel+0.5)/size - mv (ISA): UV units, current minus previous",
-    "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
-    "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
-    "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified"
-   }
-  }
- }
 }

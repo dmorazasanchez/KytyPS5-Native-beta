@@ -1,0 +1,1331 @@
+diff --git a/3rdparty/fidelityfx/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_inpainting.h b/3rdparty/fidelityfx/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_inpainting.h
+index 7ad3630..dbbbad6 100644
+--- a/3rdparty/fidelityfx/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_inpainting.h
++++ b/3rdparty/fidelityfx/include/FidelityFX/gpu/frameinterpolation/ffx_frameinterpolation_inpainting.h
+@@ -118,7 +118,9 @@ void computeInpainting(FfxInt32x2 iPxPos)
+         const FfxFloat32x3 fCurrentInterpolationSource = LoadCurrentBackbuffer(iPxPos).rgb;
+         const FfxFloat32x3 fPresentColor               = LoadPresentBackbuffer(iPxPos).rgb;
+ 
+-        if (any(FFX_GREATER_THAN(abs(fCurrentInterpolationSource - fPresentColor), FfxFloat32x3(0.0, 0.0, 0.0))))
++        // kyty: a HUD-less frame Kyty rebuilds from the title's own composite can differ from the presented one by a
++        // rounding step (10-bit): only larger differences are UI (in a dark scene one step is a large ratio).
++        if (any(FFX_GREATER_THAN(abs(fCurrentInterpolationSource - fPresentColor), FfxFloat32x3(0.0015, 0.0015, 0.0015))))
+         {
+             const FfxFloat32 fStaticFactor = CalculateStaticContentFactor(RawRGBToLinear(fCurrentInterpolationSource), RawRGBToLinear(fPresentColor));
+ 
+diff --git a/experiments/auto-upscaler/profiles/PPSA01341-01.007.000-d499226cdc4b.taa.json b/experiments/auto-upscaler/profiles/PPSA01341-01.007.000-d499226cdc4b.taa.json
+index 152dc88..407c4d0 100644
+--- a/experiments/auto-upscaler/profiles/PPSA01341-01.007.000-d499226cdc4b.taa.json
++++ b/experiments/auto-upscaler/profiles/PPSA01341-01.007.000-d499226cdc4b.taa.json
+@@ -54,7 +54,7 @@
+      1
+     ]
+    },
+-   "motion_vectors": "uv_current_minus_previous",
++   "motion_vectors": "uv_previous_minus_current",
+    "formats": {
+     "color": 71,
+     "depth": 22,
+diff --git a/src/graphics/native_gpu/nativePm4.cpp b/src/graphics/native_gpu/nativePm4.cpp
+index 9586262..9a0623f 100644
+--- a/src/graphics/native_gpu/nativePm4.cpp
++++ b/src/graphics/native_gpu/nativePm4.cpp
+@@ -3,6 +3,7 @@
+ #include "graphics/native_gpu/nativeUpscaler.h"
+ 
+ #include <algorithm>
++#include <functional>
+ #include <cstring>
+ #include <atomic>
+ #include <cstdio>
+@@ -3826,8 +3827,29 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
+ 			}
+ 		}
+ 	};
++#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
++	std::function<void()> hudless_hook; // (set below, once emit_barrier_raw exists)
++#endif
+ 	auto skip_draw = [&]() {
+ 		fix_display_dcc();
++#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
++		// Frame generation: a draw into a video-out buffer marks whose frame's image that buffer holds; the title's UI
++		// composite also gets the HUD-less frame saved ahead of it (FgHudlessDraw).
++		if (!m_compute_ring && NativeUpscaler::FgWatchDisplay()) {
++			bool display = false;
++			for (uint32_t i = 0; i < 8; i++) {
++				const uint32_t step = i * kCbColorStride;
++				const uint64_t base = (static_cast<uint64_t>(reg(cx, kCbColor0Base + step)) << 8u) |
++				                      (static_cast<uint64_t>(reg(cx, kCbColor0BaseExt + i) & 0xffu) << 40u);
++				if (base != 0 && ((reg(cx, kCbColor0Info + step) >> 2u) & 0x1fu) != 0) {
++					display = NativeUpscaler::FgNoteDisplayWrite(base) || display;
++				}
++			}
++			if (display && hudless_hook) {
++				hudless_hook();
++			}
++		}
++#endif
+ 		const uint64_t ps = (static_cast<uint64_t>(reg(sh, 0x008)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009)) << 40u);
+ 		if (!m_inspect.empty() && m_inspect.count(ps) != 0 && r.inspected.size() < 4) {
+ 			DrawSnapshot snap;
+@@ -3929,6 +3951,36 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
+ 			stats.pfp_syncs_emitted++;
+ 		}
+ 	};
++#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
++	// Frame generation's HUD-less frame, ahead of the title's UI composite: its dispatch (compute SH registers), the
++	// copies written back to memory (the presenter reads them after this frame's flip), the title's registers back.
++	hudless_hook = [&]() {
++		if (!NativeUpscaler::FgHudlessWanted()) {
++			return;
++		}
++		const uint64_t ps = (static_cast<uint64_t>(reg(sh, 0x008u)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009u) & 0xffu) << 40u);
++		uint32_t       ud[16] {};
++		uint32_t       have = 0;
++		for (uint32_t i = 0; i < 16; i++) {
++			if (const uint32_t* v = sh.Find(0x00Cu + i); v != nullptr) { // SPI_SHADER_USER_DATA_PS_*
++				ud[i] = *v;
++				have |= 1u << i;
++			}
++		}
++		std::vector<uint32_t> ins;
++		if (!NativeUpscaler::FgHudlessDraw(ps, ud, have, ins)) {
++			return;
++		}
++		body.insert(body.end(), ins.begin(), ins.end());
++		body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
++		body.push_back((4u << 8u) | 7u); // CS_PARTIAL_FLUSH
++		emit_barrier_raw(true);
++		for (const uint32_t off: NativeUpscaler::kTouchedSh) {
++			const uint32_t* v = sh.Find(off);
++			EmitSet(body, IT_SET_SH_REG, off, PatchSh(off, v != nullptr ? *v : 0u), true);
++		}
++	};
++#endif
+ 	// The barrier as a whole between the wrap's two packets; the ME's wait on our fence gets its PFP_SYNC_ME before
+ 	// the "on" whatever the guest's engine was (a barrier has drained the pipe already, so it costs little).
+ 	auto emit_barrier = [&](bool pfp) {
+diff --git a/src/graphics/native_gpu/nativeUpscaler.cpp b/src/graphics/native_gpu/nativeUpscaler.cpp
+index 7363905..e42847c 100644
+--- a/src/graphics/native_gpu/nativeUpscaler.cpp
++++ b/src/graphics/native_gpu/nativeUpscaler.cpp
+@@ -250,6 +250,8 @@ constexpr uint64_t kStamps       = 0x10400; // KYTY_NATIVE_UPSCALER_STALL: two G
+ constexpr uint64_t kCodeScale4A0 = 0x11000;
+ constexpr uint64_t kCodeClear1   = 0x12000; // clear1.s: HLX's reactive / composition masks for titles without them (TAA)
+ constexpr uint64_t kCodeCopy4Scale = 0x12100; // copy4_scale.s: HLX output x the TAA's exposure into the title's output
++constexpr uint64_t kCodeFgHudless = 0x12200;  // fg_hudless.s: frame generation's HUD-less frame at the UI composite
++constexpr uint64_t kHudlessTables = 0x12400;  // its tables: one 64-byte table per HUD-less slot
+ bool StallWanted() {
+ 	static const bool v = [] {
+ 		const char* e = std::getenv("KYTY_NATIVE_UPSCALER_STALL");
+@@ -586,6 +588,8 @@ bool EnsureControl() {
+ 	std::memcpy(control.cpu + kCodeClear1, k_upscaler_clear1, sizeof(k_upscaler_clear1));
+ 	static_assert(sizeof(k_upscaler_copy4_scale) <= 0x100 && kCodeCopy4Scale + 0x100 <= kControlSize);
+ 	std::memcpy(control.cpu + kCodeCopy4Scale, k_upscaler_copy4_scale, sizeof(k_upscaler_copy4_scale));
++	static_assert(sizeof(k_upscaler_fg_hudless) <= 0x200 && kCodeFgHudless + 0x200 <= kHudlessTables);
++	std::memcpy(control.cpu + kCodeFgHudless, k_upscaler_fg_hudless, sizeof(k_upscaler_fg_hudless));
+ 	__builtin_ia32_sfence();
+ 	g_dev.control = control; // (readers test control.cpu, written last below)
+ 	return true;
+@@ -1116,6 +1120,11 @@ MemState ReadMemState(bool gpu) {
+ 	return m;
+ }
+ // A GPU-buffer allocation of `need_mib` would stay below the ceiling with a margin (unknown: assumed fine).
++// Frame generation's GPU memory: kFgGpuMiB, and the HUD-less frames when the profile has them (three 4K slots in GTT
++// and the presenter's copy: ~135 MB).
++long FgGpuMiB() {
++	return kFgGpuMiB + (Prof().taa_hl_hash != 0 ? 135 : 0);
++}
+ bool GpuRoomFor(const MemState& m, long need_mib) {
+ 	return m.gpu < 0 || m.gpu_limit <= 0 || m.gpu + need_mib <= m.gpu_limit - 256;
+ }
+@@ -1132,7 +1141,18 @@ struct FgState {
+ 	std::array<std::atomic<int>, kFgSets> set {}; // 0 free, 1 copy queued, 2 complete, 3 held by the presenter
+ 	std::array<FgFrame, kFgSets>          frame {};
+ 	std::mutex                            mutex; // frame[]
++	// HUD-less frames (profile's UI composite): kFgHudless slots of hl_bytes after the guide sets, each the frame of
++	// boundary hl_id[i] (written at that frame's composite draw, complete by its flip).
++	uint64_t                                    hl_base = 0, hl_bytes = 0;
++	uint32_t                                    hl_w = 0, hl_h = 0;
++	std::array<std::atomic<uint64_t>, 3>        hl_id {};
++	std::array<uint32_t, 3>                     hl_fw {}, hl_fh {};
++	std::atomic<unsigned>                       hl_next {0};
++	std::atomic<uint64_t>                       hl_last {0}; // the boundary of the last composite saved
+ } g_fg;
++// The newest boundary whose guides were emitted, in translation order (FgEmit): a display buffer the title draws
++// into after it holds that frame's image (FgNoteDisplayWrite).
++std::atomic<uint64_t> g_fg_translated {0};
+ 
+ bool FgWanted() {
+ 	return g_framegen.load(std::memory_order_relaxed) != static_cast<int>(FrameGenMode::Off) &&
+@@ -1152,7 +1172,15 @@ bool FgInit(uint32_t out_w, uint32_t out_h) {
+ 	g_fg.cap_w       = std::min<uint32_t>(rw, static_cast<uint32_t>((720ull * rw + rh - 1) / rh) + 2);
+ 	g_fg.pitch       = ((g_fg.cap_w * 4u + 255u) & ~255u) / 4u;
+ 	g_fg.plane_bytes = (static_cast<uint64_t>(g_fg.pitch) * g_fg.cap_h * 4u + 0xffffu) & ~0xffffull;
+-	if (!g_fg.buf.Create(g_fg.plane_bytes * 2u * kFgSets, false)) {
++	// The HUD-less slots (titles whose profile names their UI composite): output-sized, 4 bytes a pixel, pitch = width.
++	g_fg.hl_base  = g_fg.plane_bytes * 2u * kFgSets;
++	g_fg.hl_bytes = 0;
++	if (Prof().taa_hl_hash != 0) {
++		g_fg.hl_w     = out_w;
++		g_fg.hl_h     = out_h;
++		g_fg.hl_bytes = (static_cast<uint64_t>(out_w) * out_h * 4u + 0xffffu) & ~0xffffull;
++	}
++	if (!g_fg.buf.Create(g_fg.hl_base + g_fg.hl_bytes * g_fg.hl_id.size(), false)) {
+ 		LogJson("{\"event\":\"error\",\"what\":\"frame generation guide buffer\"}");
+ 		return false;
+ 	}
+@@ -1289,6 +1317,7 @@ void FgEmit(Snapshot& s, uint32_t slot, unsigned& table, bool compute_ring, std:
+ 		g_fg.frame[k] = f;
+ 	}
+ 	s.fg_set = k;
++	g_fg_translated.store(s.id, std::memory_order_release);
+ }
+ // From the worker: the boundary's EOP passed (the copies are in memory) or the boundary was abandoned.
+ void FgComplete(int k, bool reached) {
+@@ -1885,7 +1914,7 @@ void ApplySettings(const Settings& in) {
+ 		const MemState ms       = ReadMemState(true);
+ 		const long     free_mib = ms.headroom; // (free, plus what Linux can swap out of other programs)
+ 		const long     need     = HlxNeedMiB(in.output_h);
+-		const long fg_gtt = FgWanted() ? kFgGpuMiB : 0; // (it steps aside while the helper starts)
++		const long fg_gtt = FgWanted() ? FgGpuMiB() : 0; // (it steps aside while the helper starts)
+ 		if (!GpuRoomFor(ms, need - (PoolBlocksFsr3() ? 0 : 224) - fg_gtt)) { // (FSR3's histories go first: 224 MB)
+ 			char why[256];
+ 			std::snprintf(why, sizeof(why), "%s would take GPU buffers past the kernel's limit (%ld of %ld MB in use, about %ld MB more needed).",
+@@ -2579,6 +2608,86 @@ bool TaaWanted() {
+ 	return Prof().taa;
+ }
+ 
++// ---- frame generation's HUD-less frame (taa.hudless): the scene the title's final composite draws its UI over ----
++namespace {
++std::mutex               g_hl_mutex;
++std::map<uint64_t, bool> g_hl_shaders; // pixel shader address -> is the profile's UI composite
++} // namespace
++bool FgHudlessWanted() {
++	return g_fg.hl_bytes != 0 && g_fg.state.load(std::memory_order_relaxed) == 2 && FgWanted();
++}
++bool FgHudlessDraw(uint64_t ps, const uint32_t* ud, uint32_t ud_have, std::vector<uint32_t>& ib) {
++	const TitleProfile& P = Prof();
++	if (P.taa_hl_hash == 0 || ps == 0 || !FgHudlessWanted()) return false;
++	{
++		std::lock_guard lock(g_hl_mutex);
++		auto it = g_hl_shaders.find(ps);
++		if (it == g_hl_shaders.end()) {
++			const uint64_t h = CodeHash64(ps);
++			if (h == 0) return false; // (unreadable now: asked again at its next draw)
++			it = g_hl_shaders.emplace(ps, h == P.taa_hl_hash).first;
++			if (g_hl_shaders.size() > 4096) g_hl_shaders.clear();
++			if (it->second) {
++				LogJson("{\"event\":\"hudless_composite\",\"address\":\"0x%llx\",\"hash\":\"0x%016llx\"}",
++				        static_cast<unsigned long long>(ps), static_cast<unsigned long long>(h));
++			}
++		}
++		if (!it->second) return false;
++	}
++	// One HUD-less frame per boundary: the frame whose guides were emitted last (FgEmit) is the one composited now.
++	const uint64_t id = g_fg_translated.load(std::memory_order_acquire);
++	if (id == 0 || g_fg.hl_last.load(std::memory_order_relaxed) == id) return false;
++	ShaderTextureResource t {};
++	uint64_t              at = 0;
++	if (!ResolvePath(ud, ud_have, P.taa_hl_scene, &at) || TryRead(at, t.fields, 32) != 32 || !Plain2D(t) ||
++	    static_cast<uint32_t>(t.Format()) != 71u) { // (16_16_16_16_FLOAT, as the composite's ISA reads it)
++		static std::atomic<unsigned> bad {0};
++		if (bad.fetch_add(1) < 3) {
++			LogJson("{\"event\":\"hudless_skipped\",\"why\":\"scene T# not as the profile says\",\"format\":%u}",
++			        static_cast<unsigned>(t.Format()));
++		}
++		return false;
++	}
++	const uint32_t w = t.Width5() + 1u, h = t.Height5() + 1u;
++	if (w > g_fg.hl_w || h > g_fg.hl_h) return false;
++	const unsigned k   = g_fg.hl_next.fetch_add(1) % g_fg.hl_id.size();
++	g_fg.hl_id[k].store(0, std::memory_order_release); // (being rewritten: no frame until the new id)
++	const uint64_t off = g_fg.hl_base + k * g_fg.hl_bytes;
++	const uint64_t tab = kHudlessTables + k * 64u;
++	{
++		auto* p = reinterpret_cast<volatile uint32_t*>(g_dev.control.cpu + tab);
++		for (unsigned i = 0; i < 8; i++) p[i] = t.fields[i];
++		const uint64_t base = g_fg.buf.va + off;
++		p[8]  = static_cast<uint32_t>(base);
++		p[9]  = (static_cast<uint32_t>(base >> 32u) & 0xffffu) | (4u << 16u); // STRIDE 4
++		p[10] = w * h;                                                          // NUM_RECORDS (pitch = width)
++		p[11] = 4u | (5u << 3u) | (6u << 6u) | (7u << 9u) | (20u << 12u) | (1u << 24u); // 32_UINT
++	}
++	const uint64_t code = g_dev.control.va + kCodeFgHudless, tva = g_dev.control.va + tab;
++	const uint32_t rsrc1 = ((16u / 4u) - 1u) | (0xc0u << 12u) | (1u << 21u) | (1u << 30u); // 16 VGPRs wave64, denorms, DX10_CLAMP, MEM_ORDERED
++	const uint32_t rsrc2 = (5u << 1u) | (1u << 7u) | (1u << 8u);                          // 5 user SGPRs, TGID_X, TGID_Y
++	SetSh(ib, 0x20Cu, {static_cast<uint32_t>(code >> 8u), static_cast<uint32_t>(code >> 40u)});
++	SetSh(ib, 0x212u, {rsrc1, rsrc2});
++	SetSh(ib, 0x228u, {0u});
++	SetSh(ib, 0x204u, {0u, 0u, 0u, 64u, 1u, 1u});
++	SetSh(ib, 0x240u, {static_cast<uint32_t>(tva), static_cast<uint32_t>(tva >> 32u), w, h, w});
++	ib.push_back(Pkt3(0x15, 4, false)); // DISPATCH_DIRECT (graphics ring)
++	ib.push_back((w + 7u) / 8u);
++	ib.push_back((h + 7u) / 8u);
++	ib.push_back(1u);
++	ib.push_back(1u | (1u << 2u) | (1u << 6u));
++	g_fg.hl_fw[k] = w;
++	g_fg.hl_fh[k] = h;
++	g_fg.hl_id[k].store(id, std::memory_order_release);
++	g_fg.hl_last.store(id, std::memory_order_relaxed);
++	static std::atomic<unsigned> logged {0};
++	if (logged.fetch_add(1) < 2) {
++		LogJson("{\"event\":\"hudless\",\"boundary\":%llu,\"slot\":%u,\"size\":[%u,%u],\"scene\":\"0x%llx\"}",
++		        static_cast<unsigned long long>(id), k, w, h, static_cast<unsigned long long>(at));
++	}
++	return true;
++}
++
+ void TaaCapture(uint64_t packet, uint64_t shader, const uint32_t* ud, uint32_t ud_have) {
+ 	const TitleProfile& P = Prof();
+ 	if (!P.taa) return;
+@@ -2997,7 +3106,7 @@ void SetFrameGen(FrameGenMode m) {
+ 	g_fg_changes.fetch_add(1);
+ 	const MemState ms     = ReadMemState(m != FrameGenMode::Off);
+ 	const bool     memory = ms.headroom >= 0 && ms.headroom < kFgResumeMiB;
+-	const bool     gpu    = !GpuRoomFor(ms, kFgGpuMiB);
++	const bool     gpu    = !GpuRoomFor(ms, FgGpuMiB());
+ 	const bool     paused = m != FrameGenMode::Off && (memory || gpu);
+ 	g_fg_paused           = paused;
+ 	g_framegen            = static_cast<int>(m);
+@@ -3063,7 +3172,7 @@ bool FgMemoryTick() {
+ 			        ms.swappable, ms.stall, ms.gpu);
+ 		}
+ 	} else {
+-		high = ms.headroom >= kFgResumeMiB && ms.stall < kFgStallResume && GpuRoomFor(ms, kFgGpuMiB) ? high + 1 : 0;
++		high = ms.headroom >= kFgResumeMiB && ms.stall < kFgStallResume && GpuRoomFor(ms, FgGpuMiB()) ? high + 1 : 0;
+ 		if (high >= kFgResumeChecks) {
+ 			low = high = 0;
+ 			g_fg_paused = false;
+@@ -3108,6 +3217,126 @@ void FgNoteFlip(int index) {
+ uint64_t FgFlipBoundary(int index) {
+ 	return index >= 0 ? g_flip_boundary[static_cast<unsigned>(index) & 15u].load(std::memory_order_acquire) : 0;
+ }
++namespace {
++// Per display buffer, the boundaries of the last frames drawn into it (translation order, newest last).
++struct FgDisplayRecord {
++	uint64_t addr = 0;
++	uint64_t ids[4] {};
++	unsigned n = 0;
++};
++std::mutex                       g_fg_display_mutex;
++std::array<FgDisplayRecord, 16> g_fg_display {};
++// The title's video-out buffers (registration order; written before `addr` is published).
++std::array<std::atomic<uint64_t>, 16> g_disp_addr {}, g_disp_size {};
++std::atomic<bool>                     g_disp_any {false};
++struct FgPairing {
++	uint64_t flips = 0, same = 0, earlier = 0, later = 0, no_image = 0, no_tag = 0;
++} g_fg_pairing; // (g_fg_display_mutex)
++} // namespace
++void FgAddDisplayBuffer(uint64_t addr, uint64_t size) {
++	if (addr == 0 || size == 0) {
++		return;
++	}
++	for (unsigned i = 0; i < g_disp_addr.size(); i++) {
++		if (g_disp_addr[i].load(std::memory_order_acquire) == addr) {
++			g_disp_size[i].store(size, std::memory_order_release);
++			return;
++		}
++	}
++	for (unsigned i = 0; i < g_disp_addr.size(); i++) {
++		if (g_disp_addr[i].load(std::memory_order_acquire) == 0) {
++			g_disp_size[i].store(size, std::memory_order_release);
++			g_disp_addr[i].store(addr, std::memory_order_release);
++			g_disp_any.store(true, std::memory_order_release);
++			return;
++		}
++	}
++}
++bool FgWatchDisplay() {
++	return g_disp_any.load(std::memory_order_relaxed) && g_fg.state.load(std::memory_order_relaxed) == 2;
++}
++bool FgNoteDisplayWrite(uint64_t target) {
++	const uint64_t id = g_fg_translated.load(std::memory_order_acquire);
++	if (target == 0 || g_fg.state.load(std::memory_order_relaxed) != 2) {
++		return false;
++	}
++	uint64_t buffer = 0;
++	for (unsigned i = 0; i < g_disp_addr.size() && buffer == 0; i++) {
++		const uint64_t a = g_disp_addr[i].load(std::memory_order_acquire);
++		if (a != 0 && target >= a && target < a + g_disp_size[i].load(std::memory_order_acquire)) {
++			buffer = a;
++		}
++	}
++	if (buffer == 0) {
++		return false;
++	}
++	if (id == 0) {
++		return true;
++	}
++	std::lock_guard  lock(g_fg_display_mutex);
++	FgDisplayRecord* r     = nullptr;
++	FgDisplayRecord* empty = nullptr;
++	for (auto& e: g_fg_display) {
++		if (e.addr == buffer) {
++			r = &e;
++			break;
++		}
++		if (e.addr == 0 && empty == nullptr) {
++			empty = &e;
++		}
++	}
++	if (r == nullptr) {
++		if (empty == nullptr) {
++			return true;
++		}
++		r       = empty;
++		r->addr = buffer;
++	}
++	if (r->n > 0 && r->ids[(r->n - 1) % 4] == id) {
++		return true; // the same frame's further draws (its UI)
++	}
++	r->ids[r->n % 4] = id;
++	r->n++;
++	return true;
++}
++// The image decides: the guides of the frame that drew the flipped buffer, the newest one no later than the flip
++// itself (its GPU-order tag). Titles that flip the previous frame's buffer (the flip follows the next frame's TAA)
++// get their own frame's guides, not the next one's; the tag alone is the fallback.
++uint64_t FgFlipGuides(uint64_t buffer, int index) {
++	const uint64_t tag   = FgFlipBoundary(index);
++	const uint64_t limit = tag != 0 ? tag : g_last_boundary.load(std::memory_order_acquire);
++	uint64_t       image = 0;
++	std::lock_guard lock(g_fg_display_mutex);
++	for (const auto& e: g_fg_display) {
++		if (e.addr != buffer || buffer == 0) {
++			continue;
++		}
++		for (unsigned i = 0; i < std::min(e.n, 4u); i++) {
++			if (e.ids[i] <= limit && e.ids[i] > image) {
++				image = e.ids[i];
++			}
++		}
++		break;
++	}
++	auto& p = g_fg_pairing;
++	p.flips++;
++	p.no_tag += tag == 0 ? 1 : 0;
++	p.no_image += image == 0 ? 1 : 0;
++	if (image != 0 && tag != 0) {
++		p.same += image == tag ? 1 : 0;
++		p.earlier += image < tag ? 1 : 0;
++		p.later += image > tag ? 1 : 0;
++	}
++	if (p.flips <= 6 || p.flips % 600 == 0) {
++		LogJson("{\"event\":\"framegen_pairing\",\"flips\":%llu,\"buffer\":\"0x%llx\",\"index\":%d,\"tag\":%llu,\"image\":%llu,"
++		        "\"same\":%llu,\"image_earlier\":%llu,\"image_later\":%llu,\"no_image\":%llu,\"no_tag\":%llu}",
++		        static_cast<unsigned long long>(p.flips), static_cast<unsigned long long>(buffer), index,
++		        static_cast<unsigned long long>(tag), static_cast<unsigned long long>(image), static_cast<unsigned long long>(p.same),
++		        static_cast<unsigned long long>(p.earlier), static_cast<unsigned long long>(p.later),
++		        static_cast<unsigned long long>(p.no_image), static_cast<unsigned long long>(p.no_tag));
++	}
++	return image != 0 ? image : tag;
++}
+ bool FgTake(uint64_t after, FgFrame* out, uint64_t want) {
+ 	std::lock_guard lock(g_fg.mutex);
+ 	int best = -1;
+@@ -3141,6 +3370,13 @@ bool FgTake(uint64_t after, FgFrame* out, uint64_t want) {
+ 		return false;
+ 	}
+ 	*out = g_fg.frame[best];
++	out->hudless_ok = false;
++	for (unsigned i = 0; i < g_fg.hl_id.size() && g_fg.hl_bytes != 0; i++) {
++		if (g_fg.hl_id[i].load(std::memory_order_acquire) == out->seq) {
++			out->hudless    = {g_fg.hl_base + i * g_fg.hl_bytes, g_fg.hl_fw[i], g_fg.hl_fh[i], g_fg.hl_fw[i]};
++			out->hudless_ok = true;
++		}
++	}
+ 	return true;
+ }
+ void FgRelease(int set) {
+@@ -3235,6 +3471,22 @@ void FgNoteFlip(int) {}
+ uint64_t FgFlipBoundary(int) {
+ 	return 0;
+ }
++void FgAddDisplayBuffer(uint64_t, uint64_t) {}
++bool FgHudlessWanted() {
++	return false;
++}
++bool FgHudlessDraw(uint64_t, const uint32_t*, uint32_t, std::vector<uint32_t>&) {
++	return false;
++}
++bool FgWatchDisplay() {
++	return false;
++}
++bool FgNoteDisplayWrite(uint64_t) {
++	return false;
++}
++uint64_t FgFlipGuides(uint64_t, int) {
++	return 0;
++}
+ bool FgTake(uint64_t, FgFrame*, uint64_t) {
+ 	return false;
+ }
+diff --git a/src/graphics/native_gpu/nativeUpscaler.h b/src/graphics/native_gpu/nativeUpscaler.h
+index ccc5d0f..b6a327d 100644
+--- a/src/graphics/native_gpu/nativeUpscaler.h
++++ b/src/graphics/native_gpu/nativeUpscaler.h
+@@ -126,7 +126,19 @@ struct FgFrame {
+ 	uint32_t output_w = 0, output_h = 0;
+ 	float    jitter[2] {}, mv_scale[2] {}, near_plane = 0, far_plane = 0, fov_y = 0, frame_ms = 0;
+ 	bool     reset = false;
++	// The frame without its UI at output size (A2B10G10R10, as the display buffer holds it), when the title's profile
++	// names its UI composite (FgHudlessDraw saved it before that draw); else hudless_ok false.
++	FgPlane  hudless {};
++	bool     hudless_ok = false;
+ };
++// The translator, before each draw into a display buffer: whether FgHudlessDraw wants to see it (frame generation on,
++// a HUD-less composite in the profile, its buffer allocated).
++bool FgHudlessWanted();
++// The translator, at a draw into a display buffer on the graphics ring, with the pixel shader's address and user data:
++// when it is the profile's UI composite, the dispatch saving this frame's HUD-less scene into `ib` (it writes the
++// compute SH registers kTouchedSh; the caller puts the title's back, after a barrier that writes GL2 back). True when
++// emitted.
++bool FgHudlessDraw(uint64_t ps, const uint32_t* ud, uint32_t ud_have, std::vector<uint32_t>& ib);
+ // Presenter thread: the guide buffer once allocated (a new DMA-BUF fd the caller owns), else -1.
+ int  FgBufferFd(uint64_t* size, uint64_t* generation);
+ // Presenter, at a flip: the set of boundary `want` (the boundary that flip follows, FgFlipBoundary), held until
+@@ -137,6 +149,16 @@ bool FgTake(uint64_t after, FgFrame* out, uint64_t want = 0);
+ void     FgNoteFlip(int index);
+ // VideoOut, as it copies display buffer `index` for a flip: that flip's boundary (0: none known).
+ uint64_t FgFlipBoundary(int index);
++// VideoOut, as the title registers a display buffer.
++void FgAddDisplayBuffer(uint64_t addr, uint64_t size);
++// The translator, before each draw: whether to report colour targets (frame generation is on, buffers are known).
++bool FgWatchDisplay();
++// The translator, at a draw into colour target `target`: if it lies in a display buffer, the frame of the newest
++// emitted guides drew that buffer.
++bool FgNoteDisplayWrite(uint64_t target); // (true: `target` is in a display buffer)
++// VideoOut, at a flip of the buffer at `buffer` (index `index`): the guides of the frame whose image it holds,
++// else FgFlipBoundary(index).
++uint64_t FgFlipGuides(uint64_t buffer, int index);
+ void FgRelease(int set);
+ 
+ } // namespace NativeUpscaler
+diff --git a/src/graphics/native_gpu/upscaler/gen.sh b/src/graphics/native_gpu/upscaler/gen.sh
+index 7814c59..89aa0fd 100755
+--- a/src/graphics/native_gpu/upscaler/gen.sh
++++ b/src/graphics/native_gpu/upscaler/gen.sh
+@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
+ tmp=$(mktemp -d)
+ out=upscalerShaders.h
+ { echo "// Generated by gen.sh from pack.s, unpack.s, pack_rg16f.s (llvm-mc, gfx1013, wave64). Do not edit."; echo "#pragma once"; echo "#include <cstdint>"; } > $out
+-for s in pack unpack pack_rg16f unpack_rgb0 copy4 copy2 copy1 copy4_a0 fg_guides scale4_a0 clear1 copy4_scale; do
++for s in pack unpack pack_rg16f unpack_rgb0 copy4 copy2 copy1 copy4_a0 fg_guides scale4_a0 clear1 copy4_scale fg_hudless; do
+   llvm-mc -triple=amdgcn -mcpu=gfx1013 -mattr=+wavefrontsize64 -filetype=obj $s.s -o $tmp/$s.o
+   llvm-objcopy -O binary --only-section=.text $tmp/$s.o $tmp/$s.bin
+   echo "inline constexpr uint32_t k_upscaler_${s}[] = {" >> $out
+diff --git a/src/graphics/native_gpu/upscaler/titleProfile.h b/src/graphics/native_gpu/upscaler/titleProfile.h
+index 4f3e2ea..450c57f 100644
+--- a/src/graphics/native_gpu/upscaler/titleProfile.h
++++ b/src/graphics/native_gpu/upscaler/titleProfile.h
+@@ -67,6 +67,10 @@ struct TitleProfile {
+ 	float    taa_mv_sign = -1.0f;   // motion vectors in UV units, current minus previous: FSR's scale is -render size
+ 	float    taa_near = 0.1f, taa_far = 10000.0f, taa_fov = 1.0f;
+ 	uint32_t taa_hlx_flags = 0;     // 0: Kyty's default
++	// Frame generation's HUD-less frame: the title's final composite (pixel shader hash) draws its UI over this scene
++	// (a T# path from the composite's user data); Kyty saves sRGB(scene) there (fg_hudless.s). 0: none.
++	uint64_t taa_hl_hash = 0;
++	Path     taa_hl_scene;
+ };
+ 
+ inline TitleProfile BuiltinYotei() {
+@@ -179,6 +183,11 @@ inline TitleProfile LoadTaaBlock(TitleProfile p, const Json* r) {
+ 	p.taa_fov     = JFloat(JGet(c, "fov"), p.taa_fov);
+ 	uint64_t flags = 0;
+ 	if (JU64(JGet(t, "hlx_flags"), &flags)) p.taa_hlx_flags = static_cast<uint32_t>(flags);
++	// "hudless": {"composite_shader_hash": "0x..", "scene": [ud, off...], "encoding": "srgb_a2b10g10r10"} (optional)
++	if (const Json* hl = JGet(t, "hudless"); hl != nullptr && JStr(JGet(hl, "encoding")) == "srgb_a2b10g10r10") {
++		const std::string hh = JStr(JGet(hl, "composite_shader_hash"));
++		if (!hh.empty() && JPath(JGet(hl, "scene"), &p.taa_hl_scene)) p.taa_hl_hash = std::strtoull(hh.c_str(), nullptr, 16);
++	}
+ 	p.taa    = ok;
+ 	p.usable = ok;
+ 	if (!ok) p.why = "profile taa block incomplete";
+diff --git a/src/graphics/native_gpu/upscaler/upscalerShaders.h b/src/graphics/native_gpu/upscaler/upscalerShaders.h
+index 2d660e7..a74ce64 100644
+--- a/src/graphics/native_gpu/upscaler/upscalerShaders.h
++++ b/src/graphics/native_gpu/upscaler/upscalerShaders.h
+@@ -102,3 +102,18 @@ inline constexpr uint32_t k_upscaler_copy4_scale[] = {
+ 	0xbf8c3f70u, 0x10080810u, 0x100a0a10u, 0x100c0c10u, 0x7e0e02f2u, 0xf0201f08u, 0x00060401u, 
+ 	0xbf810000u,
+ };
++inline constexpr uint32_t k_upscaler_fg_hudless[] = {
++	0xf40c0200u, 0xfa000000u, 0xf4080400u, 0xfa000020u, 0x36020087u, 0x2c040083u, 0xd7460001u, 
++	0x04050605u, 0xd7460002u, 0x04090606u, 0x7d880202u, 0xd4c40014u, 0x02020403u, 0x87ea146au, 
++	0xbe96246au, 0xbf880049u, 0xd5430003u, 0x04040902u, 0xbe9803ffu, 0x3b4d2e1cu, 0xbe9903ffu, 
++	0x3f870a3du, 0xbf8cc07fu, 0xf0001708u, 0x00020401u, 0xbf8c3f70u, 0x100e08ffu, 0x414eb852u, 
++	0x7e144f04u, 0x101414ffu, 0x3ed55555u, 0x7e144b0au, 0x42141419u, 0xbd6147aeu, 0xd40c006au, 
++	0x02003104u, 0x020e1507u, 0x10100affu, 0x414eb852u, 0x7e144f05u, 0x101414ffu, 0x3ed55555u, 
++	0x7e144b0au, 0x42141419u, 0xbd6147aeu, 0xd40c006au, 0x02003105u, 0x02101508u, 0x10120cffu, 
++	0x414eb852u, 0x7e144f06u, 0x101414ffu, 0x3ed55555u, 0x7e144b0au, 0x42141419u, 0xbd6147aeu, 
++	0xd40c006au, 0x02003106u, 0x02121509u, 0x5e0e0f07u, 0x5e101108u, 0x5e121309u, 0x7e0e1707u, 
++	0x7e101708u, 0x7e121709u, 0xd5570007u, 0x03c90107u, 0xd5570008u, 0x03c90108u, 0xd5570009u, 
++	0x03c90109u, 0x7e1402ffu, 0x447fc000u, 0xd54b0007u, 0x03c21507u, 0xd54b0008u, 0x03c21508u, 
++	0xd54b0009u, 0x03c21509u, 0x7e0e0f07u, 0x7e100f08u, 0x7e120f09u, 0xd76f0007u, 0x041d1508u, 
++	0x34121294u, 0xd7720007u, 0x03d61307u, 0xe0702000u, 0x80040703u, 0xbf810000u,
++};
+diff --git a/src/graphics/presentation/videoOut.cpp b/src/graphics/presentation/videoOut.cpp
+index 4b76b52..5c33920 100644
+--- a/src/graphics/presentation/videoOut.cpp
++++ b/src/graphics/presentation/videoOut.cpp
+@@ -784,6 +784,7 @@ Graphics::ImageInfo BufferAttributeGroup::ImageInfo(const VideoOutBuffer& buffer
+ 	    (buffer.data_address & 65535u) != 0) {
+ 		EXIT("invalid video-out surface footprint or alignment\n");
+ 	}
++	NativeUpscaler::FgAddDisplayBuffer(buffer.data_address, info.data.size); // (frame generation: whose image a flip shows)
+ 	// Natively rendered display buffers hold plain pixels (ShadowDisplayWithoutDcc).
+ 	if (compression != Graphics::VideoOutCompression::Uncompressed &&
+ 	    Graphics::NativeGpu::ShadowDisplayWithoutDcc(buffer.data_address, info.data.size)) {
+@@ -1575,7 +1576,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
+ 		}
+ 		const auto prepare_t0 = std::chrono::steady_clock::now();
+ 		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset);
+-		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipBoundary(index));
++		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipGuides(source_info.data.address, index));
+ 		Graphics::NativeGpu::ShadowFlipStats(
+ 		    std::chrono::duration<double>(std::chrono::steady_clock::now() - prepare_t0).count());
+ 		if (headset) {
+diff --git a/src/graphics/presentation/window/frameGen.cpp b/src/graphics/presentation/window/frameGen.cpp
+index fe9d3fa..a1b3d8f 100644
+--- a/src/graphics/presentation/window/frameGen.cpp
++++ b/src/graphics/presentation/window/frameGen.cpp
+@@ -4,6 +4,7 @@
+ 
+ #if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+ #include "graphics/native_gpu/nativeUpscaler.h"
++#include "graphics/presentation/window/fgMvCheck.spv.h"
+ 
+ #include <FidelityFX/host/backends/vk/ffx_vk.h>
+ #include <FidelityFX/host/ffx_frameinterpolation.h>
+@@ -12,6 +13,7 @@
+ #include <unistd.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <bit>
+ #include <chrono>
+ #include <cmath>
+@@ -20,7 +22,11 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <deque>
++#include <memory>
++#include <string>
++#include <thread>
+ #include <utility>
++#include <vector>
+ 
+ // The FidelityFX Vulkan backend's few global Vulkan calls (3rdparty/fidelityfx/src/ffx_linux_compat.h), routed
+ // to the emulator's dispatcher: the emulator loads Vulkan at run time.
+@@ -65,6 +71,8 @@ bool Supported(vk::Format f) {
+ 	return f == vk::Format::eA2B10G10R10UnormPack32 || f == vk::Format::eR8G8B8A8Unorm || f == vk::Format::eB8G8R8A8Unorm;
+ }
+ 
++const auto g_fg_process_start = std::chrono::steady_clock::now(); // (KYTY_FRAMEGEN_DUMP_AT times count from here)
++
+ struct AlignedFree {
+ 	void operator()(uint8_t* p) const { std::free(p); }
+ };
+@@ -162,6 +170,34 @@ struct Generator::Impl {
+ 	vk::DeviceMemory memory       = nullptr;
+ 	uint64_t         buffer_gen   = 0;
+ 	OwnedImage       depth, motion, flow_color;
++	// The frame without its UI (NativeUpscaler FgFrame::hudless; titles whose profile names their UI composite): FSR's
++	// currentBackBuffer_HUDLess, optical flow's and the vector check's source. Display format A2B10G10R10 only.
++	OwnedImage       hudless;
++	bool             hudless_valid = false;
++
++	// Motion-vector check (fgMvCheck.comp; KYTY_FRAMEGEN_MV_CHECK=0 turns it off): the real frames at guide size
++	// (ping-pong by frame), the verdicts, the pipeline and a descriptor set per parity.
++	OwnedImage              mvc_small[2], mvc_mask, mvc_corr;
++	vk::ImageView           mvc_small_view[2] {}, mvc_mask_view {}, mvc_motion_view {}, mvc_depth_view {}, mvc_corr_view {};
++	vk::Sampler             mvc_sampler {};
++	vk::ShaderModule        mvc_module {};
++	vk::DescriptorSetLayout mvc_set_layout {};
++	vk::PipelineLayout      mvc_layout {};
++	vk::Pipeline            mvc_pipeline {};
++	vk::DescriptorPool      mvc_pool {};
++	vk::DescriptorSet       mvc_set[2] {};
++	uint64_t                mvc_seq[2] {};
++	int                     mvc_parity = 0;
++	bool                    mvc_ready  = false;
++	struct MvcPush {
++		float    mv_scale[2];
++		int32_t  size[2];
++		float    min_px, ratio, floor_err, k_zero, frac, depth_tol;
++		int32_t  prev_valid, pass;
++		float    refine_floor, refine_ratio, refine_cost;
++		int32_t  refine_range;
++		float    con_min, k_mv, refine_k, refine_max;
++	};
+ 
+ 	NativeUpscaler::FgFrame             frame {};
+ 	uint64_t                            last_seq = 0, frame_id = 0;
+@@ -199,6 +235,9 @@ struct Generator::Impl {
+ 			WaitIdle();
+ 		}
+ 		DestroyContexts();
++		MvCheckDestroy();
++		DestroyImage(hudless);
++		hudless_valid = false;
+ 		DestroyImage(depth);
+ 		DestroyImage(motion);
+ 		DestroyImage(flow_color);
+@@ -211,6 +250,7 @@ struct Generator::Impl {
+ 			held.clear();
+ 			if (pending_set >= 0) NativeUpscaler::FgRelease(pending_set);
+ 			pending_set = -1;
++			DumpFree();
+ 		}
+ 	}
+ 
+@@ -303,6 +343,218 @@ struct Generator::Impl {
+ 		return true;
+ 	}
+ 
++	static bool MvCheckWanted() {
++		static const bool on = [] {
++			const char* v = std::getenv("KYTY_FRAMEGEN_MV_CHECK");
++			return v == nullptr || v[0] != '0';
++		}();
++		return on;
++	}
++	vk::ImageView MakeView(vk::Image image, vk::Format f) {
++		vk::ImageViewCreateInfo info {};
++		info.image            = image;
++		info.viewType         = vk::ImageViewType::e2D;
++		info.format           = f;
++		info.subresourceRange = vk::ImageSubresourceRange {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
++		const auto r          = g.device.createImageView(info);
++		return r.result == vk::Result::eSuccess ? r.value : vk::ImageView {};
++	}
++	void MvCheckDestroy() {
++		auto& d = g.device;
++		for (auto* v: {&mvc_small_view[0], &mvc_small_view[1], &mvc_mask_view, &mvc_motion_view, &mvc_depth_view, &mvc_corr_view}) {
++			if (*v) d.destroyImageView(*v);
++			*v = nullptr;
++		}
++		if (mvc_pool) d.destroyDescriptorPool(mvc_pool);
++		if (mvc_pipeline) d.destroyPipeline(mvc_pipeline);
++		if (mvc_layout) d.destroyPipelineLayout(mvc_layout);
++		if (mvc_set_layout) d.destroyDescriptorSetLayout(mvc_set_layout);
++		if (mvc_module) d.destroyShaderModule(mvc_module);
++		if (mvc_sampler) d.destroySampler(mvc_sampler);
++		mvc_pool       = nullptr;
++		mvc_set[0]     = nullptr;
++		mvc_set[1]     = nullptr;
++		mvc_pipeline   = nullptr;
++		mvc_layout     = nullptr;
++		mvc_set_layout = nullptr;
++		mvc_module     = nullptr;
++		mvc_sampler    = nullptr;
++		DestroyImage(mvc_small[0]);
++		DestroyImage(mvc_small[1]);
++		DestroyImage(mvc_mask);
++		DestroyImage(mvc_corr);
++		mvc_seq[0] = mvc_seq[1] = 0;
++		mvc_ready             = false;
++	}
++	// After depth and motion exist (motion with storage usage), for real frames of `real_format`.
++	bool MvCheckCreate(vk::Format real_format, vk::Extent2D cap) {
++		const auto small_usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
++		if (!MakeImage(mvc_small[0], real_format, cap, small_usage) || !MakeImage(mvc_small[1], real_format, cap, small_usage) ||
++		    !MakeImage(mvc_mask, vk::Format::eR8Unorm, cap, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled) ||
++		    !MakeImage(mvc_corr, vk::Format::eR16G16Sfloat, cap, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled)) {
++			return false;
++		}
++		mvc_small_view[0] = MakeView(mvc_small[0].image.image, real_format);
++		mvc_small_view[1] = MakeView(mvc_small[1].image.image, real_format);
++		mvc_mask_view     = MakeView(mvc_mask.image.image, vk::Format::eR8Unorm);
++		mvc_motion_view   = MakeView(motion.image.image, vk::Format::eR16G16Sfloat);
++		mvc_depth_view    = MakeView(depth.image.image, vk::Format::eR32Sfloat);
++		mvc_corr_view     = MakeView(mvc_corr.image.image, vk::Format::eR16G16Sfloat);
++		if (!mvc_small_view[0] || !mvc_small_view[1] || !mvc_mask_view || !mvc_motion_view || !mvc_depth_view || !mvc_corr_view) {
++			return false;
++		}
++		vk::SamplerCreateInfo si {};
++		si.magFilter    = vk::Filter::eNearest;
++		si.minFilter    = vk::Filter::eNearest;
++		si.addressModeU = vk::SamplerAddressMode::eClampToEdge;
++		si.addressModeV = vk::SamplerAddressMode::eClampToEdge;
++		si.addressModeW = vk::SamplerAddressMode::eClampToEdge;
++		const auto sampler = g.device.createSampler(si);
++		if (sampler.result != vk::Result::eSuccess) return false;
++		mvc_sampler = sampler.value;
++		vk::ShaderModuleCreateInfo mi {};
++		mi.codeSize       = sizeof(kFgMvCheckSpv);
++		mi.pCode          = kFgMvCheckSpv;
++		const auto module = g.device.createShaderModule(mi);
++		if (module.result != vk::Result::eSuccess) return false;
++		mvc_module = module.value;
++		// 0-4 and 7 sampled (current, previous, motion, mask, depth, offsets); 5, 6 and 8 written (motion, mask, offsets).
++		std::array<vk::DescriptorSetLayoutBinding, 9> bindings {};
++		for (uint32_t i = 0; i < bindings.size(); i++) {
++			bindings[i].binding         = i;
++			bindings[i].descriptorType  = (i < 5 || i == 7) ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage;
++			bindings[i].descriptorCount = 1;
++			bindings[i].stageFlags      = vk::ShaderStageFlagBits::eCompute;
++		}
++		vk::DescriptorSetLayoutCreateInfo li {};
++		li.bindingCount = static_cast<uint32_t>(bindings.size());
++		li.pBindings    = bindings.data();
++		const auto set_layout = g.device.createDescriptorSetLayout(li);
++		if (set_layout.result != vk::Result::eSuccess) return false;
++		mvc_set_layout = set_layout.value;
++		vk::PushConstantRange pr {};
++		pr.stageFlags = vk::ShaderStageFlagBits::eCompute;
++		pr.size       = sizeof(MvcPush);
++		vk::PipelineLayoutCreateInfo pli {};
++		pli.setLayoutCount         = 1;
++		pli.pSetLayouts            = &mvc_set_layout;
++		pli.pushConstantRangeCount = 1;
++		pli.pPushConstantRanges    = &pr;
++		const auto layout = g.device.createPipelineLayout(pli);
++		if (layout.result != vk::Result::eSuccess) return false;
++		mvc_layout = layout.value;
++		vk::ComputePipelineCreateInfo ci {};
++		ci.stage.stage  = vk::ShaderStageFlagBits::eCompute;
++		ci.stage.module = mvc_module;
++		ci.stage.pName  = "main";
++		ci.layout       = mvc_layout;
++		if (g.device.createComputePipelines(nullptr, 1, &ci, nullptr, &mvc_pipeline) != vk::Result::eSuccess) return false;
++		const std::array<vk::DescriptorPoolSize, 2> sizes {vk::DescriptorPoolSize {vk::DescriptorType::eCombinedImageSampler, 12},
++		                                                   vk::DescriptorPoolSize {vk::DescriptorType::eStorageImage, 6}};
++		vk::DescriptorPoolCreateInfo pi {};
++		pi.maxSets       = 2;
++		pi.poolSizeCount = static_cast<uint32_t>(sizes.size());
++		pi.pPoolSizes    = sizes.data();
++		const auto pool  = g.device.createDescriptorPool(pi);
++		if (pool.result != vk::Result::eSuccess) return false;
++		mvc_pool = pool.value;
++		const std::array<vk::DescriptorSetLayout, 2> layouts {mvc_set_layout, mvc_set_layout};
++		vk::DescriptorSetAllocateInfo ai {};
++		ai.descriptorPool     = mvc_pool;
++		ai.descriptorSetCount = 2;
++		ai.pSetLayouts        = layouts.data();
++		if (g.device.allocateDescriptorSets(&ai, mvc_set) != vk::Result::eSuccess) return false;
++		for (int k = 0; k < 2; k++) {
++			const std::array<vk::DescriptorImageInfo, 9> images {
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_small_view[k], vk::ImageLayout::eShaderReadOnlyOptimal},
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_small_view[1 - k], vk::ImageLayout::eShaderReadOnlyOptimal},
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_motion_view, vk::ImageLayout::eGeneral},
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_mask_view, vk::ImageLayout::eGeneral},
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_depth_view, vk::ImageLayout::eShaderReadOnlyOptimal},
++			    vk::DescriptorImageInfo {nullptr, mvc_motion_view, vk::ImageLayout::eGeneral},
++			    vk::DescriptorImageInfo {nullptr, mvc_mask_view, vk::ImageLayout::eGeneral},
++			    vk::DescriptorImageInfo {mvc_sampler, mvc_corr_view, vk::ImageLayout::eGeneral},
++			    vk::DescriptorImageInfo {nullptr, mvc_corr_view, vk::ImageLayout::eGeneral}};
++			std::array<vk::WriteDescriptorSet, 9> writes {};
++			for (uint32_t i = 0; i < writes.size(); i++) {
++				writes[i].dstSet          = mvc_set[k];
++				writes[i].dstBinding      = i;
++				writes[i].descriptorCount = 1;
++				writes[i].descriptorType  = bindings[i].descriptorType;
++				writes[i].pImageInfo      = &images[i];
++			}
++			g.device.updateDescriptorSets(static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
++		}
++		mvc_ready = true;
++		return true;
++	}
++	// In Begin, after the guides' copies: `real` in TRANSFER_SRC_OPTIMAL, depth and motion in SHADER_READ_ONLY_OPTIMAL
++	// (left so). Zeroes the vectors the two real frames contradict (fgMvCheck.comp).
++	void MvCheckRecord(vk::CommandBuffer command, const Target& real, const NativeUpscaler::FgFrame& f) {
++		if (!mvc_ready) return;
++		using S = vk::PipelineStageFlagBits2;
++		using A = vk::AccessFlagBits2;
++		using L = vk::ImageLayout;
++		const int  k          = mvc_parity;
++		const bool prev_valid = mvc_seq[1 - k] != 0 && mvc_seq[1 - k] + 1 == f.seq;
++		// This real frame at guide size (linear filter), into this parity's image.
++		Barrier(command, mvc_small[k].image.image, L::eUndefined, L::eTransferDstOptimal, S::eComputeShader, A::eShaderRead, S::eTransfer,
++		        A::eTransferWrite);
++		vk::ImageBlit blit {};
++		blit.srcSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++		blit.dstSubresource = blit.srcSubresource;
++		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(real.extent.width), static_cast<int32_t>(real.extent.height), 1};
++		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(f.depth.width), static_cast<int32_t>(f.depth.height), 1};
++		command.blitImage(real.image, L::eTransferSrcOptimal, mvc_small[k].image.image, L::eTransferDstOptimal, 1, &blit, vk::Filter::eLinear);
++		Barrier(command, mvc_small[k].image.image, L::eTransferDstOptimal, L::eShaderReadOnlyOptimal, S::eTransfer, A::eTransferWrite,
++		        S::eComputeShader, A::eShaderRead);
++		Barrier(command, motion.image.image, L::eShaderReadOnlyOptimal, L::eGeneral, S::eComputeShader, A::eShaderRead, S::eComputeShader,
++		        A::eShaderRead | A::eShaderWrite);
++		Barrier(command, mvc_mask.image.image, L::eUndefined, L::eGeneral, S::eComputeShader, A::eShaderRead, S::eComputeShader,
++		        A::eShaderWrite);
++		Barrier(command, mvc_corr.image.image, L::eUndefined, L::eGeneral, S::eComputeShader, A::eShaderRead, S::eComputeShader,
++		        A::eShaderWrite);
++		command.bindPipeline(vk::PipelineBindPoint::eCompute, mvc_pipeline);
++		command.bindDescriptorSets(vk::PipelineBindPoint::eCompute, mvc_layout, 0, 1, &mvc_set[k], 0, nullptr);
++		MvcPush pc {};
++		pc.mv_scale[0] = f.mv_scale[0];
++		pc.mv_scale[1] = f.mv_scale[1];
++		pc.size[0]     = static_cast<int32_t>(f.depth.width);
++		pc.size[1]     = static_cast<int32_t>(f.depth.height);
++		// Tuned offline on Demon's Souls frame-generation dumps (fg_dump_view.py; fast pans with motion blur, a followed
++		// character, slow walking): HUD and the followed character zeroed, ~0.2% of the background touched in fast pans.
++		pc.min_px       = 1.5f; // guide pixels
++		pc.ratio        = 0.2f;
++		pc.floor_err    = 0.02f;
++		pc.k_zero       = 0.3f;
++		pc.frac         = 0.5f;
++		pc.depth_tol    = 0.15f;
++		pc.prev_valid   = prev_valid ? 1 : 0;
++		pc.refine_floor = 0.01f;
++		pc.refine_ratio = 0.35f;
++		pc.refine_cost  = 0.001f;
++		pc.refine_range = 6;
++		pc.con_min      = 0.01f;
++		pc.k_mv         = 0.8f;
++		pc.refine_k     = 1.2f;
++		pc.refine_max   = 24.0f;
++		const uint32_t gx = (f.depth.width + 7u) / 8u, gy = (f.depth.height + 7u) / 8u;
++		for (int32_t pass = 0; pass < 2; pass++) {
++			pc.pass = pass;
++			command.pushConstants(mvc_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(pc), &pc);
++			command.dispatch(gx, gy, 1);
++			if (pass == 0) {
++				for (vk::Image i: {mvc_mask.image.image, mvc_corr.image.image}) {
++					Barrier(command, i, L::eGeneral, L::eGeneral, S::eComputeShader, A::eShaderWrite, S::eComputeShader, A::eShaderRead);
++				}
++			}
++		}
++		Barrier(command, motion.image.image, L::eGeneral, L::eShaderReadOnlyOptimal, S::eComputeShader, A::eShaderWrite | A::eShaderRead,
++		        S::eComputeShader, A::eShaderRead);
++		mvc_seq[k] = f.seq;
++		mvc_parity = 1 - k;
++	}
++
+ #define KYTY_FG_CHECK(call)                                                                                  \
+ 	do {                                                                                                     \
+ 		if (const FfxErrorCode kyty_fg_error = (call); kyty_fg_error != FFX_OK) {                            \
+@@ -321,7 +573,8 @@ struct Generator::Impl {
+ 		const vk::Extent2D cap = render;
+ 		Destroy(false);
+ 		const auto read = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
+-		if (!MakeImage(depth, vk::Format::eR32Sfloat, cap, read) || !MakeImage(motion, vk::Format::eR16G16Sfloat, cap, read) ||
++		if (!MakeImage(depth, vk::Format::eR32Sfloat, cap, read) ||
++		    !MakeImage(motion, vk::Format::eR16G16Sfloat, cap, read | vk::ImageUsageFlagBits::eStorage) ||
+ 		    !MakeImage(flow_color, real.format, {std::max(real.extent.width / 2u, 1u), std::max(real.extent.height / 2u, 1u)}, read)) {
+ 			Report("image allocation failed; off\n");
+ 			failed = true;
+@@ -366,6 +619,16 @@ struct Generator::Impl {
+ 		KYTY_FG_CHECK(b.fpCreateResource(&b, &resources.dilatedDepth, shared, &dilated_depth));
+ 		KYTY_FG_CHECK(b.fpCreateResource(&b, &resources.dilatedMotionVectors, shared, &dilated_motion));
+ 		KYTY_FG_CHECK(b.fpCreateResource(&b, &resources.reconstructedPrevNearestDepth, shared, &previous_depth));
++		if (real.format == vk::Format::eA2B10G10R10UnormPack32 &&
++		    !MakeImage(hudless, real.format, real.extent,
++		               vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled)) {
++			Report("HUD-less image unavailable\n");
++			DestroyImage(hudless);
++		}
++		if (MvCheckWanted() && !MvCheckCreate(real.format, cap)) {
++			Report("motion-vector check unavailable (its resources could not be created)\n");
++			MvCheckDestroy();
++		}
+ 		created    = true;
+ 		display    = real.extent;
+ 		format     = real.format;
+@@ -431,13 +694,31 @@ struct Generator::Impl {
+ 		};
+ 		copy(depth, f.depth);
+ 		copy(motion, f.motion);
++		// The HUD-less frame (this frame's, saved at the title's UI composite) when there is one: what is interpolated.
++		hudless_valid = f.hudless_ok && hudless.image.image != nullptr && f.hudless.width == real.extent.width &&
++		                f.hudless.height == real.extent.height;
++		if (hudless_valid) {
++			Barrier(command, hudless.image.image, vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
++			        vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead, vk::PipelineStageFlagBits2::eTransfer,
++			        vk::AccessFlagBits2::eTransferWrite);
++			vk::BufferImageCopy region {};
++			region.bufferOffset      = f.hudless.offset;
++			region.bufferRowLength   = f.hudless.pitch;
++			region.imageSubresource  = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++			region.imageExtent       = vk::Extent3D {f.hudless.width, f.hudless.height, 1};
++			command.copyBufferToImage(buffer, hudless.image.image, vk::ImageLayout::eTransferDstOptimal, 1, &region);
++			Barrier(command, hudless.image.image, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eTransferSrcOptimal,
++			        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite, vk::PipelineStageFlagBits2::eTransfer,
++			        vk::AccessFlagBits2::eTransferRead);
++		}
++		const Target source = hudless_valid ? Target {hudless.image.image, real.format, real.extent, real.usage, real.guides} : real;
+ 		// Optical flow's half-size frame (linear filter: a 2x2 box at exactly half).
+ 		vk::ImageBlit blit {};
+ 		blit.srcSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+ 		blit.dstSubresource = blit.srcSubresource;
+ 		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(real.extent.width), static_cast<int32_t>(real.extent.height), 1};
+ 		blit.dstOffsets[1]  = vk::Offset3D {static_cast<int32_t>(flow_color.info.extent.width), static_cast<int32_t>(flow_color.info.extent.height), 1};
+-		command.blitImage(real.image, vk::ImageLayout::eTransferSrcOptimal, flow_color.image.image, vk::ImageLayout::eTransferDstOptimal, 1,
++		command.blitImage(source.image, vk::ImageLayout::eTransferSrcOptimal, flow_color.image.image, vk::ImageLayout::eTransferDstOptimal, 1,
+ 		                  &blit, vk::Filter::eLinear);
+ 		for (auto* i: {&depth, &motion, &flow_color}) {
+ 			Barrier(command, i->image.image, vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+@@ -445,6 +726,13 @@ struct Generator::Impl {
+ 			        vk::AccessFlagBits2::eShaderRead);
+ 			i->layout = vk::ImageLayout::eShaderReadOnlyOptimal;
+ 		}
++		MvCheckRecord(command, source, f); // (the title's vectors against the image: see fgMvCheck.comp)
++		if (hudless_valid) {
++			Barrier(command, hudless.image.image, vk::ImageLayout::eTransferSrcOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
++			        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eComputeShader,
++			        vk::AccessFlagBits2::eShaderRead);
++			hudless.layout = vk::ImageLayout::eShaderReadOnlyOptimal;
++		}
+ 		return true;
+ 	}
+ 
+@@ -640,6 +928,9 @@ struct Generator::Impl {
+ 		d.displaySize                     = {display.width, display.height};
+ 		d.renderSize                      = {f.depth.width, f.depth.height};
+ 		d.currentBackBuffer               = color;
++		if (hudless_valid) { // FSR interpolates this and takes the UI from the real frame where they differ
++			d.currentBackBuffer_HUDLess = ToResource(hudless.image.image, hudless.info, L"KytyFgHudless", false);
++		}
+ 		d.output                          = out;
+ 		d.interpolationRect               = {0, 0, static_cast<int32_t>(display.width), static_cast<int32_t>(display.height)};
+ 		d.opticalFlowVector               = fv;
+@@ -675,6 +966,227 @@ struct Generator::Impl {
+ 		return shown;
+ 	}
+ #undef KYTY_FG_CHECK
++
++	// ---- Diagnostic dump: KYTY_FRAMEGEN_DUMP=dir, KYTY_FRAMEGEN_DUMP_AT=seconds[,seconds...] (since start, default 90),
++	// KYTY_FRAMEGEN_DUMP_FRAMES=n (consecutive, default 3). Each frame: the real frame, the generated one shown before
++	// it, and the guides interpolation read, as raw files and a JSON line (tools: fg_dump_view.py).
++	struct DumpState {
++		bool                    init = false, on = false, pending = false;
++		std::string             dir;
++		std::vector<double>     at;
++		size_t                  next = 0;
++		int                     frames = 3, left = 0, n = 0;
++		vk::Buffer              buf  = nullptr;
++		vk::DeviceMemory        mem  = nullptr;
++		uint64_t                size = 0;
++		uint64_t                off[5] {}, bytes[5] {};
++		bool                    hudless = false;
++		uint32_t                w = 0, h = 0, gw = 0, gh = 0;
++		vk::Format              fmt = vk::Format::eUndefined;
++		uint64_t                want = 0;
++		NativeUpscaler::FgFrame f {};
++		double                  t = 0;
++	} dump;
++
++	static double SinceStart() { // (since the emulator started: g_fg_process_start is set at load)
++		return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_fg_process_start).count();
++	}
++	void DumpFree() {
++		if (dump.buf) g.device.destroyBuffer(dump.buf);
++		if (dump.mem) g.device.freeMemory(dump.mem);
++		dump.buf  = nullptr;
++		dump.mem  = nullptr;
++		dump.size = 0;
++	}
++	bool DumpAlloc(uint64_t size) {
++		vk::BufferCreateInfo info {};
++		info.size        = size;
++		info.usage       = vk::BufferUsageFlagBits::eTransferDst;
++		info.sharingMode = vk::SharingMode::eExclusive;
++		const auto created_buffer = g.device.createBuffer(info);
++		if (created_buffer.result != vk::Result::eSuccess) return false;
++		const auto  req   = g.device.getBufferMemoryRequirements(created_buffer.value);
++		const auto& props = g.physical_device_memory_properties;
++		int         type  = -1;
++		for (const auto want: {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent |
++		                           vk::MemoryPropertyFlagBits::eHostCached,
++		                       vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent}) {
++			for (uint32_t i = 0; i < props.memoryTypeCount && type < 0; i++) {
++				if ((req.memoryTypeBits & (1u << i)) != 0 && (props.memoryTypes[i].propertyFlags & want) == want) type = static_cast<int>(i);
++			}
++			if (type >= 0) break;
++		}
++		if (type < 0) {
++			g.device.destroyBuffer(created_buffer.value);
++			return false;
++		}
++		vk::MemoryAllocateInfo allocate {};
++		allocate.allocationSize  = req.size;
++		allocate.memoryTypeIndex = static_cast<uint32_t>(type);
++		const auto allocated     = g.device.allocateMemory(allocate);
++		if (allocated.result != vk::Result::eSuccess) {
++			g.device.destroyBuffer(created_buffer.value);
++			return false;
++		}
++		if (g.device.bindBufferMemory(created_buffer.value, allocated.value, 0) != vk::Result::eSuccess) {
++			g.device.freeMemory(allocated.value);
++			g.device.destroyBuffer(created_buffer.value);
++			return false;
++		}
++		dump.buf  = created_buffer.value;
++		dump.mem  = allocated.value;
++		dump.size = size;
++		return true;
++	}
++	// After Record, `real` in SHADER_READ_ONLY_OPTIMAL and `output` in GENERAL (both left so).
++	bool DumpRecord(vk::CommandBuffer command, const Target& real, const Target& output) {
++		auto& d = dump;
++		if (!d.init) {
++			d.init = true;
++			if (const char* v = std::getenv("KYTY_FRAMEGEN_DUMP"); v != nullptr && *v != '\0') {
++				d.dir = v;
++				d.on  = true;
++			}
++			if (const char* v = std::getenv("KYTY_FRAMEGEN_DUMP_AT"); v != nullptr) {
++				for (const char* p = v; *p != '\0';) {
++					char*        end = nullptr;
++					const double s   = std::strtod(p, &end);
++					if (end == p) break;
++					d.at.push_back(s);
++					p = *end == ',' ? end + 1 : end;
++				}
++			}
++			if (const char* v = std::getenv("KYTY_FRAMEGEN_DUMP_FRAMES"); v != nullptr) d.frames = std::clamp(std::atoi(v), 1, 12);
++			if (d.at.empty()) d.at.push_back(90.0);
++			std::sort(d.at.begin(), d.at.end());
++		}
++		if (!d.on || failed || !created || !Supported(real.format)) return false;
++		const double now = SinceStart();
++		if (d.left == 0) {
++			while (d.next < d.at.size() && now > d.at[d.next] + 30.0) d.next++; // (a missed time: not much later)
++			if (d.next >= d.at.size() || now < d.at[d.next]) return false;
++			d.next++;
++			d.left = d.frames;
++		}
++		const auto& f = frame;
++		d.w           = real.extent.width;
++		d.h           = real.extent.height;
++		d.gw          = f.depth.width;
++		d.gh          = f.depth.height;
++		d.bytes[0] = d.bytes[1] = static_cast<uint64_t>(d.w) * d.h * 4u;
++		d.bytes[2] = d.bytes[3] = static_cast<uint64_t>(d.gw) * d.gh * 4u;
++		d.hudless  = hudless_valid;
++		d.bytes[4] = d.hudless ? static_cast<uint64_t>(d.w) * d.h * 4u : 0u;
++		uint64_t total = 0;
++		for (int i = 0; i < 5; i++) {
++			d.off[i] = total;
++			total += (d.bytes[i] + 255u) & ~255ull;
++		}
++		if (d.buf && d.size < total) DumpFree();
++		if (!d.buf && !DumpAlloc(total)) {
++			Report("dump: no host-visible buffer of %llu MiB; dump off\n", static_cast<unsigned long long>(total >> 20u));
++			d.on = false;
++			return false;
++		}
++		using S = vk::PipelineStageFlagBits2;
++		using A = vk::AccessFlagBits2;
++		using L = vk::ImageLayout;
++		Barrier(command, real.image, L::eShaderReadOnlyOptimal, L::eTransferSrcOptimal, S::eComputeShader, A::eShaderRead, S::eTransfer,
++		        A::eTransferRead);
++		Barrier(command, output.image, L::eGeneral, L::eGeneral, S::eComputeShader, A::eShaderWrite, S::eTransfer, A::eTransferRead);
++		Barrier(command, depth.image.image, L::eShaderReadOnlyOptimal, L::eTransferSrcOptimal, S::eComputeShader, A::eShaderRead,
++		        S::eTransfer, A::eTransferRead);
++		Barrier(command, motion.image.image, L::eShaderReadOnlyOptimal, L::eTransferSrcOptimal, S::eComputeShader, A::eShaderRead,
++		        S::eTransfer, A::eTransferRead);
++		auto copy = [&](vk::Image image, L layout, uint32_t w, uint32_t h, uint64_t offset) {
++			vk::BufferImageCopy region {};
++			region.bufferOffset     = offset;
++			region.imageSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
++			region.imageExtent      = vk::Extent3D {w, h, 1};
++			command.copyImageToBuffer(image, layout, d.buf, 1, &region);
++		};
++		copy(real.image, L::eTransferSrcOptimal, d.w, d.h, d.off[0]);
++		copy(output.image, L::eGeneral, d.w, d.h, d.off[1]);
++		copy(depth.image.image, L::eTransferSrcOptimal, d.gw, d.gh, d.off[2]);
++		copy(motion.image.image, L::eTransferSrcOptimal, d.gw, d.gh, d.off[3]);
++		if (d.hudless) {
++			Barrier(command, hudless.image.image, L::eShaderReadOnlyOptimal, L::eTransferSrcOptimal, S::eComputeShader, A::eShaderRead,
++			        S::eTransfer, A::eTransferRead);
++			copy(hudless.image.image, L::eTransferSrcOptimal, d.w, d.h, d.off[4]);
++			Barrier(command, hudless.image.image, L::eTransferSrcOptimal, L::eShaderReadOnlyOptimal, S::eTransfer, A::eTransferRead,
++			        S::eComputeShader, A::eShaderRead);
++		}
++		Barrier(command, real.image, L::eTransferSrcOptimal, L::eShaderReadOnlyOptimal, S::eTransfer, A::eTransferRead,
++		        S::eComputeShader | S::eFragmentShader, A::eShaderRead);
++		Barrier(command, depth.image.image, L::eTransferSrcOptimal, L::eShaderReadOnlyOptimal, S::eTransfer, A::eTransferRead,
++		        S::eComputeShader, A::eShaderRead);
++		Barrier(command, motion.image.image, L::eTransferSrcOptimal, L::eShaderReadOnlyOptimal, S::eTransfer, A::eTransferRead,
++		        S::eComputeShader, A::eShaderRead);
++		vk::BufferMemoryBarrier2 bb {};
++		bb.srcStageMask        = S::eTransfer;
++		bb.srcAccessMask       = A::eTransferWrite;
++		bb.dstStageMask        = S::eHost;
++		bb.dstAccessMask       = A::eHostRead;
++		bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++		bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++		bb.buffer              = d.buf;
++		bb.offset              = 0;
++		bb.size                = VK_WHOLE_SIZE;
++		vk::DependencyInfo dep {};
++		dep.bufferMemoryBarrierCount = 1;
++		dep.pBufferMemoryBarriers    = &bb;
++		command.pipelineBarrier2(dep);
++		d.pending = true;
++		d.want    = real.guides;
++		d.f       = f;
++		d.t       = now;
++		d.fmt     = real.format;
++		return true;
++	}
++	// After the submission with DumpRecord's copies completed.
++	void DumpWrite() {
++		auto& d = dump;
++		if (!d.pending) return;
++		d.pending = false;
++		void*      p  = nullptr;
++		const auto rc = g.device.mapMemory(d.mem, 0, VK_WHOLE_SIZE, {}, &p);
++		if (rc != vk::Result::eSuccess || p == nullptr) {
++			d.on = false;
++			return;
++		}
++		auto blob = std::make_shared<std::vector<uint8_t>>(d.hudless ? d.off[4] + d.bytes[4] : d.off[3] + d.bytes[3]);
++		std::memcpy(blob->data(), p, blob->size());
++		g.device.unmapMemory(d.mem);
++		const int n = d.n++;
++		if (--d.left == 0) DumpFree(); // (memory is scarce: only while dumping)
++		char json[1024];
++		std::snprintf(json, sizeof(json),
++		              "{\"n\":%d,\"t\":%.3f,\"w\":%u,\"h\":%u,\"vk_format\":%d,\"gw\":%u,\"gh\":%u,\"seq\":%llu,\"want\":%llu,"
++		              "\"frame_id\":%llu,\"jitter\":[%.6g,%.6g],\"mv_scale\":[%.6g,%.6g],\"render\":[%u,%u],\"factor\":%u,"
++		              "\"frame_ms\":%.4g,\"near\":%.6g,\"far\":%.6g,\"fov\":%.6g,\"reset\":%d,\"off\":[%llu,%llu,%llu,%llu,%llu],"
++		              "\"hudless\":%d}\n",
++		              n, d.t, d.w, d.h, static_cast<int>(d.fmt), d.gw, d.gh, static_cast<unsigned long long>(d.f.seq),
++		              static_cast<unsigned long long>(d.want), static_cast<unsigned long long>(frame_id), d.f.jitter[0], d.f.jitter[1],
++		              d.f.mv_scale[0], d.f.mv_scale[1], d.f.render_w, d.f.render_h, d.f.factor, d.f.frame_ms, d.f.near_plane,
++		              d.f.far_plane, d.f.fov_y, d.f.reset ? 1 : 0, static_cast<unsigned long long>(d.off[0]),
++		              static_cast<unsigned long long>(d.off[1]), static_cast<unsigned long long>(d.off[2]),
++		              static_cast<unsigned long long>(d.off[3]), static_cast<unsigned long long>(d.off[4]), d.hudless ? 1 : 0);
++		const std::string dir = d.dir, line = json;
++		std::thread([blob, dir, line, n] {
++			char name[64];
++			std::snprintf(name, sizeof(name), "/fg-%03d.bin", n);
++			if (FILE* f = std::fopen((dir + name).c_str(), "wb"); f != nullptr) {
++				std::fwrite(blob->data(), 1, blob->size(), f);
++				std::fclose(f);
++			}
++			if (FILE* f = std::fopen((dir + "/fg-dump.jsonl").c_str(), "a"); f != nullptr) {
++				std::fputs(line.c_str(), f);
++				std::fclose(f);
++			}
++		}).detach();
++		Report("dump %d: frame seq %llu (flip wanted %llu) at %.1f s\n", n, static_cast<unsigned long long>(d.f.seq),
++		       static_cast<unsigned long long>(d.want), d.t);
++	}
+ };
+ 
+ Generator::Generator(GraphicContext& graphics): m_impl(std::make_unique<Impl>(graphics)) {}
+@@ -720,6 +1232,12 @@ void Generator::Retire(const std::function<bool(uint64_t)>& done) {
+ void Generator::Reset() {
+ 	m_impl->reset = true;
+ }
++bool Generator::DumpRecord(vk::CommandBuffer command, const Target& real, const Target& output) {
++	return m_impl->DumpRecord(command, real, output);
++}
++void Generator::DumpWrite() {
++	m_impl->DumpWrite();
++}
+ 
+ } // namespace Libs::Graphics::FrameGen
+ 
+@@ -757,6 +1275,10 @@ bool Generator::Generate(vk::CommandBuffer, const Target&, const Target&, float)
+ }
+ void Generator::Retire(const std::function<bool(uint64_t)>&) {}
+ void Generator::Reset() {}
++bool Generator::DumpRecord(vk::CommandBuffer, const Target&, const Target&) {
++	return false;
++}
++void Generator::DumpWrite() {}
+ } // namespace Libs::Graphics::FrameGen
+ 
+ #endif
+diff --git a/src/graphics/presentation/window/frameGen.h b/src/graphics/presentation/window/frameGen.h
+index 72cef1b..a922384 100644
+--- a/src/graphics/presentation/window/frameGen.h
++++ b/src/graphics/presentation/window/frameGen.h
+@@ -70,6 +70,11 @@ public:
+ 	// Drops the history: the next frame starts over (a pause, a skipped frame, a switch).
+ 	void Reset();
+ 
++	// Diagnostic (KYTY_FRAMEGEN_DUMP): after a Record that returned true, copies `real`, `output` and the guides to
++	// host memory when a dump is due. True: wait for the submission, then DumpWrite.
++	[[nodiscard]] bool DumpRecord(vk::CommandBuffer command, const Target& real, const Target& output);
++	void               DumpWrite();
++
+ private:
+ 	struct Impl;
+ 	std::unique_ptr<Impl> m_impl;
+diff --git a/src/graphics/presentation/window/swapchain.cpp b/src/graphics/presentation/window/swapchain.cpp
+index 0f91fc8..3b61ee1 100644
+--- a/src/graphics/presentation/window/swapchain.cpp
++++ b/src/graphics/presentation/window/swapchain.cpp
+@@ -1560,6 +1560,7 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
+ 	const FrameGen::Target source {real.image.image, real.image.format, extent, real.image.usage, real.fg_boundary};
+ 	Frame*                 generated = nullptr;
+ 	bool                   shown     = false;
++	bool                   dumping   = false;
+ 	if (fg->Begin(command.Handle(), source)) {
+ 		generated        = frames.Acquire(extent, real.image.format);
+ 		generated->hdr   = false;
+@@ -1569,12 +1570,17 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
+ 		generated->Transit(command.Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
+ 		const FrameGen::Target output {generated->image.image, generated->image.format, extent, generated->image.usage};
+ 		shown = (generated->image.usage & vk::ImageUsageFlagBits::eStorage) && fg->Record(command.Handle(), source, output);
++		dumping = shown && fg->DumpRecord(command.Handle(), source, output); // (diagnostic, KYTY_FRAMEGEN_DUMP)
+ 		generated->image.state = {vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+ 		                          vk::ImageLayout::eGeneral};
+ 	}
+ 	// (Submitted even when nothing was generated: the recorded transitions are the frames' tracked state.)
+ 	const uint64_t tick = present_scheduler.Submit();
+ 	fg->Submitted(tick);
++	if (dumping) {
++		present_scheduler.Wait(tick);
++		fg->DumpWrite();
++	}
+ 	if (generated != nullptr) {
+ 		generated->present_tick = tick;
+ 	}
+diff --git a/tools/upscaler-scan/kyty_upscaler_scan/discovered/d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5.json b/tools/upscaler-scan/kyty_upscaler_scan/discovered/d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5.json
+index 657520a..098b748 100644
+--- a/tools/upscaler-scan/kyty_upscaler_scan/discovered/d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5.json
++++ b/tools/upscaler-scan/kyty_upscaler_scan/discovered/d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5.json
+@@ -39,7 +39,7 @@
+     1
+    ]
+   },
+-  "motion_vectors": "uv_current_minus_previous",
++  "motion_vectors": "uv_previous_minus_current",
+   "formats": {
+    "color": 71,
+    "depth": 22,
+@@ -73,10 +73,25 @@
+   "hlx_flags": 121,
+   "evidence": {
+    "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+-   "motion_vectors": "history uv = (pixel+0.5)/size - mv (ISA): UV units, current minus previous",
++   "motion_vectors": "UV units, previous minus current (FSR convention, scale +render size). Measured, 2026-11-09 (logs/fgdump-demons-200807, frame generation dumps in a camera turn): warping the previous real frame by mv x (+size) reproduces the next one best (+0.8..+0.9 on background pixels, two pairs); -size is among the worst. The earlier reading from the ISA (history uv = uv - mv, current minus previous) had the sign wrong.",
+    "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+    "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+-   "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified"
++   "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified",
++   "hudless": "the one draw into the display buffer per frame (pixel shader 4abf9bed9a8ea5fe, 4 vertices) computes sRGB(ui.rgb + scene.rgb * (1 - ui.a)) from two RGBA16F T#s at ptr(ud0)+0x20 (ui: ~105 small quads a frame) and +0x40 (scene: one full-screen pass right after the TAA); exported f16 RTZ into the 2_10_10_10 display buffer (ISA, pass capture capture-demons-Znsv4P). HUD-less = sRGB(scene) (fg_hudless.s)."
++  },
++  "hudless": {
++   "composite_shader_hash": "4abf9bed9a8ea5fe",
++   "scene": [
++    0,
++    0,
++    64
++   ],
++   "ui": [
++    0,
++    0,
++    32
++   ],
++   "encoding": "srgb_a2b10g10r10"
+   }
+  },
+  "provenance": {
+@@ -85,4 +100,4 @@
+   "live": "HLX FSR 4 and HLX DLSS (Model E) in play, 0 failures (2026-11-09, logs/hlx-demons-*)",
+   "assembled": "by hand from the pipeline outputs; the automated pipeline writes this file"
+  }
+-}
+\ No newline at end of file
++}

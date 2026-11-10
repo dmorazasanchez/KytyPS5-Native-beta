@@ -1,0 +1,30 @@
+{
+ "adapter": "ffx_agc_fsr3upscaler_v1",
+ "at": "2026-11-09T22:40:25Z",
+ "binding_mismatches": 0,
+ "formats": {
+  "r_input_color_jittered": 71,
+  "r_input_depth": 22,
+  "r_input_exposure": 0,
+  "r_input_motion_vectors": 29,
+  "r_reactive_mask": 0,
+  "r_transparency_and_composition_mask": 0,
+  "rw_upscaled_output": 71
+ },
+ "output_size": [
+  2944,
+  1656
+ ],
+ "reason": "",
+ "rejected_invocations": 1,
+ "render_size": [
+  2944,
+  1656
+ ],
+ "runtime_bindings_verified": true,
+ "schema": "kyty-upscaler-runtime",
+ "schema_version": 1,
+ "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5",
+ "title": "PPSA01341 01.007.000",
+ "verified_invocations": 60
+}

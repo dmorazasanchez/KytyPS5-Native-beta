@@ -1,0 +1,104 @@
+{
+ "schema": "kyty-taa-discovery",
+ "schema_version": 1,
+ "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5",
+ "title_id": "PPSA01341",
+ "version": "01.007.000",
+ "adapter": "taa_paths_v1",
+ "taa": {
+  "shader_hash": "95523d71c04a6522",
+  "color": [
+   0,
+   8,
+   112
+  ],
+  "depth": [
+   0,
+   0,
+   2432
+  ],
+  "motion": [
+   0,
+   8,
+   176
+  ],
+  "output": [
+   0,
+   8,
+   256
+  ],
+  "jitter": {
+   "path": [
+    0,
+    0,
+    448
+   ],
+   "units": "uv",
+   "sign": [
+    1,
+    1
+   ]
+  },
+  "motion_vectors": "uv_current_minus_previous",
+  "formats": {
+   "color": 71,
+   "depth": 22,
+   "motion": 29,
+   "output": 71
+  },
+  "camera": {
+   "near": 0.1,
+   "far": 10000.0,
+   "fov": 1.0
+  },
+  "render_size": [
+   0,
+   8,
+   48
+  ],
+  "output_size": [
+   0,
+   8,
+   64
+  ],
+  "output_scale": {
+   "path": [
+    0,
+    8,
+    240
+   ],
+   "buffer_offset": 0,
+   "meaning": "the TAA multiplies colour by this exposure before writing"
+  },
+  "hlx_flags": 121,
+  "evidence": {
+   "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+   "motion_vectors": "UV current minus previous in the native TAA render coordinates (history UV = current UV - motion). The final composite mirrors X, so FG samples mirrored guide positions and uses (+width, -height) in display coordinates. Warp checks of moving real-frame pairs on 2026-11-09 confirm mirror-X with X positive and Y negative (background correlation 0.96-0.98); a single positive sign for both axes was masking the horizontal reflection and was incorrect vertically.",
+   "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+   "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+   "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified",
+   "hudless": "the one draw into the display buffer per frame (pixel shader 4abf9bed9a8ea5fe, 4 vertices) computes sRGB(ui.rgb + scene.rgb * (1 - ui.a)) from two RGBA16F T#s at ptr(ud0)+0x20 (ui: ~105 small quads a frame) and +0x40 (scene: one full-screen pass right after the TAA); exported f16 RTZ into the 2_10_10_10 display buffer (ISA, pass capture capture-demons-Znsv4P). HUD-less = sRGB(scene) (fg_hudless.s). Display scene X = width - 1 - source X; verified from all 18 fghl-demons-211907 captures. FG colour, depth and motion positions must share this display orientation."
+  },
+  "hudless": {
+   "composite_shader_hash": "4abf9bed9a8ea5fe",
+   "scene": [
+    0,
+    0,
+    64
+   ],
+   "ui": [
+    0,
+    0,
+    32
+   ],
+   "encoding": "srgb_a2b10g10r10"
+  },
+  "display_mirror_x": true
+ },
+ "provenance": {
+  "method": "pass capture -> ISA descriptor paths -> temporal ping-pong -> jitter search -> gameplay probe",
+  "runtime_bindings_verified": true,
+  "live": "HLX FSR 4 and HLX DLSS (Model E) in play, 0 failures (2026-11-09, logs/hlx-demons-*)",
+  "assembled": "by hand from the pipeline outputs; the automated pipeline writes this file"
+ }
+}

@@ -3,6 +3,7 @@
 #include "graphics/native_gpu/nativeUpscaler.h"
 
 #include <algorithm>
+#include <functional>
 #include <cstring>
 #include <atomic>
 #include <cstdio>
@@ -3826,8 +3827,29 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 			}
 		}
 	};
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+	std::function<void()> hudless_hook; // (set below, once emit_barrier_raw exists)
+#endif
 	auto skip_draw = [&]() {
 		fix_display_dcc();
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+		// Frame generation: a draw into a video-out buffer marks whose frame's image that buffer holds; the title's UI
+		// composite also gets the HUD-less frame saved ahead of it (FgHudlessDraw).
+		if (!m_compute_ring && NativeUpscaler::FgWatchDisplay()) {
+			bool display = false;
+			for (uint32_t i = 0; i < 8; i++) {
+				const uint32_t step = i * kCbColorStride;
+				const uint64_t base = (static_cast<uint64_t>(reg(cx, kCbColor0Base + step)) << 8u) |
+				                      (static_cast<uint64_t>(reg(cx, kCbColor0BaseExt + i) & 0xffu) << 40u);
+				if (base != 0 && ((reg(cx, kCbColor0Info + step) >> 2u) & 0x1fu) != 0) {
+					display = NativeUpscaler::FgNoteDisplayWrite(base) || display;
+				}
+			}
+			if (display && hudless_hook) {
+				hudless_hook();
+			}
+		}
+#endif
 		const uint64_t ps = (static_cast<uint64_t>(reg(sh, 0x008)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009)) << 40u);
 		if (!m_inspect.empty() && m_inspect.count(ps) != 0 && r.inspected.size() < 4) {
 			DrawSnapshot snap;
@@ -3929,6 +3951,36 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 			stats.pfp_syncs_emitted++;
 		}
 	};
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+	// Frame generation's HUD-less frame, ahead of the title's UI composite: its dispatch (compute SH registers), the
+	// copies written back to memory (the presenter reads them after this frame's flip), the title's registers back.
+	hudless_hook = [&]() {
+		if (!NativeUpscaler::FgHudlessWanted()) {
+			return;
+		}
+		const uint64_t ps = (static_cast<uint64_t>(reg(sh, 0x008u)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009u) & 0xffu) << 40u);
+		uint32_t       ud[16] {};
+		uint32_t       have = 0;
+		for (uint32_t i = 0; i < 16; i++) {
+			if (const uint32_t* v = sh.Find(0x00Cu + i); v != nullptr) { // SPI_SHADER_USER_DATA_PS_*
+				ud[i] = *v;
+				have |= 1u << i;
+			}
+		}
+		std::vector<uint32_t> ins;
+		if (!NativeUpscaler::FgHudlessDraw(ps, ud, have, ins)) {
+			return;
+		}
+		body.insert(body.end(), ins.begin(), ins.end());
+		body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+		body.push_back((4u << 8u) | 7u); // CS_PARTIAL_FLUSH
+		emit_barrier_raw(true);
+		for (const uint32_t off: NativeUpscaler::kTouchedSh) {
+			const uint32_t* v = sh.Find(off);
+			EmitSet(body, IT_SET_SH_REG, off, PatchSh(off, v != nullptr ? *v : 0u), true);
+		}
+	};
+#endif
 	// The barrier as a whole between the wrap's two packets; the ME's wait on our fence gets its PFP_SYNC_ME before
 	// the "on" whatever the guest's engine was (a barrier has drained the pipe already, so it costs little).
 	auto emit_barrier = [&](bool pfp) {
@@ -4629,6 +4681,48 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 		emit_barrier(pfp);
 		return std::nullopt;
 	};
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+	auto emit_upscaler_boundary = [&](const NativeUpscaler::Boundary& upscaler) {
+		// Drain the accumulate waves and make every producer's writes visible to the pack's image loads.
+		body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+		body.push_back((4u << 8u) | 7u); // CS_PARTIAL_FLUSH
+		emit_barrier_raw(true);
+		body.insert(body.end(), upscaler.before.begin(), upscaler.before.end());
+		body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+		body.push_back((4u << 8u) | 7u);
+		emit_barrier_raw(true); // GL2 written back: the staging is complete in memory at the EOP
+		const uint64_t stall_stamp = upscaler.gate != 0 ? NativeUpscaler::StallStampAddr(upscaler.id, 0) : 0;
+		if (stall_stamp != 0) {
+			EmitTimestampRelease(body, stall_stamp, m_compute_ring); // (diagnostic: the boundary's end)
+		}
+		if (upscaler.id != 0) {
+			TrackerPoint p;
+			p.kind = TrackerPoint::Kind::UpscalerBoundary;
+			p.addr = upscaler.id;
+			tracker_point(std::move(p));
+			flush_points();
+		}
+		// Host memory, never GPU-visible: the rest of the frame stays on the CPU and the ring stays free.
+		// (No gate: frame generation's guide copies alone, which only need the EOP above.)
+		if (upscaler.gate != 0) {
+			split_at_wait(WaitCond {upscaler.gate, upscaler.gate_ref, 0xffffffffull, 3, false, false});
+			if (stall_stamp != 0) {
+				EmitTimestampRelease(body, stall_stamp + 8u, m_compute_ring); // (diagnostic: the frame resumes)
+			}
+		}
+		if (!upscaler.after.empty()) {
+			body.insert(body.end(), upscaler.after.begin(), upscaler.after.end());
+			body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
+			body.push_back((4u << 8u) | 7u);
+			emit_barrier_raw(true);
+		}
+		// The title's own values for every SH register the inserted dispatches wrote.
+		for (const uint32_t off: NativeUpscaler::kTouchedSh) {
+			const uint32_t* v = sh.Find(off);
+			EmitSet(body, IT_SET_SH_REG, off, PatchSh(off, v != nullptr ? *v : 0u), true);
+		}
+	};
+#endif
 	while (dw < dcb.size()) {
 		if (cond.active && (!cond_clean() || (dw >= cond.end && (dw != cond.end || !cond_close())))) {
 			return fail(IT_COND_EXEC, cond.dw, RefuseWhy::CondExecForm);
@@ -6036,16 +6130,46 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 					}
 				}
 				break;
-			case IT_DRAW_INDEX_AUTO: // a non-indexed draw: no index buffer to reference
+			case IT_DRAW_INDEX_AUTO: { // a non-indexed draw: no index buffer to reference
 				log_draw(op, body_count >= 1 ? bptr[0] : 0, 0, false);
-				if (skip_draw()) {
+				const bool skipped = skip_draw();
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+				uint64_t composite_ud = 0;
+				if (!skipped && labels && !cond.active && body_count >= 1 && bptr[0] == 4 && NativeUpscaler::TaaWanted()) {
+					uint32_t ud[16] {}, have = 0;
+					for (uint32_t i = 0; i < 16; ++i) {
+						if (const uint32_t* v = sh.Find(0x00Cu + i); v != nullptr) { ud[i] = *v; have |= 1u << i; }
+					}
+					const uint64_t ps = (static_cast<uint64_t>(reg(sh, 0x008u)) << 8u) | (static_cast<uint64_t>(reg(sh, 0x009u) & 0xffu) << 40u);
+					uint32_t left = 0;
+					NativeUpscaler::Boundary composite;
+					if (NativeUpscaler::TakeComposite(source_va(static_cast<uint32_t>(dw), &left), ps, ud, have, &composite, &composite_ud)) {
+						for (uint32_t i = 0; i < 8; ++i) {
+							const uint64_t base = (static_cast<uint64_t>(reg(cx, kCbColor0Base + i * kCbColorStride)) << 8u) |
+							                      (static_cast<uint64_t>(reg(cx, kCbColor0BaseExt + i) & 0xffu) << 40u);
+							if (base != 0) NativeUpscaler::FgNoteDisplayWrite(base);
+						}
+						emit_upscaler_boundary(composite);
+						EmitSet(body, IT_SET_SH_REG, 0x00Cu, static_cast<uint32_t>(composite_ud), false);
+						EmitSet(body, IT_SET_SH_REG, 0x00Du, static_cast<uint32_t>(composite_ud >> 32u), false);
+					}
+				}
+#endif
+				if (skipped) {
 					stats.draws_skipped++;
 				} else {
 					body.insert(body.end(), dcb.begin() + dw, dcb.begin() + dw + size);
 				}
+#if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
+				if (composite_ud != 0) {
+					EmitSet(body, IT_SET_SH_REG, 0x00Cu, PatchSh(0x00Cu, reg(sh, 0x00Cu)), false);
+					EmitSet(body, IT_SET_SH_REG, 0x00Du, PatchSh(0x00Du, reg(sh, 0x00Du)), false);
+				}
+#endif
 				stats.draws++;
 				collect_refs();
 				break;
+			}
 			case IT_SET_BASE: // BASE_INDEX, address: where indirect draw/dispatch arguments live
 				if (body_count < 3) {
 					return fail(op, dw, RefuseWhy::ShortBody);
@@ -6178,44 +6302,7 @@ Pm4TranslateResult Pm4Translator::Translate(std::span<const uint32_t> dcb) {
 				stats.dispatches++;
 				collect_refs();
 #if defined(KYTY_ENABLE_EXPERIMENTAL_NATIVE_UPSCALER) && defined(__linux__)
-				if (upscaler_hit) {
-					// Drain the accumulate waves and make every producer's writes visible to the pack's image loads.
-					body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
-					body.push_back((4u << 8u) | 7u); // CS_PARTIAL_FLUSH
-					emit_barrier_raw(true);
-					body.insert(body.end(), upscaler.before.begin(), upscaler.before.end());
-					body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
-					body.push_back((4u << 8u) | 7u);
-					emit_barrier_raw(true); // GL2 written back: the staging is complete in memory at the EOP
-					const uint64_t stall_stamp = upscaler.gate != 0 ? NativeUpscaler::StallStampAddr(upscaler.id, 0) : 0;
-					if (stall_stamp != 0) {
-						EmitTimestampRelease(body, stall_stamp, m_compute_ring); // (diagnostic: the boundary's end)
-					}
-					TrackerPoint p;
-					p.kind = TrackerPoint::Kind::UpscalerBoundary;
-					p.addr = upscaler.id;
-					tracker_point(std::move(p));
-					flush_points();
-					// Host memory, never GPU-visible: the rest of the frame stays on the CPU and the ring stays free.
-					// (No gate: frame generation's guide copies alone, which only need the EOP above.)
-					if (upscaler.gate != 0) {
-						split_at_wait(WaitCond {upscaler.gate, upscaler.gate_ref, 0xffffffffull, 3, false, false});
-						if (stall_stamp != 0) {
-							EmitTimestampRelease(body, stall_stamp + 8u, m_compute_ring); // (diagnostic: the frame resumes)
-						}
-					}
-					if (!upscaler.after.empty()) {
-						body.insert(body.end(), upscaler.after.begin(), upscaler.after.end());
-						body.push_back(Pkt3(IT_EVENT_WRITE, 1, m_compute_ring));
-						body.push_back((4u << 8u) | 7u);
-						emit_barrier_raw(true);
-					}
-					// The title's own values for every SH register the inserted dispatches wrote.
-					for (const uint32_t off: NativeUpscaler::kTouchedSh) {
-						const uint32_t* v = sh.Find(off);
-						EmitSet(body, IT_SET_SH_REG, off, PatchSh(off, v != nullptr ? *v : 0u), true);
-					}
-				}
+				if (upscaler_hit) emit_upscaler_boundary(upscaler);
 #endif
 				break;
 			}

@@ -10,7 +10,7 @@ prod = Path('/home/david/kyty-native-instructions-20261106')
 build = prod / '_Build/native-instructions'
 out = here / 'objects'; out.mkdir(exist_ok=True)
 logs = here / 'logs'; logs.mkdir(exist_ok=True)
-sources = ['src/libs/agc.cpp', 'src/graphics/native_gpu/nativePm4.cpp', 'src/graphics/native_gpu/nativeShadow.cpp',
+sources = ['src/libs/agc.cpp', 'src/loader/runtimeLinker.cpp', 'src/graphics/native_gpu/nativePm4.cpp', 'src/graphics/native_gpu/nativeShadow.cpp',
            'src/graphics/presentation/gameMenu.cpp', 'src/graphics/presentation/window/swapchain.cpp',
            'src/graphics/presentation/videoOut.cpp']
 new_sources = ['src/graphics/native_gpu/nativeUpscaler.cpp', 'src/graphics/presentation/window/frameGen.cpp',

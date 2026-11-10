@@ -1,0 +1,19 @@
+{
+  "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_fgpair",
+  "sha256": "5c5874a5a0e690b31ef9fc68d9ef7213c57745b39c1adfe8a0f4981b73d5e3e2",
+  "worktree_head": "6fbb559f31b5db61227d73f25cd5d608a7a5829b",
+  "production_release_sha256_unchanged": "8b45be1d9d9544e0615a9931f761f5fc7b078361ac11ac87e1a95a91ea2dd9f2",
+  "compiled": [
+    "src/libs/agc.cpp",
+    "src/graphics/native_gpu/nativePm4.cpp",
+    "src/graphics/native_gpu/nativeShadow.cpp",
+    "src/graphics/presentation/gameMenu.cpp",
+    "src/graphics/presentation/window/swapchain.cpp",
+    "src/graphics/presentation/videoOut.cpp",
+    "src/graphics/native_gpu/nativeUpscaler.cpp",
+    "src/graphics/presentation/window/frameGen.cpp",
+    "src/graphics/native_gpu/nativePassCapture.cpp"
+  ],
+  "other_objects_from": "/home/david/kyty-native-instructions-20261106/_Build/native-instructions",
+  "fidelityfx": "/home/david/kyty-auto-upscaler-20261109/3rdparty/fidelityfx"
+}

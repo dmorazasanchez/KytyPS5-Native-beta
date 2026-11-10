@@ -5,10 +5,13 @@
 // wave64, one 64-lane group per 8x8 output tile, 1-D local id in v0.
 // user SGPRs: s[0:1] table {depth T# 8 dw, motion T# 8 dw, depth V# 4 dw, motion V# 4 dw}, s2 output width,
 // s3 output height, s4 staging pitch (elements), s5 factor f; s6 TGID_X, s7 TGID_Y.
+// Table +0x60: source width - 1, mirror X. Sample the title's guides in display orientation; the host reflects the
+// X motion scale and jitter separately. The default (no mirror) keeps the FSR3 title's coordinate system.
   s_load_dwordx8 s[8:15], s[0:1], 0x0
   s_load_dwordx8 s[16:23], s[0:1], 0x20
   s_load_dwordx4 s[24:27], s[0:1], 0x40
   s_load_dwordx4 s[28:31], s[0:1], 0x50
+  s_load_dwordx2 s[40:41], s[0:1], 0x60
   v_and_b32 v1, 7, v0
   v_lshrrev_b32 v2, 3, v0
   v_lshl_add_u32 v1, s6, 3, v1
@@ -22,14 +25,21 @@
   v_mul_u32_u24 v4, v1, s5               // block origin in the render image
   v_mul_u32_u24 v5, v2, s5
   v_mov_b32 v8, 0                         // nearest depth so far (inverted: larger is nearer)
-  v_mov_b32 v9, v4                        // and where it was
-  v_mov_b32 v10, v5
   s_waitcnt lgkmcnt(0)
+  s_mov_b32 s42, 1                       // source X step within the block
+  s_cmp_eq_u32 s41, 0
+  s_cbranch_scc1 .Lorigin
+  s_mov_b32 s42, -1
+  v_sub_nc_u32 v4, s40, v4               // mirrored block origin: width - 1 - output_x * factor
+.Lorigin:
+  v_mov_b32 v9, v4                        // nearest depth's position (also the fallback for zero depth)
+  v_mov_b32 v10, v5
   s_mov_b32 s38, 0                        // dy
 .Ly:
   s_mov_b32 s39, 0                        // dx
 .Lx:
-  v_add_nc_u32 v11, s39, v4
+  s_mul_i32 s43, s39, s42
+  v_add_nc_u32 v11, s43, v4
   v_add_nc_u32 v12, s38, v5
   image_load v13, v[11:12], s[8:15] dmask:0x1 dim:SQ_RSRC_IMG_2D unorm
   s_waitcnt vmcnt(0)

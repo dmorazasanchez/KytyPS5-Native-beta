@@ -1,0 +1,394 @@
+{
+  "game-foreground-codex-working": {
+    "samples": 49,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 7.3,
+          "median": 28.8,
+          "max": 96.2
+        },
+        "Pss": {
+          "min": 7.3,
+          "median": 28.7,
+          "max": 96.2
+        },
+        "SwapPss": {
+          "min": 204.1,
+          "median": 227.8,
+          "max": 290.8
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 3.3,
+          "median": 4.6,
+          "max": 36.8
+        },
+        "Pss": {
+          "min": 2.2,
+          "median": 3.1,
+          "max": 34.3
+        },
+        "SwapPss": {
+          "min": 81.8,
+          "median": 92.1,
+          "max": 92.4
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "game-retry-starting-working": {
+    "samples": 46,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 21.2,
+          "median": 96.4,
+          "max": 241.6
+        },
+        "Pss": {
+          "min": 21.0,
+          "median": 96.2,
+          "max": 241.3
+        },
+        "SwapPss": {
+          "min": 135.4,
+          "median": 191.8,
+          "max": 237.0
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 4.3,
+          "median": 15.4,
+          "max": 98.8
+        },
+        "Pss": {
+          "min": 2.8,
+          "median": 10.6,
+          "max": 91.5
+        },
+        "SwapPss": {
+          "min": 60.9,
+          "median": 90.9,
+          "max": 91.6
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "game-starting-working": {
+    "samples": 40,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 121.1,
+          "median": 223.8,
+          "max": 253.3
+        },
+        "Pss": {
+          "min": 120.9,
+          "median": 223.4,
+          "max": 252.6
+        },
+        "SwapPss": {
+          "min": 112.8,
+          "median": 142.3,
+          "max": 161.8
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 11.9,
+          "median": 88.8,
+          "max": 97.3
+        },
+        "Pss": {
+          "min": 7.8,
+          "median": 82.4,
+          "max": 90.5
+        },
+        "SwapPss": {
+          "min": 58.5,
+          "median": 68.9,
+          "max": 88.1
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "launcher-background-game-running-codex-idle": {
+    "samples": 36,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 29.7,
+          "median": 117.0,
+          "max": 225.6
+        },
+        "Pss": {
+          "min": 29.6,
+          "median": 115.9,
+          "max": 224.5
+        },
+        "SwapPss": {
+          "min": 158.9,
+          "median": 218.0,
+          "max": 254.7
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 3.0,
+          "median": 76.2,
+          "max": 76.6
+        },
+        "Pss": {
+          "min": 2.4,
+          "median": 69.3,
+          "max": 69.6
+        },
+        "SwapPss": {
+          "min": 72.1,
+          "median": 72.3,
+          "max": 92.5
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "launcher-focused-game-running-codex-idle": {
+    "samples": 27,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 16.3,
+          "median": 32.6,
+          "max": 113.1
+        },
+        "Pss": {
+          "min": 16.3,
+          "median": 32.5,
+          "max": 113.0
+        },
+        "SwapPss": {
+          "min": 193.9,
+          "median": 231.3,
+          "max": 260.2
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 2.6,
+          "median": 5.2,
+          "max": 36.4
+        },
+        "Pss": {
+          "min": 1.9,
+          "median": 3.5,
+          "max": 33.6
+        },
+        "SwapPss": {
+          "min": 81.9,
+          "median": 91.9,
+          "max": 92.8
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "launcher-focused-no-game-working": {
+    "samples": 42,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 222.2,
+          "median": 239.6,
+          "max": 275.7
+        },
+        "Pss": {
+          "min": 221.4,
+          "median": 238.9,
+          "max": 275.0
+        },
+        "SwapPss": {
+          "min": 113.0,
+          "median": 113.2,
+          "max": 113.3
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 100.7,
+          "median": 100.7,
+          "max": 100.7
+        },
+        "Pss": {
+          "min": 93.7,
+          "median": 94.5,
+          "max": 94.5
+        },
+        "SwapPss": {
+          "min": 63.6,
+          "median": 63.6,
+          "max": 63.6
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 398.9
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 396.2
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0.0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "working-build": {
+    "samples": 17,
+    "groups": {
+      "codex": {
+        "Rss": {
+          "min": 215.3,
+          "median": 235.2,
+          "max": 235.8
+        },
+        "Pss": {
+          "min": 214.6,
+          "median": 234.5,
+          "max": 235.0
+        },
+        "SwapPss": {
+          "min": 113.4,
+          "median": 113.4,
+          "max": 113.4
+        }
+      },
+      "launcher": {
+        "Rss": {
+          "min": 99.5,
+          "median": 100.1,
+          "max": 100.7
+        },
+        "Pss": {
+          "min": 93.3,
+          "median": 94.0,
+          "max": 94.5
+        },
+        "SwapPss": {
+          "min": 63.6,
+          "median": 63.6,
+          "max": 64.1
+        }
+      },
+      "build": {
+        "Rss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "Pss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "SwapPss": {
+          "min": 0,
+          "median": 0,
+          "max": 0
+        }
+      }
+    }
+  }
+}

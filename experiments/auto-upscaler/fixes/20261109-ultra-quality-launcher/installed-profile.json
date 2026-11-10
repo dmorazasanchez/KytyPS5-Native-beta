@@ -1,0 +1,524 @@
+{
+ "schema": "kyty-upscaler-profile",
+ "schema_version": 2,
+ "scanner_version": "1.1.0",
+ "scanned_at": "2026-11-09T21:56:43+00:00",
+ "game_executed": false,
+ "gpu_used": false,
+ "game": {
+  "title_id": "PPSA01341",
+  "version": "01.007.000",
+  "name": "Demon's Souls",
+  "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5",
+  "executable_bytes": "0x2b9a033",
+  "location": {
+   "file": "/home/david/Downloads/Demons Souls (v01.007) (Deluxe Edition) \u2013 BP 4.xx \u2013 PPSA01341 \u2013 FPKG/EP9000-PPSA01341_00-DEMONSSOULS00000-files/eboot.bin"
+  },
+  "stamp": "45719603|1793291414196093170",
+  "attribute3": "0x400000",
+  "ps5_pro_enhanced": true
+ },
+ "imports": {
+  "count": 1180,
+  "libraries": [
+   "libSceAcm",
+   "libSceAgc",
+   "libSceAgcDriver",
+   "libSceAjm",
+   "libSceAmpr",
+   "libSceAppContent",
+   "libSceAudioOut",
+   "libSceAudioOut2",
+   "libSceCommonDialog",
+   "libSceCoredump",
+   "libSceFiber",
+   "libSceGameUpdate",
+   "libSceHttp",
+   "libSceHttp2",
+   "libSceIme",
+   "libSceImeDialog",
+   "libSceJpegEnc",
+   "libSceJson2",
+   "libSceNet",
+   "libSceNetCtl",
+   "libSceNpCommerce",
+   "libSceNpCppWebApi",
+   "libSceNpEntitlementAccess",
+   "libSceNpGameIntent",
+   "libSceNpManager",
+   "libSceNpSessionSignaling",
+   "libSceNpUniversalDataSystem",
+   "libSceNpWebApi2",
+   "libScePad",
+   "libScePlayGo",
+   "libScePngEnc",
+   "libScePosix",
+   "libScePsml",
+   "libSceRtc",
+   "libSceSaveDataDialog.native",
+   "libSceSaveData_native",
+   "libSceShare",
+   "libSceSigninDialog",
+   "libSceSsl",
+   "libSceSysmodule",
+   "libSceSystemGesture",
+   "libSceSystemService",
+   "libSceUserService",
+   "libSceUserServicePlatformPrivacyWs1",
+   "libSceVideoOut",
+   "libc",
+   "libkernel"
+  ]
+ },
+ "psml": {
+  "libraries": [
+   "libScePsml"
+  ],
+  "other_imports": {
+   "3WVD91e12ZQ": "initialize",
+   "+2KpvixvL6E": "shared_requirements",
+   "eWoKNeB6V-k": "create_shared_resources",
+   "jEevBXmagOQ": "release_shared_resources",
+   "fccGInHrj8A": "create_context",
+   "JaLBe0P3jSU": "release_context",
+   "AHalTX9wFZY": "dispatch_size",
+   "GHna9-DvnUk": "mipmap_bias",
+   "GJY0MvuTcs8": "request_capture",
+   "LXq+6mIxpCw": "validate_object",
+   "FSGaTQze0UY": "validate_object"
+  },
+  "unknown_imports": [
+   "VGjrQa-WqdU"
+  ]
+ },
+ "fidelityfx": {
+  "components": {},
+  "frame_interpolation_in_game": false
+ },
+ "routes": [
+  {
+   "family": "psml",
+   "abi": "psml_legacy_r2",
+   "abi_source": "Demon's Souls 1.007 historical dispatch capture (pssrInputContract.h) + Codex static check",
+   "entry": {
+    "kind": "import",
+    "nid": "94iBp3KvIuI",
+    "library": "libScePsml",
+    "module": "libScePsml",
+    "got_rva": "0x26d4908",
+    "plt_rvas": [
+     "0x1e783f0"
+    ]
+   },
+   "runtime_hook": "kyty_hle_import",
+   "mode_requirement": "ps5_pro",
+   "callsites": [
+    {
+     "chain": [
+      {
+       "function_rva": "0x1e73ac0",
+       "call_rva": "0x1e73b6a",
+       "callee_rva": "0x1e783f0",
+       "passes": "rdx"
+      },
+      {
+       "function_rva": "0xa52eb0",
+       "call_rva": "0xa53646",
+       "callee_rva": "0x1e73ac0"
+      }
+     ],
+     "game_function_rva": "0xa52eb0",
+     "game_call_rva": "0xa53646",
+     "parameter_value": "address",
+     "parameter_block": {
+      "kind": "global",
+      "rva": "0x2f63f10"
+     },
+     "resources": {
+      "output": {
+       "slot": 0,
+       "parameter_offset": "0x0",
+       "store_rvas": [
+        "0xa53411"
+       ],
+       "stored_from_register": true,
+       "source": "rcx"
+      },
+      "color": {
+       "slot": 1,
+       "parameter_offset": "0x8",
+       "store_rvas": [
+        "0xa5340a"
+       ],
+       "stored_from_register": true,
+       "source": "rax"
+      },
+      "motion_vectors": {
+       "slot": 2,
+       "parameter_offset": "0x10",
+       "store_rvas": [
+        "0xa5341f"
+       ],
+       "stored_from_register": true,
+       "source": "rdx"
+      },
+      "aux_slot3": {
+       "slot": 3,
+       "parameter_offset": "0x18",
+       "store_rvas": [
+        "0xa53440"
+       ],
+       "stored_from_register": false,
+       "source": "0x0"
+      },
+      "depth": {
+       "slot": 4,
+       "parameter_offset": "0x20",
+       "store_rvas": [
+        "0xa53439"
+       ],
+       "stored_from_register": true,
+       "source": "rcx"
+      },
+      "exposure": {
+       "slot": 5,
+       "parameter_offset": "0x28",
+       "store_rvas": [
+        "0xa5348a"
+       ],
+       "stored_from_register": true,
+       "source": "rax"
+      },
+      "aux_slot6": {
+       "slot": 6,
+       "parameter_offset": "0x30",
+       "store_rvas": [
+        "0xa5344f"
+       ],
+       "stored_from_register": true,
+       "source": "rax"
+      }
+     },
+     "fields": {
+      "projection": {
+       "parameter_offset": "0x6c",
+       "bytes": 64,
+       "stored": true,
+       "store_rvas": [
+        "0xa5339e",
+        "0xa533a6",
+        "0xa5354f",
+        "0xa53557"
+       ]
+      },
+      "near": {
+       "parameter_offset": "0xe8",
+       "bytes": 4,
+       "stored": true,
+       "store_rvas": [
+        "0xa53396",
+        "0xa533b6",
+        "0xa5349a"
+       ]
+      },
+      "far": {
+       "parameter_offset": "0xec",
+       "bytes": 4,
+       "stored": true,
+       "store_rvas": [
+        "0xa533b6",
+        "0xa5349a"
+       ]
+      },
+      "jitter": {
+       "parameter_offset": "0x100",
+       "bytes": 8,
+       "stored": true,
+       "store_rvas": [
+        "0xa533be",
+        "0xa5358c",
+        "0xa535c1"
+       ]
+      },
+      "motion_vector_scale": {
+       "parameter_offset": "0x108",
+       "bytes": 8,
+       "stored": true,
+       "store_rvas": [
+        "0xa533be",
+        "0xa535ec",
+        "0xa53619"
+       ]
+      },
+      "reset": {
+       "parameter_offset": "0x11c",
+       "bytes": 1,
+       "stored": true,
+       "store_rvas": [
+        "0xa533d1",
+        "0xa5362c"
+       ]
+      }
+     },
+     "checks": [],
+     "discriminator_conflicts": [],
+     "store_count": 42
+    }
+   ],
+   "checks": [
+    {
+     "check": "game code calls the dispatch import (through wrappers)",
+     "ok": true,
+     "detail": "1 call path(s)"
+    },
+    {
+     "check": "required resource slots written from registers (output, color, motion_vectors, depth)",
+     "ok": true
+    },
+    {
+     "check": "temporal fields written at this ABI's offsets",
+     "ok": true
+    },
+    {
+     "check": "no stores at another revision's distinguishing offsets",
+     "ok": true,
+     "detail": ""
+    }
+   ],
+   "state": "static_layout_verified",
+   "primary_callsite": "0xa53646",
+   "id": "psml:psml_legacy_r2",
+   "emulator_support": "not_implemented"
+  },
+  {
+   "family": "taa",
+   "adapter": "taa_paths_v1",
+   "mode_requirement": "base",
+   "runtime_hook": "translator_dispatch",
+   "state": "runtime_bindings_verified",
+   "taa": {
+    "shader_hash": "95523d71c04a6522",
+    "color": [
+     0,
+     8,
+     112
+    ],
+    "depth": [
+     0,
+     0,
+     2432
+    ],
+    "motion": [
+     0,
+     8,
+     176
+    ],
+    "output": [
+     0,
+     8,
+     256
+    ],
+    "jitter": {
+     "path": [
+      0,
+      0,
+      448
+     ],
+     "units": "uv",
+     "sign": [
+      1,
+      1
+     ]
+    },
+    "motion_vectors": "uv_current_minus_previous",
+    "formats": {
+     "color": 71,
+     "depth": 22,
+     "motion": 29,
+     "output": 71
+    },
+    "camera": {
+     "near": 0.1,
+     "far": 10000.0,
+     "fov": 1.0
+    },
+    "render_size": [
+     0,
+     8,
+     48
+    ],
+    "output_size": [
+     0,
+     8,
+     64
+    ],
+    "output_scale": {
+     "path": [
+      0,
+      8,
+      240
+     ],
+     "buffer_offset": 0,
+     "meaning": "the TAA multiplies colour by this exposure before writing"
+    },
+    "hlx_flags": 121,
+    "evidence": {
+     "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+     "motion_vectors": "UV current minus previous in the native TAA render coordinates (history UV = current UV - motion). The final composite mirrors X, so FG samples mirrored guide positions and uses (+width, -height) in display coordinates. Warp checks of moving real-frame pairs on 2026-11-09 confirm mirror-X with X positive and Y negative (background correlation 0.96-0.98); a single positive sign for both axes was masking the horizontal reflection and was incorrect vertically.",
+     "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+     "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+     "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified",
+     "hudless": "the one draw into the display buffer per frame (pixel shader 4abf9bed9a8ea5fe, 4 vertices) computes sRGB(ui.rgb + scene.rgb * (1 - ui.a)) from two RGBA16F T#s at ptr(ud0)+0x20 (ui: ~105 small quads a frame) and +0x40 (scene: one full-screen pass right after the TAA); exported f16 RTZ into the 2_10_10_10 display buffer (ISA, pass capture capture-demons-Znsv4P). HUD-less = sRGB(scene) (fg_hudless.s). Display scene X = width - 1 - source X; verified from all 18 fghl-demons-211907 captures. FG colour, depth and motion positions must share this display orientation."
+    },
+    "hudless": {
+     "composite_shader_hash": "4abf9bed9a8ea5fe",
+     "scene": [
+      0,
+      0,
+      64
+     ],
+     "ui": [
+      0,
+      0,
+      32
+     ],
+     "encoding": "srgb_a2b10g10r10"
+    },
+    "display_mirror_x": true
+   },
+   "discovery": "/home/david/kyty-auto-upscaler-20261109/tools/upscaler-scan/kyty_upscaler_scan/discovered/d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5.json",
+   "provenance": {
+    "method": "pass capture -> ISA descriptor paths -> temporal ping-pong -> jitter search -> gameplay probe",
+    "runtime_bindings_verified": true,
+    "live": "HLX FSR 4 and HLX DLSS (Model E) in play, 0 failures (2026-11-09, logs/hlx-demons-*)",
+    "assembled": "by hand from the pipeline outputs; the automated pipeline writes this file"
+   },
+   "checks": [
+    {
+     "check": "TAA pass discovered for this executable",
+     "ok": true,
+     "detail": "pass capture -> ISA descriptor paths -> temporal ping-pong -> jitter search -> gameplay probe"
+    }
+   ],
+   "id": "taa:taa_paths_v1",
+   "emulator_support": "implemented"
+  }
+ ],
+ "selected_route": "taa:taa_paths_v1",
+ "capabilities": {
+  "upscaler": {
+   "state": "available",
+   "route": "taa:taa_paths_v1",
+   "upscalers": [
+    "hlx_fsr4",
+    "hlx_dlss_e"
+   ],
+   "reason": "the game's own TAA pass was found for this executable; Kyty re-checks its live inputs before replacing it"
+  },
+  "frame_generation": {
+   "state": "available",
+   "modes": [
+    "fsr3"
+   ],
+   "reason": "depth and motion vectors come from the same verified boundary"
+  },
+  "render_presets": {
+   "state": "dynamic_only",
+   "reason": "the game's own dynamic resolution is kept (controller not mapped)"
+  }
+ },
+ "runtime": {
+  "adapter": "taa_paths_v1",
+  "taa": {
+   "shader_hash": "95523d71c04a6522",
+   "color": [
+    0,
+    8,
+    112
+   ],
+   "depth": [
+    0,
+    0,
+    2432
+   ],
+   "motion": [
+    0,
+    8,
+    176
+   ],
+   "output": [
+    0,
+    8,
+    256
+   ],
+   "jitter": {
+    "path": [
+     0,
+     0,
+     448
+    ],
+    "units": "uv",
+    "sign": [
+     1,
+     1
+    ]
+   },
+   "motion_vectors": "uv_current_minus_previous",
+   "formats": {
+    "color": 71,
+    "depth": 22,
+    "motion": 29,
+    "output": 71
+   },
+   "camera": {
+    "near": 0.1,
+    "far": 10000.0,
+    "fov": 1.0
+   },
+   "render_size": [
+    0,
+    8,
+    48
+   ],
+   "output_size": [
+    0,
+    8,
+    64
+   ],
+   "output_scale": {
+    "path": [
+     0,
+     8,
+     240
+    ],
+    "buffer_offset": 0,
+    "meaning": "the TAA multiplies colour by this exposure before writing"
+   },
+   "hlx_flags": 121,
+   "evidence": {
+    "shader": "0x25f73aa00 (hash 95523d71c04a6522): one thread per output pixel; 5-tap history sample; RGBA image_store at +0x100",
+    "motion_vectors": "UV current minus previous in the native TAA render coordinates (history UV = current UV - motion). The final composite mirrors X, so FG samples mirrored guide positions and uses (+width, -height) in display coordinates. Warp checks of moving real-frame pairs on 2026-11-09 confirm mirror-X with X positive and Y negative (background correlation 0.96-0.98); a single positive sign for both axes was masking the horizontal reflection and was incorrect vertically.",
+    "depth": "R32F, reversed-Z device depth: gameplay dump 0.011..0.027, sky 0 (probe-demons-play-164544)",
+    "colour": "scene-linear HDR before exposure (mean ~0.004); TAA output = colour x exposure (cb+0 of the V# at +0xf0)",
+    "jitter": "global table +0x1c0 (UV units), 4-8 step Halton-like sequence; sign not yet verified",
+    "hudless": "the one draw into the display buffer per frame (pixel shader 4abf9bed9a8ea5fe, 4 vertices) computes sRGB(ui.rgb + scene.rgb * (1 - ui.a)) from two RGBA16F T#s at ptr(ud0)+0x20 (ui: ~105 small quads a frame) and +0x40 (scene: one full-screen pass right after the TAA); exported f16 RTZ into the 2_10_10_10 display buffer (ISA, pass capture capture-demons-Znsv4P). HUD-less = sRGB(scene) (fg_hudless.s). Display scene X = width - 1 - source X; verified from all 18 fghl-demons-211907 captures. FG colour, depth and motion positions must share this display orientation."
+   },
+   "hudless": {
+    "composite_shader_hash": "4abf9bed9a8ea5fe",
+    "scene": [
+     0,
+     0,
+     64
+    ],
+    "ui": [
+     0,
+     0,
+     32
+    ],
+    "encoding": "srgb_a2b10g10r10"
+   },
+   "display_mirror_x": true
+  },
+  "sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5"
+ }
+}

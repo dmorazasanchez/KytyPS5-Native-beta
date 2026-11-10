@@ -1,0 +1,17 @@
+{
+  "executable": "/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg",
+  "sha256": "65a6a9c491f8b63d74ef46393401c362d1eca194e6a0524b9b3202c70db54063",
+  "profile_sha256": "d499226cdc4b074eb8ec72ac03ad469bb80f48e580164c08157e6fd0c608c2c5",
+  "adapter": "taa_paths_v1",
+  "features": [
+    "helix_fsr4",
+    "helix_dlss_e",
+    "fsr3_frame_generation",
+    "hudless_display_coordinates",
+    "framegen_wait_reason_updates"
+  ],
+  "validated_captures": "../logs/fg-display-coordinates-215156",
+  "resolution_experiments_enabled": false,
+  "previous_sha256": "7ceeff263e16b6ae52f7b1021c4fa2cb7b50755bde8cba00fead74e977056cf5",
+  "guard_validation": "../fixes/20261109-fg-startup-status/frameGenGuardTest.cpp"
+}

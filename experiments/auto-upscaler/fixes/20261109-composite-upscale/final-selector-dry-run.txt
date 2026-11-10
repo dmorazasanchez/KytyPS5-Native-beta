@@ -1,0 +1,57 @@
+Profile: upstream
+Executable: /home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/build/kyty_emulator_launcher_taa_fg
+Lossless Scaling frame generation: off
+Native frame generation: fsr3
+Upscaler profile: /home/david/.config/KytyPS5-Native/upscaler-profiles/PPSA01341-01.007.000-d499226cdc4b.json (upscaler available, frame generation available)
+Argument: --game
+Argument: /home/david/Downloads/Demons\ Souls\ \(v01.007\)\ \(Deluxe\ Edition\)\ –\ BP\ 4.xx\ –\ PPSA01341\ –\ FPKG/EP9000-PPSA01341_00-DEMONSSOULS00000-files/eboot.bin
+Argument: --present-mode
+Argument: Fifo
+Argument: --vblank-frequency
+Argument: 60
+Argument: --gpu
+Argument: 0
+Argument: --shader-optimization-type
+Argument: Performance
+Argument: --console-language
+Argument: 1
+Argument: --user-name
+Argument: Kyty
+Argument: --user-id
+Argument: 1000
+Argument: --controller-volume
+Argument: 50
+Argument: --controller-vibration
+Argument: 100
+Argument: --keyboard-player
+Argument: 0
+Argument: --shader-log-direction
+Argument: Silent
+Argument: --printf-direction
+Argument: Silent
+Argument: --trophy-duration
+Argument: 6
+Argument: --fullscreen
+Argument: --perf-overlay
+Argument: --no-splash
+Argument: --skip-notice-screen
+Argument: --hide-cursor
+Argument: --game-patch
+Argument: /home/david/kyty-upstream-clean-47857b4-20261104/release/_Patches/PPSA01341_01.007.000.json
+Argument: --screen-width
+Argument: 3840
+Argument: --screen-height
+Argument: 2160
+Remaining Kyty/LSFG environment overrides:
+DISABLE_LSFGVK=1
+KYTY_UPSCALER_PROFILE=/home/david/.config/KytyPS5-Native/upscaler-profiles/PPSA01341-01.007.000-d499226cdc4b.json
+DISABLE_LSFGVK_EXPERIMENTAL=1
+KYTY_NATIVE_UPSCALER_LOG=/home/david/kyty-auto-upscaler-20261109/experiments/auto-upscaler/logs/frontend-20261109-235847.jsonl
+DISABLE_MAKO=1
+KYTY_UPSCALE_PRESET=ultra_quality
+KYTY_UPSCALER=hlx_fsr4
+DISABLE_MAKO_SPATIAL_SCALING=1
+KYTY_RENDER_PRESET_PATCH=/home/david/.cache/KytyPS5/render-presets/d499226cdc4b-ultra_quality-c7aa27792698849a.json
+KYTY_FRAMEGEN=fsr3
+KYTY_BC250_TITLE_ID=PPSA01341
+KYTY_DEMONS_SCREAM_ASSERT_RECOVERY=1

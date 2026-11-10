@@ -1,0 +1,28 @@
+{
+  "id": "PPSA01341",
+  "version": "01.007.000",
+  "process": "eboot.bin",
+  "mods": [
+    {
+      "name": "Helix Ultra Quality: 2944x1656 render, 3840x2160 output",
+      "enabled": true,
+      "memory": [
+        {
+          "offset": "0x90a66d",
+          "off": "c5fb1005bba1be01eb30",
+          "on": "c5fb100dbba1be01eb08"
+        },
+        {
+          "offset": "0x90b1d2",
+          "off": "c5fb10055696be01eb30",
+          "on": "c5fb100d5696be01eb08"
+        },
+        {
+          "offset": "0x24f9550",
+          "off": "000a0000a0050000",
+          "on": "800b000078060000"
+        }
+      ]
+    }
+  ]
+}
