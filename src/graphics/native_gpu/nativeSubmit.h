@@ -402,6 +402,25 @@ public:
 		return true;
 	}
 
+	// Native PS5 per-VMID setup: reserve this DRM VM's gfxhub VMID before any
+	// title submission, then submit only the shadow-off tail and wait for it.
+	// This materializes the PASID mapping without executing a game shader.
+	// The reservation belongs to the DRM VM and is released when its fd closes;
+	// keep it for that lifetime so register restoration cannot race an explicit
+	// early unreserve here. Call during startup, before SetAsync or guest work.
+	int ReserveAndPrimeGfxVmid() {
+		if (m_async) return -EBUSY;
+		union drm_amdgpu_vm request {};
+		request.in.op = AMDGPU_VM_OP_RESERVE_VMID;
+		const int r = Ioctl(m_drm_fd, DRM_IOCTL_AMDGPU_VM, &request);
+		if (r != 0) return r;
+		const Result prime = Submit(kCpShadowOff, {}, 0.5);
+		if (prime.err != 0) return prime.err;
+		if (prime.reset) return -EIO;
+		return prime.submitted && prime.completed && !prime.timed_out ? 0 : -ETIMEDOUT;
+	}
+
+
 	Result Submit(std::span<const uint32_t> ib, const std::vector<uint32_t>& bo_handles,
 	              double timeout_sec, RingTarget target = {}) {
 		Result res;

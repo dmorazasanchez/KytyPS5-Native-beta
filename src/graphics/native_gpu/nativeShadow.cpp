@@ -3,6 +3,7 @@
 #include "graphics/native_gpu/nativeUpscaler.h"
 
 #include "graphics/native_gpu/nativePm4.h"
+#include "graphics/native_gpu/nativeVmid.h"
 #include "graphics/native_gpu/nativeSubmit.h" // KYTY_GEM_BACKING_SUPPORTED + NativeSubmitter
 #include "graphics/native_gpu/nativeWatch.h"
 #include "graphics/native_gpu/shaderPatcher.h"
@@ -1073,10 +1074,20 @@ public:
 		const int r = Call(11u | sel << 8u, reg, 0, &n);
 		return r != 0 ? r : static_cast<int>(n);
 	}
-	// The gfx VMID (1-7) the kernel last gave the VM with `pasid`; 0 when none.
+	// First cached matching gfx VMID; startup uses the full mask and requires a unique reserved slot.
 	uint32_t GfxVmid(uint32_t pasid) {
 		uint32_t v = 0;
 		return pasid != 0 && Call(13u | pasid << 8u, 0, 0, &v) == 0 ? v : 0;
+	}
+	// Read through the existing helper API; no helper upgrade is required.
+	// A read failure leaves no usable snapshot. SqKill rechecks ownership for
+	// each selected VMID in case the kernel reassigns it after these reads.
+	uint32_t GfxVmidMask(uint32_t pasid) {
+		if (!pasid) return 0;
+		std::array<uint32_t, 8> lut {};
+		for (uint32_t vmid = 1; vmid < lut.size(); ++vmid)
+			if (ReadAbs(0x10a0u + vmid, &lut[vmid]) != 0) return 0;
+		return GfxVmidsForPasid(pasid, lut);
 	}
 	// Applies the helper's local golden table, put back when this connection closes; how many changed.
 	int ApplyGolden() {
@@ -2941,28 +2952,6 @@ public:
 	}
 	uint32_t KfdQueueCount() const { return std::max(m_submitter != nullptr ? m_submitter->KfdQueueCount() : 0u, 1u); }
 
-	// The per-VMID PS5 settings follow this VM's gfx VMID, which amdgpu may change between jobs: once
-	// per flip they move to the VMID it holds now and the one it left gets the Linux values back.
-	void Ps5RegsOnFlip() {
-#if KYTY_GEM_BACKING_SUPPORTED
-		if ((m_ps5_regs & (kPs5Accum | kPs5ShMem)) == 0) {
-			return;
-		}
-		std::lock_guard<std::mutex> lock(m_ps5_mutex);
-		const uint32_t vmid = m_ps5_hw.GfxVmid(m_ps5_pasid);
-		if (vmid == 0 || vmid == m_ps5_gfx_vmid) {
-			return;
-		}
-		if (m_ps5_gfx_vmid != 0) {
-			for (uint32_t reg: {kPs5ShMemBases, kPs5UserAccumVmid}) {
-				m_ps5_hw.RestoreRegs(reg, LodStatsHw::SelVmid(m_ps5_gfx_vmid));
-			}
-		}
-		std::fprintf(stderr, "native shadow: PS5 per-VMID registers on gfx VMID %u (was %u)\n", vmid, m_ps5_gfx_vmid);
-		m_ps5_gfx_vmid = vmid;
-		Ps5VmidRegs(vmid);
-#endif
-	}
 
 	// The ACB translator's tracker slot, one per compute ring (slot 0 is the gfx ring), and its barrier
 	// fence, the slot's last dword. Compute rings run at once, and a barrier releases its own value into
@@ -4313,8 +4302,8 @@ private:
 	//             the GDS resource state (OA and 48 GWS); written while it runs, and KFD's scheduler
 	//             may reload the queue from its MQD on any remap
 	//   golden    the helper's local golden table (/etc/kyty/ps5-golden.conf)
-	// "all" (or 1) is gfx_pipe,accum,kfd_gds. The game's VMIDs are this VM's gfx VMID (by PASID,
-	// followed per flip) and, with KFD queues, 8-15. Unset, primary mode writes hqd,kfd_gds,shmem: the compute
+	// "all" (or 1) is gfx_pipe,accum,kfd_gds. The game's graphics VMID is reserved, primed and
+	// verified by PASID before title work; KFD queues use VMIDs 8-15. Unset, primary mode writes hqd,kfd_gds,shmem: the compute
 	// queues as the PS5 kernel sets them up (with the OA and GWS their GDS resource state asks for) and its
 	// aperture bases, which FLAT accesses with the PS5's aperture addresses in literals need (BC5 F249); 0
 	// writes nothing. The helper puts every register back when the connection closes (exit or crash).
@@ -4329,6 +4318,13 @@ private:
 
 	void InitPs5Regs() {
 #if KYTY_GEM_BACKING_SUPPORTED
+		// PS5 apertures and accumulation state belong to a reserved graphics
+		// VMID. Configure and verify it before any title GPU submission.
+		auto refuse_vmid = [](const char* why) {
+			std::fprintf(stderr, "native shadow: reserved gfx VMID startup failed: %s; no title GPU work submitted\n", why);
+			std::fflush(stderr);
+			_exit(78);
+		};
 		const char* v = std::getenv("KYTY_NATIVE_GPU_PS5_REGS");
 		if ((v == nullptr || v[0] == '\0') && EnvOn("KYTY_NATIVE_GPU_PRIMARY")) {
 			v = "hqd,kfd_gds,shmem";
@@ -4354,21 +4350,47 @@ private:
 				std::fprintf(stderr, "native shadow: KYTY_NATIVE_GPU_PS5_REGS: unknown setting '%s'\n", name.c_str());
 			}
 		}
+		const bool gfx_vmid_required = (regs & (kPs5Accum | kPs5ShMem)) != 0;
 		uint32_t probe = 0;
 		if (regs == 0 || !m_ps5_hw.Connect()) {
 			std::fprintf(stderr, "native shadow: KYTY_NATIVE_GPU_PS5_REGS set but %s; no PS5 registers written\n",
 			             regs == 0 ? "no known setting" : "the kyty-lodhw helper is not running");
+			if (gfx_vmid_required) refuse_vmid("GPU helper unavailable");
 			return;
 		}
 		if (m_ps5_hw.ReadReg(kPs5SpiConfigCntl1, 0, &probe) != 0) {
 			std::fprintf(stderr, "native shadow: the kyty-lodhw helper has no banked register ops (rebuild it); no PS5 registers written\n");
 			m_ps5_hw.Disconnect();
+			if (gfx_vmid_required) refuse_vmid("helper banked-register API unavailable");
 			return;
 		}
 		std::lock_guard<std::mutex> lock(m_ps5_mutex);
 		m_ps5_regs  = regs;
 		m_ps5_pasid = LodStatsHw::Pasid(m_gem->DrmFd());
 		std::fprintf(stderr, "native shadow: PS5 registers (0x%x) through the kyty-lodhw helper, PASID %u\n", regs, m_ps5_pasid);
+		if (gfx_vmid_required) {
+			if (m_ps5_pasid == 0) refuse_vmid("DRM PASID unknown");
+			const int r = m_submitter->ReserveAndPrimeGfxVmid();
+			if (r != 0) {
+				std::fprintf(stderr, "native shadow: graphics VMID reserve/prime: %s\n", std::strerror(-r));
+				refuse_vmid("could not reserve and prime the DRM VM");
+			}
+			const uint32_t mask = m_ps5_hw.GfxVmidMask(m_ps5_pasid);
+			const uint32_t vmid = UniqueGfxVmid(mask);
+			if (vmid == 0) {
+				std::fprintf(stderr, "native shadow: primed PASID %u has ambiguous/missing gfx VMID mask 0x%02x\n", m_ps5_pasid, mask);
+				refuse_vmid("no unique primed graphics VMID");
+			}
+			Ps5VmidRegs(vmid);
+			uint32_t bases = 0, accum = 0;
+			if ((regs & kPs5ShMem) != 0 &&
+			    (m_ps5_hw.ReadReg(kPs5ShMemBases, LodStatsHw::SelVmid(vmid), &bases) != 0 || bases != 0x80007000u))
+				refuse_vmid("PS5 scratch/shared apertures did not read back");
+			if ((regs & kPs5Accum) != 0 &&
+			    (m_ps5_hw.ReadReg(kPs5UserAccumVmid, LodStatsHw::SelVmid(vmid), &accum) != 0 || (accum & 0xfu) != 0xfu))
+				refuse_vmid("PS5 per-VMID accumulation state did not read back");
+			std::fprintf(stderr, "native shadow: reserved gfx VMID %u primed; PS5 per-VMID registers verified before title submissions\n", vmid);
+		}
 		if ((regs & kPs5GfxPipe) != 0) {
 			for (uint32_t pipe = 0; pipe < 2; pipe++) {
 				Ps5Reg("GFX_PIPE_CONTROL", "gfx pipe " + std::to_string(pipe), kPs5GfxPipeControl, LodStatsHw::SelGfxPipe(pipe),
@@ -6401,7 +6423,6 @@ private:
 	std::mutex            m_ps5_mutex;
 	uint32_t              m_ps5_regs     = 0; // kPs5* bits
 	uint32_t              m_ps5_pasid    = 0;
-	uint32_t              m_ps5_gfx_vmid = 0; // the gfx VMID the per-VMID settings are on now
 	LabelOracle*          m_label_oracle = nullptr;
 	std::vector<uint32_t> m_ring_batch[kTrackerSlots];
 	SlotFence             m_slot_fence[kTrackerSlots];
@@ -8370,7 +8391,6 @@ void ShadowReleaseDisplayBuffer(uint64_t addr, uint64_t size) {
 
 void ShadowOnDirectFlip() {
 	if (Shadow::Instance().Active()) {
-		Shadow::Instance().Ps5RegsOnFlip();
 	}
 	ShadowFlipStats(0.0);
 }
@@ -8721,7 +8741,6 @@ void ShadowOnFlip(uint64_t address, uint64_t size, uint32_t width, uint32_t heig
 		Shadow::Instance().KeepResident(address, size);
 	}
 	if (Shadow::Instance().Active()) {
-		Shadow::Instance().Ps5RegsOnFlip();
 	}
 	// KYTY_NATIVE_GPU_CTL=1: "dump N" on the control socket dumps the next N flips, render targets
 	// included (see ControlSocket).

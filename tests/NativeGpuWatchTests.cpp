@@ -1,4 +1,5 @@
 #include "graphics/native_gpu/nativeWatch.h"
+#include "graphics/native_gpu/nativeVmid.h"
 
 #include <cmath>
 #include <cstdio>
@@ -12,6 +13,10 @@ using Libs::Graphics::NativeGpu::WatchConfig;
 using Libs::Graphics::NativeGpu::WatchDecider;
 using Libs::Graphics::NativeGpu::WatchSample;
 using Libs::Graphics::NativeGpu::WatchTrigger;
+
+using Libs::Graphics::NativeGpu::GfxVmidsForPasid;
+using Libs::Graphics::NativeGpu::OwnsGfxVmid;
+using Libs::Graphics::NativeGpu::UniqueGfxVmid;
 
 namespace {
 
@@ -43,6 +48,34 @@ void TestFaultDecode() {
 	// A gfx-ring CPG write fault in VMID 3, CID 0x40 (made-up client).
 	const uint32_t status = (3u << 20u) | (1u << 18u) | (0x40u << 9u) | 1u;
 	Check(FaultVmid(status) == 3 && FaultWrite(status) && FaultCid(status) == 0x40u, "status fields: VMID 23:20, RW 18, CID 17:9");
+}
+
+void TestGfxVmidOwnership() {
+	std::array<uint32_t, 8> lut {};
+	lut[0] = lut[5] = lut[6] = 16;
+	lut[7] = 124;
+	const uint32_t mask = GfxVmidsForPasid(16, lut);
+	Check(mask == ((1u << 5) | (1u << 6)), "keep both cached mappings, excluding kernel VMID 0");
+	Check(OwnsGfxVmid(mask, 6), "the second matching VMID must not be classified as another process");
+	Check(!OwnsGfxVmid(mask, 7), "another PASID is excluded");
+	Check(GfxVmidsForPasid(124, lut) == (1u << 7), "independent PASID selects only its own mapping");
+	Check(GfxVmidsForPasid(0, lut) == 0 && GfxVmidsForPasid(99, lut) == 0, "unknown/zero PASID never targets empty slots");
+	lut[6] = 124;
+	Check(GfxVmidsForPasid(16, lut) == (1u << 5), "fresh lookup excludes a reassigned VMID");
+	lut.fill(16);
+	Check(GfxVmidsForPasid(16, lut) == 0xfeu, "all seven gfx mappings are retained");
+	for (uint32_t invalid: {0u, 8u, 15u, 31u, 32u, UINT32_MAX})
+		Check(!OwnsGfxVmid(UINT32_MAX, invalid), "kernel/KFD/out-of-range VMIDs are never gfx targets");
+}
+
+void TestReservedGfxVmidSelection() {
+	for (uint32_t vmid = 1; vmid <= 7; ++vmid)
+		Check(UniqueGfxVmid(1u << vmid) == vmid, "a unique primed gfx mapping can be configured");
+	Check(UniqueGfxVmid(0) == 0, "missing PASID mapping refuses reserved-VMID startup");
+	Check(UniqueGfxVmid((1u << 6) | (1u << 7)) == 0,
+	      "multiple cached mappings refuse startup rather than guessing the reserved slot");
+	for (uint32_t invalid: {1u, 0x100u, 0x8000u, UINT32_MAX, 0x81u, 0x180u})
+		Check(UniqueGfxVmid(invalid) == 0, "kernel, KFD and mixed-invalid masks refuse startup");
 }
 
 WatchSample Sample(double now, bool pending, double start, uint32_t p0 = 0) {
@@ -125,6 +158,8 @@ void TestFaultAndReset() {
 int main() {
 	TestLockupTimeout();
 	TestFaultDecode();
+	TestGfxVmidOwnership();
+	TestReservedGfxVmidSelection();
 	TestStall();
 	TestStreamPark();
 	TestFaultAndReset();
