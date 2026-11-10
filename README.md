@@ -1,3 +1,13 @@
+# KytyPS5-Native BC-250 beta
+
+This private beta is based on [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native).
+It includes the BC-250 launcher, the latest native backends from this beta, and an optional minimal gaming session.
+
+Download the AppImage or a portable archive from [the beta release](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.10-beta1).
+See the [tester setup guide](beta/README.md) and [source notes](beta/SOURCE.md).
+
+---
+
 # KytyPS5-Native
 
 PS5 games natively on the PS5 chip under Linux.

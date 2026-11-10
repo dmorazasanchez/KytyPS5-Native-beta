@@ -1,0 +1,1694 @@
+#include "common/assert.h"
+#include "common/common.h"
+#include "common/debugCounters.h"
+#include "common/emulatorConfig.h"
+#include "common/logging/log.h"
+#include "common/profiler.h"
+#include "common/threads.h"
+#include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
+#include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
+#include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/openxrHeadset.h"
+#include "graphics/presentation/performanceOverlay.h"
+#include "graphics/presentation/presenter.h"
+#include "graphics/presentation/systemOverlay.h"
+#include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/directPresent.h"
+#include "graphics/presentation/window/frameGen.h"
+#include "graphics/presentation/window/windowInternal.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
+#include <limits>
+#include <memory>
+#include <vector>
+#include <vulkan/vk_platform.h>
+
+// IWYU pragma: no_include <intrin.h>
+
+namespace Libs::Graphics {
+
+struct Presenter::Frame {
+	VulkanImage   image;
+	vk::ImageView view         = nullptr;
+	uint64_t      present_tick = 0;
+	uint64_t      last_acquire = 0; // the pool's acquisition count when this frame was last handed out
+	bool          busy         = false;
+	bool          hdr          = false;
+	bool          blank        = false;
+	uint64_t      fg_boundary  = 0; // frame generation: the boundary whose guides are this frame's (SetFrameGuides)
+
+	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
+	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
+	void CopyFrom(CommandBuffer& command, Image& source);
+	void Clear(CommandBuffer& command, const vk::ClearColorValue& color);
+};
+
+class FramePool final {
+public:
+	FramePool(WindowContext& window, CommandScheduler& scheduler)
+	    : m_window(window), m_scheduler(scheduler) {}
+	~FramePool() {
+		m_scheduler.Wait(m_scheduler.CurrentTick() - 1);
+		for (auto& frame: m_frames) {
+			m_window.graphic_ctx.device.destroyImageView(frame->view, nullptr);
+			if (frame->image.image != nullptr) {
+				m_window.graphic_ctx.DeleteImage(frame->image);
+			}
+		}
+	}
+	KYTY_CLASS_NO_COPY(FramePool);
+
+	void Initialize(uint32_t count, vk::Format format) {
+		if (count == 0 || format == vk::Format::eUndefined) {
+			EXIT("prepared-frame pool requires at least one frame\n");
+		}
+		Common::LockGuard lock(m_mutex);
+		if (!m_frames.empty()) {
+			EXIT("prepared-frame pool was initialized twice\n");
+		}
+		m_format = format;
+		m_frames.reserve(count);
+		m_free.reserve(count);
+		for (uint32_t i = 0; i < count; i++) {
+			auto frame = std::make_unique<Presenter::Frame>();
+			m_free.push_back(frame.get());
+			m_frames.push_back(std::move(frame));
+		}
+	}
+
+	void SetFormat(vk::Format format) {
+		if (format == vk::Format::eUndefined) {
+			EXIT("prepared-frame pool requires a presentation format\n");
+		}
+		Common::LockGuard lock(m_mutex);
+		m_format = format;
+	}
+
+	vk::Format GetFormat() {
+		Common::LockGuard lock(m_mutex);
+		if (m_format == vk::Format::eUndefined) {
+			EXIT("prepared-frame pool has no presentation format\n");
+		}
+		return m_format;
+	}
+
+	Presenter::Frame* Acquire(vk::Extent2D extent, vk::Format format) {
+		m_mutex.Lock();
+		if (m_frames.empty()) {
+			EXIT("prepared-frame pool was used before swapchain initialization\n");
+		}
+		// A synchronized flip may need more frames than the swapchain has images.
+		// Queue capacity bounds growth; waiting here can prevent its master from recording.
+		if (m_free.empty()) {
+			auto frame = std::make_unique<Presenter::Frame>();
+			m_free.push_back(frame.get());
+			m_frames.push_back(std::move(frame));
+		}
+		const auto compatible = std::ranges::find_if(m_free, [&](const auto* frame) {
+			return frame->image.extent.width == extent.width &&
+			       frame->image.extent.height == extent.height && frame->image.format == format;
+		});
+		auto*      frame      = compatible == m_free.end() ? m_free.back() : *compatible;
+		if (compatible != m_free.end()) {
+			*compatible = m_free.back();
+		}
+		m_free.pop_back();
+		if (frame->busy) {
+			EXIT("prepared-frame pool returned an invalid frame\n");
+		}
+		frame->busy         = true;
+		frame->last_acquire = ++m_acquisitions;
+		// Idle frames of another size or format (the startup's blank frames in the swapchain's format, a mode the
+		// title left) give their image back after ~2 s unused: each is a whole frame of GPU memory, which is RAM here.
+		std::vector<Presenter::Frame*> stale;
+		for (auto* f: m_free) {
+			if (f->image.image != nullptr && m_acquisitions - f->last_acquire > 120 &&
+			    (f->image.format != format || f->image.extent.width != extent.width || f->image.extent.height != extent.height) &&
+			    m_scheduler.IsFree(f->present_tick)) {
+				stale.push_back(f);
+			}
+		}
+		for (auto* f: stale) {
+			std::fprintf(stderr, "presenter: idle %ux%u frame (format %d) freed\n", f->image.extent.width, f->image.extent.height,
+			             static_cast<int>(f->image.format));
+			m_window.graphic_ctx.device.destroyImageView(f->view, nullptr);
+			f->view = nullptr;
+			m_window.graphic_ctx.DeleteImage(f->image); // (image.image null: the next Configure recreates it)
+		}
+		m_mutex.Unlock();
+
+		m_scheduler.Wait(frame->present_tick);
+		return frame;
+	}
+
+	void ValidateForPresent(Presenter::Frame* frame) {
+		Common::LockGuard lock(m_mutex);
+		if (frame == nullptr || !frame->busy) {
+			EXIT("prepared frame has invalid presentation ownership\n");
+		}
+	}
+
+	void Release(Presenter::Frame* frame) {
+		if (frame == nullptr) {
+			EXIT("cannot release a null prepared frame\n");
+		}
+		Common::LockGuard lock(m_mutex);
+		if (!frame->busy) {
+			EXIT("prepared frame was released twice\n");
+		}
+		frame->busy = false;
+		m_free.push_back(frame);
+	}
+
+private:
+	WindowContext&                                 m_window;
+	CommandScheduler&                              m_scheduler;
+	Common::Mutex                                  m_mutex;
+	std::vector<std::unique_ptr<Presenter::Frame>> m_frames;
+	std::vector<Presenter::Frame*>                 m_free;
+	vk::Format                                     m_format = vk::Format::eUndefined;
+	uint64_t                                       m_acquisitions = 0;
+};
+
+void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format) {
+	if (extent.width == 0 || extent.height == 0 || format == vk::Format::eUndefined) {
+		EXIT("unsupported prepared frame, extent=%ux%u format=%d\n", extent.width, extent.height,
+		     static_cast<int>(format));
+	}
+	auto&      dst     = image;
+	const auto features = graphics.GetFormatProperties(format).optimalTilingFeatures;
+	// While frame generation is on every frame can be its output (a storage image); real frames keep the
+	// usage too, so the pool does not reallocate between the two.
+	const bool storage    = FrameGen::Enabled() && static_cast<bool>(features & vk::FormatFeatureFlagBits::eStorageImage);
+	const bool compatible = dst.image != nullptr && dst.extent.width == extent.width &&
+	                        dst.extent.height == extent.height && dst.format == format &&
+	                        (!storage || static_cast<bool>(dst.usage & vk::ImageUsageFlagBits::eStorage));
+	if (compatible) {
+		return;
+	}
+
+	const auto required =
+	    vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
+	    vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferSrc |
+	    vk::FormatFeatureFlagBits::eTransferDst;
+	if ((features & required) != required) {
+		EXIT("prepared presentation format lacks optimal blit support: format=%d features=0x%x\n",
+		     static_cast<int>(format), static_cast<vk::FormatFeatureFlags::MaskType>(features));
+	}
+
+	if (dst.image != nullptr) {
+		graphics.device.destroyImageView(view, nullptr);
+		view = nullptr;
+		graphics.DeleteImage(dst);
+	}
+
+	vk::ImageCreateInfo create {};
+	create.sType         = vk::StructureType::eImageCreateInfo;
+	create.imageType     = vk::ImageType::e2D;
+	create.extent        = {extent.width, extent.height, 1};
+	create.mipLevels     = 1;
+	create.arrayLayers   = 1;
+	create.format        = format;
+	create.tiling        = vk::ImageTiling::eOptimal;
+	create.initialLayout = vk::ImageLayout::eUndefined;
+	create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst |
+	               vk::ImageUsageFlagBits::eSampled;
+	if (storage) {
+		create.usage |= vk::ImageUsageFlagBits::eStorage;
+	}
+	create.sharingMode = vk::SharingMode::eExclusive;
+	create.samples     = vk::SampleCountFlagBits::e1;
+	if (!graphics.CreateImage(create, dst)) {
+		EXIT("failed to allocate prepared presentation image, extent=%ux%u format=%d\n",
+		     extent.width, extent.height, static_cast<int>(format));
+	}
+}
+
+void Presenter::Frame::Transit(vk::CommandBuffer command, vk::ImageLayout layout,
+                               vk::AccessFlags2 access) {
+	const auto     stage  = access == vk::AccessFlagBits2::eTransferRead ||
+	                                access == vk::AccessFlagBits2::eTransferWrite
+	                            ? vk::PipelineStageFlagBits2::eTransfer
+	                            : vk::PipelineStageFlagBits2::eAllCommands;
+	constexpr auto writes = vk::AccessFlagBits2::eTransferWrite |
+	                        vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eMemoryWrite;
+	if (image.state.layout == layout && image.state.access_mask == access &&
+	    !static_cast<bool>(image.state.access_mask & writes)) {
+		return;
+	}
+	vk::ImageMemoryBarrier2 barrier {};
+	barrier.srcStageMask                    = image.state.pl_stage;
+	barrier.srcAccessMask                   = image.state.access_mask;
+	barrier.dstStageMask                    = stage;
+	barrier.dstAccessMask                   = access;
+	barrier.oldLayout                       = image.state.layout;
+	barrier.newLayout                       = layout;
+	barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image                           = image.image;
+	barrier.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	barrier.subresourceRange.baseMipLevel   = 0;
+	barrier.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+	barrier.subresourceRange.baseArrayLayer = 0;
+	barrier.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
+	vk::DependencyInfo dependency {};
+	dependency.imageMemoryBarrierCount = 1;
+	dependency.pImageMemoryBarriers    = &barrier;
+	command.pipelineBarrier2(dependency);
+	image.state = {stage, access, layout};
+	image.subresource_states.clear();
+}
+
+void Presenter::Frame::CopyFrom(CommandBuffer& command_buffer, Image& source) {
+	command_buffer.EndRendering();
+	auto command = command_buffer.Handle();
+	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+	               command);
+	Transit(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
+	vk::ImageCopy copy {};
+	copy.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, source.backing.layers};
+	copy.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, image.layers};
+	copy.extent         = {std::min(source.backing.extent.width, image.extent.width),
+	                       std::min(source.backing.extent.height, image.extent.height), 1};
+	EXIT_IF(copy.srcSubresource.layerCount != copy.dstSubresource.layerCount);
+	if (source.backing.format == vk::Format::eA2R10G10B10UnormPack32 && image.format == vk::Format::eA2B10G10R10UnormPack32) {
+		vk::ImageBlit blit {};
+		blit.srcSubresource = copy.srcSubresource;
+		blit.dstSubresource = copy.dstSubresource;
+		blit.srcOffsets[1] = vk::Offset3D {static_cast<int32_t>(copy.extent.width), static_cast<int32_t>(copy.extent.height), 1};
+		blit.dstOffsets[1] = blit.srcOffsets[1];
+		command.blitImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, image.image,
+		                  vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eNearest);
+	} else {
+		command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, image.image,
+		                  vk::ImageLayout::eTransferDstOptimal, copy);
+	}
+}
+
+void Presenter::Frame::Clear(CommandBuffer& command_buffer, const vk::ClearColorValue& color) {
+	command_buffer.EndRendering();
+	auto command = command_buffer.Handle();
+	Transit(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+	command.clearColorImage(image.image, vk::ImageLayout::eTransferDstOptimal, &color, 1, &range);
+}
+
+class Swapchain final {
+public:
+	enum class Status : uint8_t { Success, Recreate, SurfaceLost };
+
+	explicit Swapchain(WindowContext& window): m_window(window) {}
+	~Swapchain();
+	KYTY_CLASS_NO_COPY(Swapchain);
+
+	void                 Create();
+	void                 Recreate(bool surface_lost = false);
+	// Destroys the swapchain, its images and semaphores once the last present that used them is done,
+	// and keeps the surface, the overlay pipeline and the system overlay's Vulkan state for the next
+	// Create(). Used while direct flips show the guest's own buffers: the swapchain is then only VRAM
+	// and, under gamescope's WSI layer, an override that hides the window's own (Present) content.
+	void                 Release(CommandScheduler& scheduler);
+	[[nodiscard]] bool   Exists() const noexcept { return m_handle != nullptr; }
+	[[nodiscard]] bool   NeedsResize() const;
+	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
+	[[nodiscard]] bool   PrepareSystemOverlay();
+	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
+	                               const Presenter::Layer& overlay, bool draw_system_overlay);
+	uint64_t Submit(CommandScheduler& scheduler);
+	[[nodiscard]] Status Present();
+
+	[[nodiscard]] uint32_t ImageCount() const noexcept {
+		return static_cast<uint32_t>(m_images.size());
+	}
+	[[nodiscard]] vk::Format Format() const noexcept { return m_format; }
+	[[nodiscard]] bool IsHdrSupported() const noexcept { return m_hdr_supported.load(); }
+	[[nodiscard]] bool HdrActive() const noexcept { return m_hdr_active; }
+	bool SetHdr(bool hdr) {
+		const bool changed = m_hdr_active != (hdr && IsHdrSupported());
+		m_hdr_requested = hdr;
+		return changed;
+	}
+
+private:
+	vk::SurfaceFormatKHR SelectFormat();
+	void Destroy();
+	void DestroyOverlayObjects();
+	void DestroySwapchainObjects();
+	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
+	                 const vk::Rect2D& rect);
+
+	WindowContext&   m_window;
+	vk::SwapchainKHR m_handle = nullptr;
+	vk::Format       m_format = vk::Format::eUndefined;
+	std::atomic_bool m_hdr_supported {false};
+	bool             m_hdr_requested = false;
+	bool             m_hdr_active    = false;
+	vk::Extent2D     m_extent {};
+	// Drawable pixel size observed when this swapchain was created.
+	vk::Extent2D                   m_window_extent {};
+	std::vector<vk::Image>         m_images;
+	std::vector<vk::ImageView>     m_image_views;
+	std::vector<vk::Semaphore>     m_image_acquired;
+	std::vector<uint64_t>          m_image_acquired_ticks;
+	std::vector<vk::Semaphore>     m_render_complete;
+	std::unique_ptr<SystemOverlay> m_system_overlay;
+	vk::DescriptorSetLayout        m_overlay_descriptors = nullptr;
+	vk::PipelineLayout             m_overlay_layout      = nullptr;
+	vk::Pipeline                   m_overlay_pipeline    = nullptr;
+	vk::Sampler                    m_overlay_sampler     = nullptr;
+	uint32_t                       m_image_index         = static_cast<uint32_t>(-1);
+	uint32_t                       m_frame_index         = 0;
+	// Image count of a released swapchain whose overlay objects were kept (0: none kept).
+	uint32_t                       m_kept_image_count    = 0;
+};
+
+struct Presenter::Impl {
+	explicit Impl(WindowContext& owner)
+	    : renderer(*owner.render_context), window(owner), swapchain(owner),
+	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler) {
+		EXIT_IF(owner.render_context == nullptr);
+		swapchain.Create();
+		frames.Initialize(swapchain.ImageCount(), swapchain.Format());
+		NoteSwapchain();
+		direct = DirectPresenter::Create(owner.window);
+		if (direct != nullptr && hdr_ever.load()) {
+			direct->Disable("HDR");
+		}
+	}
+
+	void RecoverSwapchain(Swapchain::Status status) {
+		LOGF("Recovering Vulkan swapchain%s\n",
+		     status == Swapchain::Status::SurfaceLost ? " and surface" : "");
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::SwapchainRecreations);
+		swapchain.Recreate(status == Swapchain::Status::SurfaceLost);
+		frames.SetFormat(swapchain.Format());
+		NoteSwapchain();
+	}
+
+	// An HDR10 swapchain ends direct flips for the session: gamescope stops taking the X window's own
+	// commits once the window has had a non-sRGB colour space, and a DRI3 pixmap carries no HDR metadata.
+	void NoteSwapchain() {
+		if (swapchain.HdrActive() && !hdr_ever.exchange(true) && direct != nullptr) {
+			direct->Disable("HDR");
+		}
+	}
+
+	Image& ResolveSurface(const ImageInfo& info) {
+		TextureCache::ImageDesc desc {};
+		desc.info                  = info;
+		desc.view_info.format      = info.pixel_format;
+		desc.view_info.type        = vk::ImageViewType::e2D;
+		desc.view_info.aspect      = vk::ImageAspectFlagBits::eColor;
+		desc.view_info.base_level  = 0;
+		desc.view_info.level_count = 1;
+		desc.view_info.base_layer  = 0;
+		desc.view_info.layer_count = 1;
+		desc.view_info.usage       = vk::ImageUsageFlagBits::eTransferSrc;
+		desc.type                  = TextureCache::BindingType::VideoOut;
+
+		auto&      cache      = renderer.GetTextureCache();
+		const auto image_id   = cache.FindImage(desc);
+		auto&      image      = cache.GetImage(image_id);
+		image.usage.video_out = true;
+		cache.UpdateImage(image_id);
+		return image;
+	}
+	void Present();
+
+	// Frame generation 2x (window/frameGen.h): a flip shows the generated frame and leaves its real frame
+	// here for the next VideoOut tick (PresentPendingReal), one vblank later.
+	bool TryFrameGen(Frame& real);
+	bool PresentPendingReal();
+	// Dynamic frame generation (FrameGen::Dynamic): real frames are queued as they arrive, on vblank ticks; each tick
+	// shows the content of `tick - (M - 1)`, M the longest recent gap between real frames in ticks: a real frame
+	// when one is there, else one generated at that point between the two around it. 60 real frames a second
+	// (M = 1) show as they come; 30 (M = 2) is 2x; 20 (M = 3) 3x; 45 fills every third vblank.
+	struct FgReal {
+		Frame*                  frame = nullptr;
+		uint64_t                tick  = 0;
+		bool                    guides_ok = false;
+		NativeUpscaler::FgFrame guides {};
+	};
+	bool EnqueueDynamic(Frame& real);
+	bool DynamicTick();
+	void FlushDynamic();
+	void ShowFrame(Frame* f); // makes `f` the main layer and presents it
+	void Unref(Frame* f);     // back to the pool unless queued or shown
+	bool Queued(const Frame* f) const {
+		for (const auto& r: fg_reals) {
+			if (r.frame == f) return true;
+		}
+		return false;
+	}
+	void DropPendingReal() {
+		if (fg_real != nullptr) {
+			frames.Release(fg_real);
+			fg_real = nullptr;
+		}
+	}
+
+	RenderContext&        renderer;
+	WindowContext&        window;
+	Swapchain             swapchain;
+	CommandScheduler      present_scheduler;
+	FramePool             frames;
+	Common::Mutex         present_mutex;
+	std::array<Layer, 2>  layers {};
+	std::atomic<uint64_t> presented_overlay_revision {0};
+	// Direct flips completed as FLIP since the last Vulkan present.
+	std::atomic<uint32_t> direct_streak {0};
+	std::atomic_bool      hdr_ever {false};
+	std::unique_ptr<FrameGen::Generator> fg;
+	Frame*                               fg_real = nullptr;
+	std::deque<FgReal>                   fg_reals;            // dynamic: arrived real frames, the newest last
+	std::deque<uint64_t>                 fg_gaps;             // their recent arrival gaps, in ticks
+	uint64_t                             fg_tick   = 0;       // DynamicTick count
+	const Frame*                         fg_pair_a = nullptr; // the pair the generator holds (last Advance)
+	const Frame*                         fg_pair_b = nullptr;
+	bool                                 fg_was_dynamic = false;
+	// A flip frame generation could not pair (no guides yet, a history reset): shown again at the next tick
+	// all the same, so the title keeps the 2x cadence (half the refresh rate) and stays paired from then on.
+	bool                                 fg_repeat = false;
+	// Last, so it is destroyed first: its event thread stops before anything else goes.
+	std::unique_ptr<DirectPresenter> direct;
+};
+
+vk::SurfaceFormatKHR Swapchain::SelectFormat() {
+	const auto& formats    = m_window.surface_capabilities.formats;
+	auto&       graphics   = m_window.graphic_ctx;
+	const auto  hdr_format = std::ranges::find_if(formats, [&](const auto& candidate) {
+		return candidate.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT &&
+		       IsHdrSwapchainFormat(candidate.format) &&
+		       static_cast<bool>(
+		           graphics.GetFormatProperties(candidate.format).optimalTilingFeatures &
+		           vk::FormatFeatureFlagBits::eBlitDst);
+	});
+	m_hdr_supported        = Config::HdrEnabled() && hdr_format != formats.end();
+	m_hdr_active           = m_hdr_requested && IsHdrSupported();
+	if (m_hdr_active) {
+		return *hdr_format;
+	}
+	if (Config::HdrEnabled() && !IsHdrSupported()) {
+		LOGF("HDR10 surface unavailable; using SDR output\n");
+	}
+	if (formats.size() == 1 && formats.front().format == vk::Format::eUndefined) {
+		return {vk::Format::eR8G8B8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear};
+	}
+	for (const auto& candidate: formats) {
+		if (candidate.colorSpace != vk::ColorSpaceKHR::eSrgbNonlinear) {
+			continue;
+		}
+		switch (candidate.format) {
+			case vk::Format::eB8G8R8A8Unorm:
+			case vk::Format::eR8G8B8A8Unorm: return candidate;
+			default: break;
+		}
+	}
+	EXIT("no supported UNORM swapchain format\n");
+}
+
+void Swapchain::Create() {
+	auto& graphics = m_window.graphic_ctx;
+	EXIT_IF(graphics.device == nullptr);
+	EXIT_IF(m_window.surface == nullptr);
+	const vk::Format kept_format = m_format;
+
+	// Capture the size before querying surface capabilities. If the window changes
+	// during creation, the next presentation will detect the newer size.
+	{
+		Common::LockGuard lock(m_window.mutex);
+		m_window_extent = {graphics.screen_width, graphics.screen_height};
+	}
+	EXIT_IF(m_window_extent.width == 0);
+	EXIT_IF(m_window_extent.height == 0);
+	m_window.RefreshSurfaceCapabilities();
+	const auto& surface = m_window.surface_capabilities;
+	EXIT_NOT_IMPLEMENTED(surface.formats.empty());
+
+	m_extent = surface.capabilities.currentExtent;
+	if (m_extent.width == std::numeric_limits<uint32_t>::max()) {
+		m_extent.width =
+		    std::clamp(m_window_extent.width, surface.capabilities.minImageExtent.width,
+		               surface.capabilities.maxImageExtent.width);
+		m_extent.height =
+		    std::clamp(m_window_extent.height, surface.capabilities.minImageExtent.height,
+		               surface.capabilities.maxImageExtent.height);
+	}
+	uint32_t image_count = surface.capabilities.minImageCount + 1;
+	if (surface.capabilities.maxImageCount != 0) {
+		image_count = std::min(image_count, surface.capabilities.maxImageCount);
+	}
+	const auto transform =
+	    surface.capabilities.supportedTransforms & vk::SurfaceTransformFlagBitsKHR::eIdentity
+	        ? vk::SurfaceTransformFlagBitsKHR::eIdentity
+	        : surface.capabilities.currentTransform;
+	const auto composite =
+	    surface.capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque
+	        ? vk::CompositeAlphaFlagBitsKHR::eOpaque
+	        : vk::CompositeAlphaFlagBitsKHR::eInherit;
+
+	const auto format = SelectFormat();
+	m_format                      = format.format;
+	const auto swapchain_features = graphics.GetFormatProperties(m_format).optimalTilingFeatures;
+	if (!static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eBlitDst)) {
+		EXIT("swapchain format cannot be a blit destination: format=%d\n",
+		     static_cast<int>(m_format));
+	}
+
+	vk::SwapchainCreateInfoKHR create_info {};
+	create_info.sType            = vk::StructureType::eSwapchainCreateInfoKHR;
+	create_info.surface          = m_window.surface;
+	create_info.minImageCount    = image_count;
+	create_info.imageFormat      = format.format;
+	create_info.imageColorSpace  = format.colorSpace;
+	create_info.imageExtent      = m_extent;
+	create_info.imageArrayLayers = 1;
+	create_info.imageUsage =
+	    vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
+	create_info.imageSharingMode = vk::SharingMode::eExclusive;
+	create_info.preTransform     = transform;
+	create_info.compositeAlpha   = composite;
+	switch (Config::GetPresentMode()) {
+		case Config::PresentMode::Mailbox:
+			create_info.presentMode = vk::PresentModeKHR::eMailbox;
+			break;
+		case Config::PresentMode::Immediate:
+			create_info.presentMode = vk::PresentModeKHR::eImmediate;
+			break;
+		case Config::PresentMode::Fifo:
+		default: create_info.presentMode = vk::PresentModeKHR::eFifo; break;
+	}
+	if (std::find(surface.present_modes.begin(), surface.present_modes.end(),
+	              create_info.presentMode) == surface.present_modes.end()) {
+		LOGF("warning: requested present mode is unavailable; falling back to Fifo\n");
+		create_info.presentMode = vk::PresentModeKHR::eFifo;
+	}
+	create_info.clipped = VK_TRUE;
+	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
+	                     "vkCreateSwapchainKHR");
+	EXIT_IF(m_handle == nullptr);
+	LOGF("Vulkan presentation: %s\n", m_hdr_active ? "HDR10 (PQ)" : "SDR");
+
+	m_images = EnumerateVulkan<vk::Image>(
+	    "vkGetSwapchainImagesKHR", [&](uint32_t* count, vk::Image* images) {
+		    return graphics.device.getSwapchainImagesKHR(m_handle, count, images);
+	    });
+	EXIT_NOT_IMPLEMENTED(m_images.empty());
+
+	m_image_views.resize(m_images.size());
+	for (size_t i = 0; i < m_images.size(); i++) {
+		vk::ImageViewCreateInfo view {};
+		view.sType                           = vk::StructureType::eImageViewCreateInfo;
+		view.image                           = m_images[i];
+		view.viewType                        = vk::ImageViewType::e2D;
+		view.format                          = m_format;
+		view.components                      = {};
+		view.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		view.subresourceRange.baseArrayLayer = 0;
+		view.subresourceRange.baseMipLevel   = 0;
+		view.subresourceRange.layerCount     = 1;
+		view.subresourceRange.levelCount     = 1;
+		RequireVulkanSuccess(graphics.device.createImageView(&view, nullptr, &m_image_views[i]),
+		                     "vkCreateImageView");
+		EXIT_IF(m_image_views[i] == nullptr);
+	}
+
+	vk::SemaphoreCreateInfo semaphore_info {};
+	semaphore_info.sType = vk::StructureType::eSemaphoreCreateInfo;
+	m_image_acquired.resize(m_images.size());
+	m_image_acquired_ticks.assign(m_images.size(), 0);
+	m_render_complete.resize(m_images.size());
+	for (size_t i = 0; i < m_images.size(); i++) {
+		RequireVulkanSuccess(
+		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_image_acquired[i]),
+		    "create swapchain image-acquired semaphore");
+		RequireVulkanSuccess(
+		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_render_complete[i]),
+		    "create swapchain render-complete semaphore");
+	}
+	m_image_index = static_cast<uint32_t>(-1);
+	m_frame_index = 0;
+
+	// After Release(), the overlay pipeline and the system overlay were built for the released
+	// swapchain's format and image count; they stay only if this one has the same.
+	if (m_kept_image_count != 0) {
+		if (kept_format != m_format || m_kept_image_count != m_images.size()) {
+			DestroyOverlayObjects();
+		}
+		m_kept_image_count = 0;
+	}
+}
+
+Swapchain::~Swapchain() {
+	Destroy();
+}
+
+void Swapchain::Destroy() {
+	if (m_handle == nullptr && m_image_acquired.empty() && m_render_complete.empty() &&
+	    m_image_views.empty() && m_kept_image_count == 0) {
+		return;
+	}
+	auto& graphics = m_window.graphic_ctx;
+
+	{
+		Common::LockGuard queue_lock(graphics.queue_mutex);
+		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
+	}
+	DestroyOverlayObjects();
+	DestroySwapchainObjects();
+	m_format           = vk::Format::eUndefined;
+	m_kept_image_count = 0;
+}
+
+void Swapchain::Release(CommandScheduler& scheduler) {
+	if (m_handle == nullptr) {
+		return;
+	}
+	auto& graphics = m_window.graphic_ctx;
+	// The last present command buffer has run once its tick is done. The presentation engine's wait on
+	// the render-complete semaphores is queue work too, so the queue is drained as well before the
+	// semaphores and the swapchain go; this happens once per switch to direct flips.
+	scheduler.Wait(scheduler.CurrentTick() - 1);
+	{
+		Common::LockGuard queue_lock(graphics.queue_mutex);
+		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
+	}
+	m_kept_image_count = ImageCount();
+	DestroySwapchainObjects();
+}
+
+void Swapchain::DestroyOverlayObjects() {
+	auto& graphics = m_window.graphic_ctx;
+	if (m_system_overlay != nullptr) {
+		m_system_overlay->ReleaseVulkan();
+	}
+	graphics.device.destroyPipeline(m_overlay_pipeline, nullptr);
+	graphics.device.destroyPipelineLayout(m_overlay_layout, nullptr);
+	graphics.device.destroyDescriptorSetLayout(m_overlay_descriptors, nullptr);
+	graphics.device.destroySampler(m_overlay_sampler, nullptr);
+	m_overlay_pipeline    = nullptr;
+	m_overlay_layout      = nullptr;
+	m_overlay_descriptors = nullptr;
+	m_overlay_sampler     = nullptr;
+}
+
+void Swapchain::DestroySwapchainObjects() {
+	auto& graphics = m_window.graphic_ctx;
+	for (const auto semaphore: m_image_acquired) {
+		if (semaphore != nullptr) {
+			graphics.device.destroySemaphore(semaphore, nullptr);
+		}
+	}
+	for (const auto semaphore: m_render_complete) {
+		if (semaphore != nullptr) {
+			graphics.device.destroySemaphore(semaphore, nullptr);
+		}
+	}
+	for (const auto view: m_image_views) {
+		if (view != nullptr) {
+			graphics.device.destroyImageView(view, nullptr);
+		}
+	}
+	if (m_handle != nullptr) {
+		graphics.device.destroySwapchainKHR(m_handle, nullptr);
+	}
+
+	m_handle        = nullptr;
+	m_extent        = {};
+	m_window_extent = {};
+	m_image_index   = static_cast<uint32_t>(-1);
+	m_frame_index   = 0;
+	m_images.clear();
+	m_image_views.clear();
+	m_image_acquired.clear();
+	m_image_acquired_ticks.clear();
+	m_render_complete.clear();
+}
+
+void Swapchain::Recreate(bool surface_lost) {
+	Destroy();
+	if (surface_lost) {
+#if defined(__APPLE__)
+		// Surface recreation goes through SDL_Vulkan_CreateSurface, which touches the
+		// window's view/layer and must run on the main thread on macOS.
+		EXIT_IF(!SDL_RunOnMainThread(
+		    [](void* window) { static_cast<WindowContext*>(window)->RecreateSurface(); }, &m_window,
+		    true));
+#else
+		m_window.RecreateSurface();
+#endif
+	}
+	Create();
+}
+
+bool Swapchain::NeedsResize() const {
+	Common::LockGuard lock(m_window.mutex);
+	return m_window_extent.width != m_window.graphic_ctx.screen_width ||
+	       m_window_extent.height != m_window.graphic_ctx.screen_height;
+}
+
+Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
+	EXIT_IF(m_handle == nullptr || m_frame_index >= m_image_acquired.size());
+	// Repeated frames can wrap the semaphore ring without acquiring a new source frame.
+	// Wait for the submission that consumed this slot before signaling it again.
+	scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	m_image_index     = static_cast<uint32_t>(-1);
+	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
+	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
+	    &m_image_index);
+	switch (result) {
+		case vk::Result::eSuccess: break;
+		case vk::Result::eSuboptimalKHR:
+			LOGF("vkAcquireNextImageKHR returned vk::Result::eSuboptimalKHR\n");
+			return Status::Recreate;
+		case vk::Result::eErrorOutOfDateKHR:
+			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorOutOfDateKHR\n");
+			return Status::Recreate;
+		case vk::Result::eErrorUnknown:
+			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorUnknown\n");
+			return Status::Recreate;
+		case vk::Result::eErrorSurfaceLostKHR:
+			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorSurfaceLostKHR\n");
+			return Status::SurfaceLost;
+		default: EXIT("vkAcquireNextImageKHR failed: %s\n", vk::to_string(result).c_str());
+	}
+	EXIT_IF(m_image_index >= m_images.size());
+	return Status::Success;
+}
+
+bool Swapchain::PrepareSystemOverlay() {
+	if (m_system_overlay == nullptr) {
+		m_system_overlay = std::make_unique<SystemOverlay>(m_window.graphic_ctx);
+	}
+	return m_system_overlay->PrepareFrame(m_extent, m_format, ImageCount());
+}
+
+static vk::Rect2D FitAspect(const vk::Extent3D& source, const vk::Extent2D& target) {
+	const uint64_t src_w = std::max(source.width, 1u);
+	const uint64_t src_h = std::max(source.height, 1u);
+	uint32_t       w     = target.width;
+	uint32_t       h     = target.height;
+	if (src_w * h > src_h * w) {
+		h = std::max<uint32_t>(1, static_cast<uint32_t>(src_h * w / src_w));
+	} else {
+		w = std::max<uint32_t>(1, static_cast<uint32_t>(src_w * h / src_h));
+	}
+	return {{static_cast<int32_t>((target.width - w) / 2),
+	         static_cast<int32_t>((target.height - h) / 2)},
+	        {w, h}};
+}
+
+void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer,
+                            const vk::Rect2D& rect) {
+	auto device = m_window.graphic_ctx.device;
+	if (m_overlay_pipeline == nullptr) {
+		vk::SamplerCreateInfo sampler {};
+		sampler.magFilter    = vk::Filter::eLinear;
+		sampler.minFilter    = vk::Filter::eLinear;
+		sampler.addressModeU = vk::SamplerAddressMode::eClampToEdge;
+		sampler.addressModeV = vk::SamplerAddressMode::eClampToEdge;
+		sampler.addressModeW = vk::SamplerAddressMode::eClampToEdge;
+		RequireVulkanSuccess(device.createSampler(&sampler, nullptr, &m_overlay_sampler),
+		                     "create video-out overlay sampler");
+		const vk::DescriptorSetLayoutBinding binding {0, vk::DescriptorType::eCombinedImageSampler,
+		                                              1, vk::ShaderStageFlagBits::eFragment};
+		vk::DescriptorSetLayoutCreateInfo    descriptors {};
+		descriptors.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
+		descriptors.bindingCount = 1;
+		descriptors.pBindings    = &binding;
+		RequireVulkanSuccess(
+		    device.createDescriptorSetLayout(&descriptors, nullptr, &m_overlay_descriptors),
+		    "create video-out overlay descriptor layout");
+		const vk::PushConstantRange alpha {vk::ShaderStageFlagBits::eFragment, 0, sizeof(uint32_t)};
+		vk::PipelineLayoutCreateInfo layout {};
+		layout.setLayoutCount         = 1;
+		layout.pSetLayouts            = &m_overlay_descriptors;
+		layout.pushConstantRangeCount = 1;
+		layout.pPushConstantRanges    = &alpha;
+		RequireVulkanSuccess(device.createPipelineLayout(&layout, nullptr, &m_overlay_layout),
+		                     "create video-out overlay pipeline layout");
+		const auto vertex   = CompileSPV(GPU_BLIT_FS_TRIANGLE_SPV, device);
+		const auto fragment = CompileSPV(GPU_VIDEO_OUT_OVERLAY_SPV, device);
+		std::array<vk::PipelineShaderStageCreateInfo, 2> stages {};
+		stages[0].stage  = vk::ShaderStageFlagBits::eVertex;
+		stages[0].module = vertex;
+		stages[0].pName  = "main";
+		stages[1].stage  = vk::ShaderStageFlagBits::eFragment;
+		stages[1].module = fragment;
+		stages[1].pName  = "main";
+		vk::PipelineVertexInputStateCreateInfo   vertex_input {};
+		vk::PipelineInputAssemblyStateCreateInfo assembly {};
+		assembly.topology = vk::PrimitiveTopology::eTriangleList;
+		vk::PipelineViewportStateCreateInfo viewport {};
+		viewport.viewportCount = 1;
+		viewport.scissorCount  = 1;
+		vk::PipelineRasterizationStateCreateInfo rasterization {};
+		rasterization.lineWidth = 1.0f;
+		vk::PipelineMultisampleStateCreateInfo multisample {};
+		multisample.rasterizationSamples = vk::SampleCountFlagBits::e1;
+		vk::PipelineColorBlendAttachmentState attachment {};
+		attachment.blendEnable         = VK_TRUE;
+		attachment.srcColorBlendFactor = vk::BlendFactor::eOne;
+		attachment.dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha;
+		attachment.srcAlphaBlendFactor = vk::BlendFactor::eOne;
+		attachment.dstAlphaBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha;
+		attachment.colorWriteMask = vk::ColorComponentFlagBits::eR |
+		                            vk::ColorComponentFlagBits::eG |
+		                            vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+		vk::PipelineColorBlendStateCreateInfo blend {};
+		blend.attachmentCount = 1;
+		blend.pAttachments    = &attachment;
+		const std::array dynamic_states {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+		vk::PipelineDynamicStateCreateInfo dynamic {};
+		dynamic.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
+		dynamic.pDynamicStates    = dynamic_states.data();
+		vk::PipelineRenderingCreateInfo rendering {};
+		rendering.colorAttachmentCount    = 1;
+		rendering.pColorAttachmentFormats = &m_format;
+		vk::GraphicsPipelineCreateInfo create {};
+		create.pNext               = &rendering;
+		create.stageCount          = static_cast<uint32_t>(stages.size());
+		create.pStages             = stages.data();
+		create.pVertexInputState   = &vertex_input;
+		create.pInputAssemblyState = &assembly;
+		create.pViewportState      = &viewport;
+		create.pRasterizationState = &rasterization;
+		create.pMultisampleState   = &multisample;
+		create.pColorBlendState    = &blend;
+		create.pDynamicState       = &dynamic;
+		create.layout              = m_overlay_layout;
+		RequireVulkanSuccess(
+		    device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &m_overlay_pipeline),
+		    "create video-out overlay pipeline");
+		device.destroyShaderModule(fragment, nullptr);
+		device.destroyShaderModule(vertex, nullptr);
+	}
+	auto& frame = *layer.frame;
+	if (frame.view == nullptr) {
+		vk::ImageViewCreateInfo view {};
+		view.image            = frame.image.image;
+		view.viewType         = vk::ImageViewType::e2D;
+		view.format           = frame.image.format;
+		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(device.createImageView(&view, nullptr, &frame.view),
+		                     "create video-out overlay image view");
+	}
+	const vk::DescriptorImageInfo image {m_overlay_sampler, frame.view,
+	                                     vk::ImageLayout::eShaderReadOnlyOptimal};
+	vk::WriteDescriptorSet        write {};
+	write.dstBinding      = 0;
+	write.descriptorCount = 1;
+	write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+	write.pImageInfo      = &image;
+	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
+	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) |
+	                       (m_hdr_active ? 2u : 0u) | (frame.hdr ? 4u : 0u) |
+	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u);
+	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
+	                      sizeof(flags), &flags);
+	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
+	vk::RenderingAttachmentInfo attachment {};
+	attachment.imageView   = m_image_views[m_image_index];
+	attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+	attachment.loadOp      = vk::AttachmentLoadOp::eLoad;
+	attachment.storeOp     = vk::AttachmentStoreOp::eStore;
+	vk::RenderingInfo rendering {};
+	rendering.renderArea.extent    = m_extent;
+	rendering.layerCount           = 1;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments    = &attachment;
+	command.beginRendering(&rendering);
+	const vk::Viewport viewport {static_cast<float>(rect.offset.x),
+	                             static_cast<float>(rect.offset.y),
+	                             static_cast<float>(rect.extent.width),
+	                             static_cast<float>(rect.extent.height),
+	                             0.0f,
+	                             1.0f};
+	command.setViewport(0, 1, &viewport);
+	command.setScissor(0, 1, &rect);
+	command.draw(3, 1, 0, 0);
+	command.endRendering();
+}
+
+void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
+                                      const Presenter::Layer& overlay, bool draw_system_overlay) {
+	EXIT_IF(m_image_index >= m_images.size());
+	auto       vk_command      = command.Handle();
+	const bool draw_overlay    = overlay.frame != nullptr;
+	const bool draw_attachment = draw_overlay || draw_system_overlay;
+	if (source != nullptr) {
+		source->Transit(vk_command, vk::ImageLayout::eTransferSrcOptimal,
+		                vk::AccessFlagBits2::eTransferRead);
+	}
+	if (draw_overlay) {
+		overlay.frame->Transit(vk_command, vk::ImageLayout::eShaderReadOnlyOptimal,
+		                       vk::AccessFlagBits2::eShaderRead);
+	}
+
+	vk::ImageMemoryBarrier to_transfer {};
+	to_transfer.sType                           = vk::StructureType::eImageMemoryBarrier;
+	to_transfer.dstAccessMask                   = vk::AccessFlagBits::eTransferWrite;
+	to_transfer.oldLayout                       = vk::ImageLayout::eUndefined;
+	to_transfer.newLayout                       = vk::ImageLayout::eTransferDstOptimal;
+	to_transfer.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.image                           = m_images[m_image_index];
+	to_transfer.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	to_transfer.subresourceRange.baseMipLevel   = 0;
+	to_transfer.subresourceRange.levelCount     = 1;
+	to_transfer.subresourceRange.baseArrayLayer = 0;
+	to_transfer.subresourceRange.layerCount     = 1;
+	// Match the acquire wait stage so the layout transition cannot precede acquisition.
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                           vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 0,
+	                           nullptr, 0, nullptr, 1, &to_transfer);
+
+	const auto* aspect_source = source != nullptr ? source : overlay.frame;
+	const auto  game_rect     = !Config::StretchEnabled() && aspect_source != nullptr
+	                               ? FitAspect(aspect_source->image.extent, m_extent)
+	                               : vk::Rect2D {{0, 0}, m_extent};
+	if (source == nullptr || game_rect.extent != m_extent) {
+		const vk::ClearColorValue black {};
+		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
+		                           &black, 1, &to_transfer.subresourceRange);
+		if (source != nullptr) {
+			vk::ImageMemoryBarrier after_clear = to_transfer;
+			after_clear.srcAccessMask          = vk::AccessFlagBits::eTransferWrite;
+			after_clear.oldLayout              = vk::ImageLayout::eTransferDstOptimal;
+			vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                           vk::PipelineStageFlagBits::eTransfer,
+			                           vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 1,
+			                           &after_clear);
+		}
+	}
+	if (source != nullptr) {
+		vk::ImageBlit region {};
+		region.srcSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		region.srcSubresource.mipLevel       = 0;
+		region.srcSubresource.baseArrayLayer = 0;
+		region.srcSubresource.layerCount     = 1;
+		region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
+		region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
+		region.srcOffsets[1].z               = 1;
+		region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+		region.dstSubresource.mipLevel       = 0;
+		region.dstSubresource.baseArrayLayer = 0;
+		region.dstSubresource.layerCount     = 1;
+		region.dstOffsets[0].x = game_rect.offset.x;
+		region.dstOffsets[0].y = game_rect.offset.y;
+		region.dstOffsets[1].x = game_rect.offset.x + static_cast<int>(game_rect.extent.width);
+		region.dstOffsets[1].y = game_rect.offset.y + static_cast<int>(game_rect.extent.height);
+		region.dstOffsets[1].z               = 1;
+		vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
+		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
+		                     &region, vk::Filter::eLinear);
+	}
+
+	vk::ImageMemoryBarrier to_present {};
+	to_present.sType               = vk::StructureType::eImageMemoryBarrier;
+	to_present.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+	to_present.dstAccessMask       = draw_attachment ? vk::AccessFlagBits::eColorAttachmentRead |
+	                                                       vk::AccessFlagBits::eColorAttachmentWrite
+	                                                 : vk::AccessFlagBits::eMemoryRead;
+	to_present.oldLayout           = vk::ImageLayout::eTransferDstOptimal;
+	to_present.newLayout           = draw_attachment ? vk::ImageLayout::eColorAttachmentOptimal
+	                                                 : vk::ImageLayout::ePresentSrcKHR;
+	to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_present.image               = m_images[m_image_index];
+	to_present.subresourceRange.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	to_present.subresourceRange.baseMipLevel   = 0;
+	to_present.subresourceRange.levelCount     = 1;
+	to_present.subresourceRange.baseArrayLayer = 0;
+	to_present.subresourceRange.layerCount     = 1;
+	vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                           draw_attachment ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+	                                           : vk::PipelineStageFlagBits::eAllCommands,
+	                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+	                           &to_present);
+	if (draw_attachment) {
+		if (draw_overlay) {
+			DrawOverlay(vk_command, overlay, game_rect);
+			if (draw_system_overlay) {
+				to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+				to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
+				vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                           vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0,
+				                           nullptr, 1, &to_present);
+			}
+		}
+		if (draw_system_overlay) {
+			m_system_overlay->Record(vk_command, m_image_views[m_image_index]);
+		}
+		to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+		to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
+		to_present.oldLayout     = vk::ImageLayout::eColorAttachmentOptimal;
+		to_present.newLayout     = vk::ImageLayout::ePresentSrcKHR;
+		vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+		                           vk::PipelineStageFlagBits::eAllCommands,
+		                           vk::DependencyFlagBits::eByRegion, 0, nullptr, 0, nullptr, 1,
+		                           &to_present);
+	}
+}
+
+uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
+	EXIT_IF(m_frame_index >= m_image_acquired.size() || m_image_index >= m_render_complete.size());
+	SubmitInfo submit;
+	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
+	submit.AddSignal(m_render_complete[m_image_index]);
+	const auto tick                       = scheduler.Submit(submit);
+	m_image_acquired_ticks[m_frame_index] = tick;
+	return tick;
+}
+
+Swapchain::Status Swapchain::Present() {
+	EXIT_IF(m_image_index >= m_render_complete.size());
+	const auto         ready = m_render_complete[m_image_index];
+	vk::PresentInfoKHR present {};
+	present.sType              = vk::StructureType::ePresentInfoKHR;
+	present.swapchainCount     = 1;
+	present.pSwapchains        = &m_handle;
+	present.pImageIndices      = &m_image_index;
+	present.pWaitSemaphores    = &ready;
+	present.waitSemaphoreCount = 1;
+
+	vk::Result result;
+	{
+		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
+		result = m_window.graphic_ctx.queue.presentKHR(&present);
+	}
+	switch (result) {
+		case vk::Result::eSuccess: break;
+		case vk::Result::eSuboptimalKHR:
+			LOGF("vkQueuePresentKHR returned vk::Result::eSuboptimalKHR\n");
+			return Status::Recreate;
+		case vk::Result::eErrorOutOfDateKHR:
+			LOGF("vkQueuePresentKHR returned vk::Result::eErrorOutOfDateKHR\n");
+			return Status::Recreate;
+		case vk::Result::eErrorSurfaceLostKHR:
+			LOGF("vkQueuePresentKHR returned vk::Result::eErrorSurfaceLostKHR\n");
+			return Status::SurfaceLost;
+		default: EXIT("vkQueuePresentKHR failed: %s\n", vk::to_string(result).c_str());
+	}
+	m_frame_index = (m_frame_index + 1u) % static_cast<uint32_t>(m_images.size());
+	return Status::Success;
+}
+
+Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(window)) {}
+
+Presenter::~Presenter() = default;
+
+Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
+                                          bool headset) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer.IsInvalid());
+	auto frame_format = info.pixel_format;
+	switch (frame_format) {
+		case vk::Format::eR8G8B8A8Srgb: frame_format = vk::Format::eR8G8B8A8Unorm; break;
+		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
+		case vk::Format::eA2R10G10B10UnormPack32:
+			// FSR's Vulkan backend accepts A2B10G10R10. Convert the displayed channels on the GPU rather than
+			// reinterpreting the bits (which swaps red/blue), so Astro can use the same interpolation path.
+			if (FrameGen::Enabled() && !hdr && !headset) frame_format = vk::Format::eA2B10G10R10UnormPack32;
+			break;
+		default: break;
+	}
+	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
+	frame->hdr         = hdr;
+	frame->blank       = false;
+	frame->fg_boundary = 0;
+	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
+	auto&             image = m_impl->ResolveSurface(info);
+	if (image.backing.format == vk::Format::eUndefined) {
+		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
+	}
+	frame->Configure(m_impl->window.graphic_ctx,
+	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
+	frame->CopyFrom(buffer, image);
+	if (headset) {
+		// The frame holds the raw display-encoded pixels the headset needs.
+		frame->Transit(buffer.Handle(), vk::ImageLayout::eTransferSrcOptimal,
+		               vk::AccessFlagBits2::eTransferRead);
+		Vr::OpenXrQueueEyeSource(buffer, frame->image);
+	}
+	return *frame;
+}
+
+Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,
+                                               CommandBuffer* producer) {
+	KYTY_PROFILER_FUNCTION();
+	auto              format = m_impl->frames.GetFormat();
+	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
+	frame->hdr         = false;
+	frame->blank       = true;
+	frame->fg_boundary = 0;
+	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
+	vk::ClearColorValue clear {};
+	clear.float32[3] = opaque ? 1.0f : 0.0f;
+	if (producer != nullptr) {
+		EXIT_IF(producer->IsInvalid());
+		frame->Clear(*producer, clear);
+	} else {
+		Common::LockGuard lock(m_impl->present_mutex);
+		auto& command = m_impl->present_scheduler.BeginCommand();
+		frame->Clear(command, clear);
+		frame->present_tick = m_impl->present_scheduler.Submit();
+	}
+	return *frame;
+}
+
+bool Presenter::PresentLastFrame() {
+	Common::LockGuard lock(m_impl->present_mutex);
+	// A pause shows the newest queued frame. An overlay refresh (VideoOut, on every vblank that showed nothing new,
+	// e.g. with the performance overlay on) only presents what is on screen: flushing there broke dynamic frame
+	// generation's pair chain on almost every frame (every Advance a history reset, 2026-11-08).
+	if (IsGuestPaused()) {
+		m_impl->FlushDynamic();
+	}
+	if (m_impl->PresentPendingReal()) {
+		return true;
+	}
+	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
+		return false;
+	}
+	m_impl->Present();
+	return true;
+}
+
+bool Presenter::IsGuestPaused() const noexcept {
+	return m_impl->window.loop.paused.load(std::memory_order_acquire);
+}
+
+bool Presenter::IsHdrSupported() const noexcept {
+	return m_impl->swapchain.IsHdrSupported();
+}
+
+bool Presenter::NeedsSystemOverlayRefresh() const noexcept {
+	const auto visual = GetSystemOverlayVisualState();
+	return visual.active ||
+	       visual.revision != m_impl->presented_overlay_revision.load(std::memory_order_acquire);
+}
+
+RenderContext& Presenter::Renderer() const noexcept {
+	return m_impl->renderer;
+}
+
+void Presenter::Present(Frame& frame) {
+	const Layer layer {&frame, 0, false};
+	Present(std::span(&layer, 1));
+}
+
+void Presenter::Present(std::span<const Layer> layers) {
+	Common::LockGuard lock(m_impl->present_mutex);
+	auto&             impl = *m_impl;
+	static uint64_t fg_present_inputs = 0;
+	if (FrameGen::Enabled() && (++fg_present_inputs <= 3 || fg_present_inputs % 600 == 0)) {
+		std::fprintf(stderr, "[frame generation] present layers=%zu first_bus=%d active=%d\n", layers.size(),
+		             layers.empty() ? -1 : layers[0].bus, FrameGen::Active() ? 1 : 0);
+	}
+	if (impl.fg != nullptr) {
+		impl.fg->Retire([&](uint64_t tick) { return impl.present_scheduler.IsFree(tick); });
+	}
+	// A real frame still waiting for its tick goes first (a flip came before it), then this one.
+	(void)impl.PresentPendingReal();
+	if (layers.size() == 1 && layers[0].bus == 0 && layers[0].frame != nullptr && impl.EnqueueDynamic(*layers[0].frame)) {
+		return; // shown by DynamicTick, on this vblank or a later one
+	}
+	impl.FlushDynamic();
+	if (layers.size() == 1 && layers[0].bus == 0 && layers[0].frame != nullptr && impl.TryFrameGen(*layers[0].frame)) {
+		return;
+	}
+	for (const auto& layer: layers) {
+		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
+		m_impl->frames.ValidateForPresent(layer.frame);
+		auto& previous = m_impl->layers[layer.bus];
+		if (previous.frame != nullptr) {
+			m_impl->frames.Release(previous.frame);
+		}
+		previous = layer;
+	}
+	m_impl->Present();
+}
+
+void Presenter::SetFrameGuides(Frame& frame, uint64_t boundary) {
+	frame.fg_boundary = boundary;
+}
+
+void Presenter::ClearLayer(int bus) {
+	if (static_cast<size_t>(bus) >= m_impl->layers.size()) {
+		return;
+	}
+	Common::LockGuard lock(m_impl->present_mutex);
+	if (bus == 0) {
+		m_impl->DropPendingReal();
+		m_impl->FlushDynamic();
+	}
+	auto& layer = m_impl->layers[bus];
+	if (layer.frame != nullptr) {
+		m_impl->frames.Release(layer.frame);
+		layer = {};
+	}
+}
+
+void Presenter::Impl::Present() {
+	KYTY_PROFILER_FUNCTION();
+
+	const auto overlay_visual = GetSystemOverlayVisualState();
+	direct_streak.store(0, std::memory_order_relaxed);
+	// Keep black/blank flips in the current color space; only real main-bus frames switch it.
+	const auto* main_frame = layers[0].frame;
+	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
+	                         swapchain.SetHdr(main_frame->hdr);
+	if (!swapchain.Exists()) {
+		// Released while direct flips ran; this present (menu, toast, fallback flip) needs it again.
+		swapchain.Create();
+		frames.SetFormat(swapchain.Format());
+		NoteSwapchain();
+		std::fprintf(stderr, "direct present: Vulkan swapchain created again\n");
+	} else if (hdr_changed || swapchain.NeedsResize()) {
+		// Some window systems keep presenting an old swapchain after a resize.
+		RecoverSwapchain(Swapchain::Status::Recreate);
+	}
+	for (uint32_t attempt = 0; attempt < 2; attempt++) {
+		auto status = swapchain.AcquireNextImage(present_scheduler);
+		if (status != Swapchain::Status::Success) {
+			RecoverSwapchain(status);
+			continue;
+		}
+		// present_mutex owns the prepared frames and this scheduler. Only queue submission
+		// is shared with rendering, and it has its own queue_mutex.
+		auto&      command = present_scheduler.BeginCommand();
+		const bool draw_system_overlay = (overlay_visual.active || PerformanceOverlayEnabled()) &&
+		                                 swapchain.PrepareSystemOverlay();
+		swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
+		                                draw_system_overlay);
+		const auto tick = swapchain.Submit(present_scheduler);
+		for (const auto& layer: layers) {
+			if (layer.frame != nullptr) {
+				layer.frame->present_tick = tick;
+			}
+		}
+		status = swapchain.Present();
+		if (status != Swapchain::Status::Success) {
+			RecoverSwapchain(status);
+			continue;
+		}
+
+		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
+		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::DroppedPresents);
+}
+
+void Presenter::Discard(Frame& frame) {
+	m_impl->frames.Release(&frame);
+}
+
+bool Presenter::PresentPendingFrame() {
+	Common::LockGuard lock(m_impl->present_mutex);
+	return m_impl->PresentPendingReal();
+}
+
+bool Presenter::FrameGenTick() {
+	Common::LockGuard lock(m_impl->present_mutex);
+	return m_impl->DynamicTick();
+}
+
+static void CountFgPresent(bool generated);
+// Dynamic mode diagnostics, printed with the cadence line: ticks, ticks between two real frames (interpolation
+// wanted), and why none was made (no guides for the pair, Advance failed, a priming generation).
+static struct {
+	uint64_t ticks, between, wanted, no_guides, advance_failed, advances, resets, priming, gaps[5], untagged, arrived;
+} g_dyn {};
+
+void Presenter::Impl::Unref(Frame* f) {
+	if (f != nullptr && f != layers[0].frame && f != fg_real && !Queued(f)) {
+		frames.Release(f);
+	}
+}
+
+void Presenter::Impl::ShowFrame(Frame* f) {
+	Frame* old = layers[0].frame;
+	layers[0]  = {f, 0, false};
+	if (old != f) {
+		Unref(old);
+	}
+	Present();
+}
+
+// Leaves dynamic mode: the newest queued frame is shown, the rest go back (with their guides).
+void Presenter::Impl::FlushDynamic() {
+	if (fg_reals.empty()) {
+		return;
+	}
+	Frame* newest = fg_reals.back().frame;
+	for (auto& r: fg_reals) {
+		if (r.guides_ok && fg != nullptr) fg->DropGuides(r.guides);
+	}
+	std::vector<Frame*> queued;
+	for (auto& r: fg_reals) queued.push_back(r.frame);
+	fg_reals.clear();
+	fg_gaps.clear();
+	fg_pair_a = fg_pair_b = nullptr;
+	Frame* previously_shown = layers[0].frame;
+	const bool replaced = newest != previously_shown;
+	if (replaced) ShowFrame(newest); // releases the previous layer after the queue was detached
+	for (Frame* f: queued) {
+		if (!replaced || f != previously_shown) Unref(f); // that queued layer was already released by ShowFrame
+	}
+}
+
+// A flip's real frame in dynamic mode (`real` owned: busy). False: not this mode or not such a frame.
+bool Presenter::Impl::EnqueueDynamic(Frame& real) {
+	if (!FrameGen::Dynamic() || !FrameGen::Active()) {
+		if (fg_was_dynamic) {
+			FlushDynamic();
+			fg.reset(); // the 2x mode or none: its own generator, fresh
+			fg_was_dynamic = false;
+		}
+		return false;
+	}
+	if (real.hdr || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
+		return false;
+	}
+	if (!fg_was_dynamic) {
+		fg.reset();
+		fg_was_dynamic = true;
+	}
+	if (fg == nullptr) {
+		fg = std::make_unique<FrameGen::Generator>(window.graphic_ctx);
+	}
+	frames.ValidateForPresent(&real);
+	FgReal r {&real, fg_tick + 1, false, {}};
+	g_dyn.arrived++;
+	g_dyn.untagged += real.fg_boundary == 0 ? 1 : 0;
+	r.guides_ok = fg->TakeGuides(&r.guides, real.fg_boundary);
+	if (!fg_reals.empty()) {
+		fg_gaps.push_back(std::max<uint64_t>(1, r.tick - fg_reals.back().tick));
+		while (fg_gaps.size() > 8) fg_gaps.pop_front();
+	}
+	fg_reals.push_back(r);
+	while (fg_reals.size() > 4) { // (a stall: the oldest can no longer be shown)
+		FgReal old = fg_reals.front();
+		fg_reals.pop_front();
+		if (old.guides_ok) fg->DropGuides(old.guides);
+		Unref(old.frame);
+	}
+	return true;
+}
+
+// Once per vblank (VideoOut PresentThread, after its flips): presents what dynamic mode shows on this vblank.
+bool Presenter::Impl::DynamicTick() {
+	fg_tick++;
+	g_dyn.ticks++;
+	if (fg_reals.empty()) {
+		return false;
+	}
+	if (fg != nullptr) {
+		fg->Retire([&](uint64_t tick) { return present_scheduler.IsFree(tick); });
+	}
+	uint64_t gap = 1;
+	for (const uint64_t g: fg_gaps) gap = std::max(gap, g);
+	gap                 = std::min<uint64_t>(gap, 4);
+	const uint64_t tau  = fg_tick - (gap - 1); // the content time this vblank shows, in ticks
+	// A: the newest real frame at or before tau; B: the one after it.
+	size_t a = 0;
+	for (size_t i = 0; i < fg_reals.size(); i++) {
+		if (fg_reals[i].tick <= tau) a = i;
+	}
+	while (a > 0) { // older frames can no longer be shown
+		FgReal old = fg_reals.front();
+		fg_reals.pop_front();
+		a--;
+		if (old.guides_ok && fg != nullptr) fg->DropGuides(old.guides);
+		if (old.frame == fg_pair_a || old.frame == fg_pair_b) {
+			// still the generator's pair: keep nothing (a later pair starts over if it does not follow)
+		}
+		Unref(old.frame);
+	}
+	FgReal&        A       = fg_reals[0];
+	FgReal*        B       = fg_reals.size() >= 2 ? &fg_reals[1] : nullptr;
+	CommandBuffer* command = nullptr;
+	const bool     usable  = fg != nullptr && FrameGen::Active() && B != nullptr && A.frame->image.extent == B->frame->image.extent &&
+	                    A.frame->image.format == B->frame->image.format;
+	const vk::Extent2D extent = B != nullptr ? vk::Extent2D {B->frame->image.extent.width, B->frame->image.extent.height} : vk::Extent2D {};
+	FrameGen::Target   bt {}, at {};
+	if (B != nullptr) {
+		bt = {B->frame->image.image, B->frame->image.format, extent, B->frame->image.usage, B->frame->fg_boundary};
+		at = {A.frame->image.image, A.frame->image.format, extent, A.frame->image.usage, A.frame->fg_boundary};
+	}
+	// The generator follows every pair in order, as soon as its second frame is here, generating or not: optical flow
+	// and FSR's history need each frame (a pair of back-to-back frames, which needs no generated frame, included).
+	bool ready = B != nullptr && fg_pair_a == A.frame && fg_pair_b == B->frame;
+	if (usable && !ready && !B->guides_ok) g_dyn.no_guides++;
+	if (usable && !ready && B->guides_ok) {
+		command            = &present_scheduler.BeginCommand();
+		const bool follows = fg_pair_b == A.frame;
+		B->frame->Transit(command->Handle(), vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
+		A.frame->Transit(command->Handle(), vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+		ready = fg->Advance(command->Handle(), follows ? &at : nullptr, bt, B->guides, !follows);
+		g_dyn.advances++;
+		g_dyn.resets += follows ? 0 : 1;
+		g_dyn.advance_failed += ready ? 0 : 1;
+		B->guides_ok = false; // read (or released) by Advance
+		fg_pair_a    = ready ? A.frame : nullptr;
+		fg_pair_b    = ready ? B->frame : nullptr;
+	}
+	// What this vblank shows: the real frame at tau, a generated one between A and B, or the nearer real one.
+	const bool  between = B != nullptr && tau > A.tick;
+	const float phase   = between ? static_cast<float>(tau - A.tick) / static_cast<float>(B->tick - A.tick) : 0.0f;
+	const bool  wanted  = between && phase > 0.08f && phase < 0.92f; // (near a real frame: that frame)
+	if (between) {
+		g_dyn.between++;
+		g_dyn.wanted += wanted ? 1 : 0;
+		g_dyn.gaps[std::min<uint64_t>(B->tick - A.tick, 4)]++;
+	}
+	Frame* generated = nullptr;
+	bool   shown     = false;
+	bool   dumping   = false;
+	if (usable && ready && wanted) {
+		if (command == nullptr) command = &present_scheduler.BeginCommand();
+		generated        = frames.Acquire(extent, B->frame->image.format);
+		generated->hdr   = false;
+		generated->blank = false;
+		generated->Configure(window.graphic_ctx, extent, B->frame->image.format);
+		B->frame->Transit(command->Handle(), vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+		generated->Transit(command->Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
+		const FrameGen::Target ot {generated->image.image, generated->image.format, extent, generated->image.usage};
+		shown = (generated->image.usage & vk::ImageUsageFlagBits::eStorage) && fg->Generate(command->Handle(), bt, ot, phase);
+		dumping = shown && fg->DumpRecord(command->Handle(), bt, ot);
+		generated->image.state = {vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryWrite, vk::ImageLayout::eGeneral};
+	}
+	if (command != nullptr) {
+		const uint64_t tick = present_scheduler.Submit();
+		fg->Submitted(tick);
+		if (dumping) { present_scheduler.Wait(tick); fg->DumpWrite(); }
+		A.frame->present_tick = std::max(A.frame->present_tick, tick); // read by this submission
+		B->frame->present_tick = std::max(B->frame->present_tick, tick);
+		if (generated != nullptr) {
+			generated->present_tick = tick;
+		}
+	}
+	if (shown) {
+		ShowFrame(generated);
+		CountFgPresent(true);
+		return true;
+	}
+	if (generated != nullptr) {
+		g_dyn.priming++;
+		frames.Release(generated);
+	}
+	Frame* real = !between || phase < 0.5f ? A.frame : B->frame;
+	if (layers[0].frame == real) {
+		return false;
+	}
+	ShowFrame(real);
+	CountFgPresent(false);
+	return true;
+}
+
+// Frame generation's cadence, every 5 s on stderr: generated and real frames presented.
+static void CountFgPresent(bool generated) {
+	static uint64_t gen = 0, real = 0;
+	static auto     since = std::chrono::steady_clock::now();
+	(generated ? gen : real)++;
+	const auto now = std::chrono::steady_clock::now();
+	if (const double s = std::chrono::duration<double>(now - since).count(); s >= 5.0) {
+		std::fprintf(stderr, "[frame generation] %.1f s: %llu generated + %llu real presents (%.1f + %.1f per second)\n", s,
+		             static_cast<unsigned long long>(gen), static_cast<unsigned long long>(real), gen / s, real / s);
+		if (g_dyn.ticks != 0) {
+			std::fprintf(stderr,
+			             "[frame generation] dynamic: %llu ticks, %llu between frames (%llu wanted), gaps 1:%llu 2:%llu 3:%llu 4+:%llu; "
+			             "%llu advances (%llu resets, %llu failed), %llu without guides, %llu priming; %llu frames, %llu untagged\n",
+			             (unsigned long long)g_dyn.ticks, (unsigned long long)g_dyn.between, (unsigned long long)g_dyn.wanted,
+			             (unsigned long long)g_dyn.gaps[1], (unsigned long long)g_dyn.gaps[2], (unsigned long long)g_dyn.gaps[3],
+			             (unsigned long long)g_dyn.gaps[4], (unsigned long long)g_dyn.advances, (unsigned long long)g_dyn.resets,
+			             (unsigned long long)g_dyn.advance_failed, (unsigned long long)g_dyn.no_guides, (unsigned long long)g_dyn.priming,
+			             (unsigned long long)g_dyn.arrived, (unsigned long long)g_dyn.untagged);
+			g_dyn = {};
+		}
+		gen = real = 0;
+		since      = now;
+	}
+}
+
+bool Presenter::Impl::PresentPendingReal() {
+	if (fg_real == nullptr) {
+		if (fg_repeat && layers[0].frame != nullptr) {
+			fg_repeat = false;
+			Present();
+			return true;
+		}
+		fg_repeat = false;
+		return false;
+	}
+	CountFgPresent(false);
+	auto& main = layers[0];
+	if (main.frame != nullptr && main.frame != fg_real) {
+		frames.Release(main.frame);
+	}
+	main    = {fg_real, 0, false};
+	fg_real = nullptr;
+	Present();
+	return true;
+}
+
+// Called with present_mutex held and `real` this flip's main-bus frame (owned: busy).
+bool Presenter::Impl::TryFrameGen(Frame& real) {
+	if (!FrameGen::Active()) {
+		fg.reset(); // off or paused: its FidelityFX contexts and images go (about 200 MB; RAM is scarce here)
+		return false;
+	}
+	if (fg == nullptr) {
+		fg = std::make_unique<FrameGen::Generator>(window.graphic_ctx);
+	}
+	frames.ValidateForPresent(&real);
+	static uint64_t fg_inputs = 0;
+	if (++fg_inputs <= 3 || fg_inputs % 600 == 0) {
+		std::fprintf(stderr, "[frame generation] input %llu: format=%u hdr=%u blank=%u usage=0x%x guides=%llu\n",
+		             static_cast<unsigned long long>(fg_inputs), static_cast<unsigned>(real.image.format), real.hdr ? 1u : 0u,
+		             real.blank ? 1u : 0u, static_cast<unsigned>(static_cast<VkImageUsageFlags>(real.image.usage)),
+		             static_cast<unsigned long long>(real.fg_boundary));
+	}
+	if (real.hdr || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
+		fg->Reset();
+		return false;
+	}
+	const vk::Extent2D extent {real.image.extent.width, real.image.extent.height};
+	auto&              command = present_scheduler.BeginCommand();
+	real.Transit(command.Handle(), vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
+	const FrameGen::Target source {real.image.image, real.image.format, extent, real.image.usage, real.fg_boundary};
+	Frame*                 generated = nullptr;
+	bool                   shown     = false;
+	bool                   dumping   = false;
+	if (fg->Begin(command.Handle(), source)) {
+		generated        = frames.Acquire(extent, real.image.format);
+		generated->hdr   = false;
+		generated->blank = false;
+		generated->Configure(window.graphic_ctx, extent, real.image.format);
+		real.Transit(command.Handle(), vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
+		generated->Transit(command.Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
+		const FrameGen::Target output {generated->image.image, generated->image.format, extent, generated->image.usage};
+		shown = (generated->image.usage & vk::ImageUsageFlagBits::eStorage) && fg->Record(command.Handle(), source, output);
+		dumping = shown && fg->DumpRecord(command.Handle(), source, output); // (diagnostic, KYTY_FRAMEGEN_DUMP)
+		generated->image.state = {vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+		                          vk::ImageLayout::eGeneral};
+	}
+	// (Submitted even when nothing was generated: the recorded transitions are the frames' tracked state.)
+	const uint64_t tick = present_scheduler.Submit();
+	fg->Submitted(tick);
+	if (dumping) {
+		present_scheduler.Wait(tick);
+		fg->DumpWrite();
+	}
+	if (generated != nullptr) {
+		generated->present_tick = tick;
+	}
+	if (!shown) {
+		if (generated != nullptr) {
+			frames.Release(generated);
+		}
+		fg_repeat = true; // (the caller presents `real` now; the next tick shows it again)
+		return false;
+	}
+	auto& main = layers[0];
+	if (main.frame != nullptr) {
+		frames.Release(main.frame);
+	}
+	main = {generated, 0, false};
+	Present();
+	CountFgPresent(true);
+	fg_real = &real;
+	return true;
+}
+
+DirectPresenter* Presenter::Direct() const noexcept {
+	return m_impl->direct.get();
+}
+
+void Presenter::OnDirectShown() noexcept {
+	m_impl->direct_streak.fetch_add(1, std::memory_order_relaxed);
+}
+
+static bool KeepSwapchainForDirect() {
+	static const bool keep = [] {
+		const char* v = std::getenv("KYTY_DIRECT_PRESENT_KEEP_SWAPCHAIN");
+		return v != nullptr && v[0] == '1';
+	}();
+	return keep;
+}
+
+void Presenter::MaintainDirect() {
+	// About half a second of direct flips: a toast or the cursor flickering on and off does not make
+	// the swapchain go and come back every few frames.
+	constexpr uint32_t kStreak = 30;
+	auto&              impl    = *m_impl;
+	if (impl.direct == nullptr || impl.direct_streak.load(std::memory_order_relaxed) < kStreak ||
+	    KeepSwapchainForDirect() || GetSystemOverlayVisualState().active || PerformanceOverlayEnabled()) {
+		return;
+	}
+	Common::LockGuard lock(impl.present_mutex);
+	// A Vulkan present may have run in between; it resets the streak under this lock.
+	const uint32_t streak = impl.direct_streak.load(std::memory_order_relaxed);
+	if (!impl.swapchain.Exists() || streak < kStreak) {
+		return;
+	}
+	impl.swapchain.Release(impl.present_scheduler);
+	std::fprintf(stderr, "direct present: Vulkan swapchain released after %u direct flips\n", streak);
+}
+
+void Presenter::SetMainLayer(Frame& frame) {
+	Common::LockGuard lock(m_impl->present_mutex);
+	m_impl->frames.ValidateForPresent(&frame);
+	if (m_impl->fg_real != &frame) {
+		m_impl->DropPendingReal();
+	} else {
+		m_impl->fg_real = nullptr;
+	}
+	m_impl->FlushDynamic();
+	auto& main = m_impl->layers[0];
+	if (main.frame != nullptr && main.frame != &frame) {
+		m_impl->frames.Release(main.frame);
+	}
+	main = {&frame, 0, false};
+}
+
+bool Presenter::HdrSwapchainEverUsed() const noexcept {
+	return m_impl->hdr_ever.load();
+}
+
+WindowContext::WindowContext() = default;
+
+} // namespace Libs::Graphics

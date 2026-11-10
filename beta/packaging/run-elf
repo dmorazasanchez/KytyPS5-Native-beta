@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+r="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export LD_LIBRARY_PATH="$r/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$@"

@@ -1,0 +1,375 @@
+// Title profiles for the native upscaler boundary: where a game's FidelityFX FSR3 boundary is, as
+// tools/upscaler-scan derived it from the executable. Header-only and free of Kyty dependencies so the parser is
+// tested on its own (experiments/auto-upscaler/tests/profile_test.cpp).
+#pragma once
+#include <array>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
+#include <nlohmann/json.hpp>
+
+namespace NativeUpscaler::Profiles {
+
+// ---- Title profile: where this executable's FSR3 boundary is -----------------------------------------------------
+// KYTY_UPSCALER_PROFILE=<profile.json>: written by tools/upscaler-scan when the game was added (the runtime selector
+// passes it). Every address the boundary uses comes from it, derived offline from the game's executable (the
+// FidelityFX job executor's AgcCbDispatch return addresses and stack slots, the FSR3 dispatcher, the shader headers).
+// Without it: the built-in profile of the build the boundary was first verified on (Ghost of Yotei PPSA26344
+// 02.002.000), as before. Either way CheckTitle confirms in guest memory that the running executable is the profiled
+// one, and nothing is written to guest memory unless the profile maps the title's resolution controller.
+struct TitleProfile {
+	bool                    usable  = false; // a runtime block for the adapter this build implements
+	bool                    builtin = false;
+	std::string             path, why, sha256, title;
+	uint64_t                base = 0x900000000ull; // Kyty maps the main executable here
+	std::array<uint64_t, 8> returns {};
+	unsigned                return_count = 0;
+	int64_t                 job_slot = 0, backend_slot = 0, desc_slot = 0;
+	uint64_t                disp_ret = 0, disp_lo = 0, disp_hi = 0;
+	uint64_t                shader_lo = 0, shader_hi = 0;
+	uint32_t                magic     = 0;
+	struct Check {
+		uint64_t va = 0, value = 0;
+		unsigned bytes = 0;
+	};
+	std::vector<Check> fingerprint;
+	// The title's own render-resolution controller (fixed presets), when known for this executable.
+	bool     drs = false;
+	uint64_t drs_table = 0, drs_override = 0, drs_index = 0, drs_table_ptr = 0, drs_render_size = 0, drs_scale = 0;
+	bool     IsExecutorReturn(uint64_t pc) const {
+        for (unsigned i = 0; i < return_count; i++) {
+            if (returns[i] == pc) return true;
+        }
+        return false;
+	}
+	bool DispatcherReturn(uint64_t r) const { return disp_ret != 0 ? r == disp_ret : (r >= disp_lo && r < disp_hi); }
+
+	// ---- adapter taa_paths_v1: a title's own TAA pass, found by tools/upscaler-scan (taa_detect, isa_paths) ----
+	// The pass is the compute shader whose code hash is taa_hash. Each input is reached from its user data the way the
+	// shader's own instructions reach it: ud pair -> 64-bit pointer loads at offs[0..n-2] -> descriptor at offs[n-1].
+	struct Path {
+		uint32_t              ud = 0;
+		std::vector<uint32_t> offs;
+		bool                  inline_ud = false; // [ud] alone: the descriptor is held in the user data registers themselves
+		[[nodiscard]] bool    Valid() const { return inline_ud || !offs.empty(); }
+	};
+	// Manual raster TAA route: collect the pixel shader's inputs, then replace its output immediately before
+	// a verified compute or raster consumer. When replaced, both TAA MRTs are updated for fallback.
+	bool     taa_raster = false, taa_sizes_integer = false;
+	bool     taa_dynamic_framegen_only = false;
+	uint64_t taa_consumer_hash = 0;
+	std::vector<uint64_t> taa_consumer_hashes; // explicitly verified alternative consumers
+	bool     taa      = false;
+	uint64_t taa_hash = 0;
+	Path     taa_color, taa_depth, taa_motion, taa_output, taa_jitter; // taa_jitter: last offset = two floats
+	// A resolve that writes two images (static routes: taa.outputs): the displayed one and the next frame's history,
+	// told apart at run time (which one the next invocation reads back); taa.history: the history read's path(s).
+	std::vector<Path> taa_outputs, taa_history;
+	Path     taa_render_size, taa_output_size; // two floats each (the TAA's own constants), optional
+	Path     taa_scale;                        // a V#: the float at its base + taa_scale_off scales the output (exposure)
+	uint32_t taa_scale_off = 0;
+	uint32_t taa_format[4] {};      // expected formats: color, depth, motion, output (0: any)
+	bool     taa_jitter_uv = true;  // jitter values in UV units (pixels = value * render size)
+	float    taa_jitter_sign[2] {1.0f, 1.0f};
+	float    taa_mv_sign = -1.0f;   // motion vectors in UV units, current minus previous: FSR's scale is -render size
+	bool     taa_display_mirror_x = false; // final composite reverses X; FG's colour, guides and jitter use display coordinates
+	bool     taa_startup_presets = false; // the launcher applied the profile's render constants before title initialization
+	uint64_t taa_composite_hash = 0; // optional lower-resolution scene/UI composite to replace with HLX's output
+	Path     taa_composite_scene;
+	float    taa_near = 0.1f, taa_far = 10000.0f, taa_fov = 1.0f;
+	uint32_t taa_hlx_flags = 0;     // 0: Kyty's default
+	// Frame generation's HUD-less frame: the title's final composite (pixel shader hash) draws its UI over this scene
+	// (a T# path from the composite's user data); Kyty saves sRGB(scene) there (fg_hudless.s). 0: none.
+	bool     taa_hl_replay = false; // replay the title's own composite with a transparent UI texture
+	uint64_t taa_hl_hash = 0;
+	Path     taa_hl_scene;
+	// adapter taa_static_v1 (tools/upscaler-scan static discovery, no launch): the paths come from the shaders; what only
+	// data can tell (jitter, vector convention, exposure, depth convention) is calibrated at run time (taaCalibration.h)
+	// from the constants the TAA reads: its buffers (V# paths) and tables (their base addresses).
+	bool              taa_calibrate = false;
+	// taa.depth null (a static route whose resolve reads no depth): the frame's depth target (DB registers), read
+	// through a descriptor the title itself builds for it (another pass samples it)
+	bool              taa_depth_target = false;
+	std::vector<Path> taa_cal_buffers, taa_cal_tables;
+	float             taa_mv_scale_x = 0.0f, taa_mv_scale_y = 0.0f; // calibrated: FSR scale per render pixel axis (0: unset)
+};
+
+inline TitleProfile BuiltinYotei() {
+	TitleProfile p;
+	p.usable  = true;
+	p.builtin = true;
+	p.title   = "PPSA26344 02.002.000 (built-in)";
+	p.sha256  = "0c5377bb5fa74e80d57d4d9589430550721cac658ee4f259b837e371b2c99ca6";
+	p.returns = {p.base + 0x5eef, p.base + 0x5fcd};
+	p.return_count = 2;
+	p.job_slot = -0xb0;
+	p.backend_slot = -0xb8;
+	p.desc_slot = -0x9b30;
+	p.disp_ret  = p.base + 0x16284;
+	p.disp_lo   = p.base + 0x14fd0;
+	p.disp_hi   = p.base + 0x162ec;
+	p.shader_lo = p.base + 0x1e84c40;
+	p.shader_hi = p.base + 0x1e85838;
+	p.magic     = 0x34333231u;
+	p.fingerprint = {{p.base + 0x1c98880, p.base + 0x1e84c40, 8}, {p.base + 0x1e84c40, 0x34333231u, 4}};
+	p.drs             = true;
+	p.drs_table       = p.base + 0x1af8190;
+	p.drs_override    = p.base + 0x5093580 + 0x32ee10;
+	p.drs_index       = p.base + 0x5093580 + 0x32ee08;
+	p.drs_table_ptr   = p.base + 0x5093580 + 0x32edc0;
+	p.drs_render_size = p.base + 0x53c20f0;
+	p.drs_scale       = p.base + 0x53c20b4;
+	return p;
+}
+
+// Exception-free JSON access (Kyty builds with -fno-exceptions: a throwing nlohmann call would abort).
+using Json = nlohmann::json;
+inline const Json* JGet(const Json* o, const char* key) {
+	if (o == nullptr || !o->is_object()) return nullptr;
+	const auto it = o->find(key);
+	return it == o->end() ? nullptr : &*it;
+}
+inline bool JU64(const Json* v, uint64_t* out) {
+	if (v == nullptr || !v->is_number_integer() || (v->is_number_integer() && !v->is_number_unsigned() && v->get<int64_t>() < 0)) return false;
+	*out = v->get<uint64_t>();
+	return true;
+}
+inline bool JI64(const Json* v, int64_t* out) {
+	if (v == nullptr || !v->is_number_integer()) return false;
+	*out = v->get<int64_t>();
+	return true;
+}
+inline std::string JStr(const Json* v) {
+	return v != nullptr && v->is_string() ? v->get<std::string>() : std::string();
+}
+inline bool JPair(const Json* v, uint64_t* a, uint64_t* b) {
+	return v != nullptr && v->is_array() && v->size() == 2 && JU64(&(*v)[0], a) && JU64(&(*v)[1], b);
+}
+
+inline bool JPath(const Json* v, TitleProfile::Path* out) {
+	if (v == nullptr || !v->is_array() || v->size() < 1 || v->size() > 6) return false;
+	uint64_t x = 0;
+	if (!JU64(&(*v)[0], &x) || x > 30) return false;
+	out->ud = static_cast<uint32_t>(x);
+	out->offs.clear();
+	out->inline_ud = v->size() == 1; // (static discovery: ['udinline', u] -> [u])
+	for (size_t i = 1; i < v->size(); i++) {
+		if (!JU64(&(*v)[i], &x) || x > 0x100000) return false;
+		out->offs.push_back(static_cast<uint32_t>(x));
+	}
+	return true;
+}
+
+inline float JFloat(const Json* v, float def) {
+	return v != nullptr && v->is_number() ? v->get<float>() : def;
+}
+
+// runtime.taa: {"shader_hash": "0x..", "color": [ud, off...], "depth": [...], "motion": [...], "output": [...],
+//               "jitter": {"path": [...], "units": "uv"|"pixels", "sign": [x, y]}, "motion_vectors": "uv_current_minus_previous",
+//               "formats": {"color": 71, ...}, "camera": {"near":, "far":, "fov":}, "hlx_flags": n}
+inline TitleProfile LoadTaaBlock(TitleProfile p, const Json* r, bool static_route = false) {
+	const Json* t = JGet(r, "taa");
+	if (t == nullptr || !t->is_object()) {
+		p.why = "profile taa block missing";
+		return p;
+	}
+	const std::string hash = JStr(JGet(t, "shader_hash"));
+	p.taa_hash             = hash.empty() ? 0 : std::strtoull(hash.c_str(), nullptr, 16);
+	const Json* j          = JGet(t, "jitter");
+	const Json* dj         = JGet(t, "depth");
+	p.taa_depth_target     = (static_route || JStr(JGet(t, "depth_source")) == "depth_target") && (dj == nullptr || dj->is_null());
+	bool        ok         = p.taa_hash != 0 && JPath(JGet(t, "color"), &p.taa_color) && (p.taa_depth_target || JPath(dj, &p.taa_depth)) &&
+	          JPath(JGet(t, "motion"), &p.taa_motion) && JPath(JGet(t, "output"), &p.taa_output) &&
+	          (JPath(JGet(j, "path"), &p.taa_jitter) || static_route);
+	if (static_route) {
+		p.taa_calibrate = true;
+		for (const char* key: {"outputs", "history"}) {
+			if (const Json* a = JGet(t, key); a != nullptr && a->is_array()) {
+				for (const auto& e: *a) {
+					TitleProfile::Path q;
+					if (JPath(&e, &q)) (key[0] == 'o' ? p.taa_outputs : p.taa_history).push_back(q);
+				}
+			}
+		}
+		if (p.taa_outputs.size() != 2) p.taa_outputs.clear();
+		const Json* c   = JGet(t, "constants");
+		if (const Json* b = JGet(c, "buffers"); b != nullptr && b->is_array()) {
+			for (const auto& e: *b) {
+				TitleProfile::Path q;
+				if (JPath(&e, &q) && !q.inline_ud) p.taa_cal_buffers.push_back(q);
+			}
+		}
+		if (const Json* tb = JGet(c, "tables"); tb != nullptr && tb->is_array()) {
+			for (const auto& e: *tb) {
+				TitleProfile::Path q; // a table is listed by its pointer chain: its base is that chain + 0
+				if (JPath(&e, &q)) {
+					q.offs.push_back(0);
+					q.inline_ud = false;
+					p.taa_cal_tables.push_back(q);
+				}
+			}
+		}
+	}
+	const std::string consumer = JStr(JGet(t, "consumer_shader_hash"));
+	p.taa_consumer_hash = consumer.empty() ? 0 : std::strtoull(consumer.c_str(), nullptr, 16);
+	p.taa_raster = p.taa_consumer_hash != 0;
+	if (const Json* hashes=JGet(t,"consumer_shader_hashes"); hashes && hashes->is_array()) {
+		for (const auto& entry:*hashes) {
+			const auto hash=JStr(&entry);
+			if (!hash.empty() && hash.size()<=16) {
+				const auto value=std::strtoull(hash.c_str(),nullptr,16);
+				if (value) p.taa_consumer_hashes.push_back(value);
+			}
+		}
+	}
+	p.taa_dynamic_framegen_only = JStr(JGet(t, "framegen_cadence")) == "dynamic_only";
+	p.taa_sizes_integer = JStr(JGet(t, "size_units")) == "uint32";
+	p.taa_jitter_uv = JStr(JGet(j, "units")) != "pixels";
+	JPath(JGet(t, "render_size"), &p.taa_render_size);
+	JPath(JGet(t, "output_size"), &p.taa_output_size);
+	if (const Json* sc = JGet(t, "output_scale"); sc != nullptr && JPath(JGet(sc, "path"), &p.taa_scale)) {
+		uint64_t off = 0;
+		JU64(JGet(sc, "buffer_offset"), &off);
+		p.taa_scale_off = static_cast<uint32_t>(off);
+	}
+	if (const Json* sg = JGet(j, "sign"); sg != nullptr && sg->is_array() && sg->size() == 2) {
+		p.taa_jitter_sign[0] = JFloat(&(*sg)[0], 1.0f);
+		p.taa_jitter_sign[1] = JFloat(&(*sg)[1], 1.0f);
+	}
+	const std::string mv = JStr(JGet(t, "motion_vectors"));
+	ok                   = ok && (mv == "uv_current_minus_previous" || mv == "uv_previous_minus_current" || static_route);
+	p.taa_mv_sign        = mv == "uv_previous_minus_current" ? 1.0f : -1.0f;
+	if (const Json* mirror = JGet(t, "display_mirror_x"); mirror != nullptr && mirror->is_boolean()) {
+		p.taa_display_mirror_x = mirror->get<bool>();
+	}
+	const char* preset_plan = std::getenv("KYTY_RENDER_PRESET_PATCH");
+	p.taa_startup_presets = preset_plan != nullptr && *preset_plan != '\0' &&
+	                        JGet(t, "startup_render_presets") != nullptr;
+	if (const Json* composite = JGet(t, "upscale_composite"); composite != nullptr && JStr(JGet(composite, "kind")) == "scene_ui_bicubic_v1") {
+		const std::string hash = JStr(JGet(composite, "shader_hash"));
+		if (!hash.empty() && JPath(JGet(composite, "scene"), &p.taa_composite_scene)) {
+			p.taa_composite_hash = std::strtoull(hash.c_str(), nullptr, 16);
+		}
+	}
+	const Json* f        = JGet(t, "formats");
+	const char* names[4] = {"color", "depth", "motion", "output"};
+	for (int i = 0; i < 4; i++) {
+		uint64_t v = 0;
+		if (JU64(JGet(f, names[i]), &v)) p.taa_format[i] = static_cast<uint32_t>(v);
+	}
+	const Json* c = JGet(t, "camera");
+	p.taa_near    = JFloat(JGet(c, "near"), p.taa_near);
+	p.taa_far     = JFloat(JGet(c, "far"), p.taa_far);
+	p.taa_fov     = JFloat(JGet(c, "fov"), p.taa_fov);
+	uint64_t flags = 0;
+	if (JU64(JGet(t, "hlx_flags"), &flags)) p.taa_hlx_flags = static_cast<uint32_t>(flags);
+	// "hudless": {"composite_shader_hash": "0x..", "scene": [ud, off...], "encoding": "srgb_a2b10g10r10"} (optional)
+	if (const Json* hl = JGet(t, "hudless"); hl != nullptr &&
+	    (JStr(JGet(hl, "encoding")) == "srgb_a2b10g10r10" || JStr(JGet(hl, "encoding")) == "replay_a2b10g10r10")) {
+		p.taa_hl_replay = JStr(JGet(hl, "encoding")) == "replay_a2b10g10r10";
+		const std::string hh = JStr(JGet(hl, "composite_shader_hash"));
+		if (!hh.empty() && JPath(JGet(hl, "scene"), &p.taa_hl_scene)) p.taa_hl_hash = std::strtoull(hh.c_str(), nullptr, 16);
+	}
+	p.taa    = ok;
+	p.usable = ok;
+	if (!ok) p.why = "profile taa block incomplete";
+	return p;
+}
+
+inline TitleProfile LoadProfileFile(const char* path) {
+	TitleProfile p;
+	p.path = path;
+	std::ifstream in(path);
+	if (!in) {
+		p.why = "profile unreadable";
+		return p;
+	}
+	const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	const Json        j = Json::parse(text, nullptr, false);
+	if (j.is_discarded() || !j.is_object()) {
+		p.why = "profile is not valid JSON";
+		return p;
+	}
+	const Json* g = JGet(&j, "game");
+	p.sha256      = JStr(JGet(g, "sha256"));
+	p.title       = JStr(JGet(g, "title_id")) + " " + JStr(JGet(g, "version"));
+	const Json* r = JGet(&j, "runtime");
+	if (r == nullptr || !r->is_object()) {
+		const std::string why = JStr(JGet(JGet(JGet(&j, "capabilities"), "upscaler"), "reason"));
+		p.why = why.empty() ? "no supported upscaler interface" : why;
+		return p;
+	}
+	if (JStr(JGet(r, "adapter")) == "taa_paths_v1") {
+		return LoadTaaBlock(std::move(p), r);
+	}
+	if (JStr(JGet(r, "adapter")) == "taa_static_v1") {
+		return LoadTaaBlock(std::move(p), r, true);
+	}
+	if (JStr(JGet(r, "adapter")) != "ffx_agc_fsr3upscaler_v1") {
+		p.why = "profile adapter " + JStr(JGet(r, "adapter")) + " is not implemented in this build";
+		return p;
+	}
+	uint64_t base = 0, lo = 0, hi = 0, ret = 0, magic = 0x34333231u;
+	if (JU64(JGet(r, "module_base"), &base)) p.base = base;
+	if (const Json* rets = JGet(r, "executor_return_rvas"); rets != nullptr && rets->is_array()) {
+		for (const auto& v: *rets) {
+			uint64_t x = 0;
+			if (JU64(&v, &x) && p.return_count < p.returns.size()) p.returns[p.return_count++] = p.base + x;
+		}
+	}
+	bool ok = JI64(JGet(r, "executor_job_slot"), &p.job_slot) && JI64(JGet(r, "executor_backend_slot"), &p.backend_slot) &&
+	          JI64(JGet(r, "dispatcher_description_slot"), &p.desc_slot);
+	ok = ok && JPair(JGet(r, "dispatcher_range"), &lo, &hi);
+	p.disp_lo = p.base + lo;
+	p.disp_hi = p.base + hi;
+	if (JU64(JGet(r, "dispatcher_return_rva"), &ret) && ret != 0) p.disp_ret = p.base + ret;
+	ok = ok && JPair(JGet(r, "shader_header_range"), &lo, &hi);
+	p.shader_lo = p.base + lo;
+	p.shader_hi = p.base + hi;
+	JU64(JGet(r, "header_magic"), &magic);
+	p.magic = static_cast<uint32_t>(magic);
+	if (const Json* fp = JGet(r, "fingerprint"); fp != nullptr && fp->is_array()) {
+		for (const auto& f: *fp) {
+			TitleProfile::Check c;
+			uint64_t            rva = 0, v = 0;
+			if (!JU64(JGet(&f, "rva"), &rva)) continue;
+			c.va = p.base + rva;
+			if (JU64(JGet(&f, "u64_module_rva"), &v)) {
+				c.value = p.base + v;
+				c.bytes = 8;
+			} else if (JU64(JGet(&f, "u32"), &v)) {
+				c.value = v;
+				c.bytes = 4;
+			} else {
+				continue;
+			}
+			p.fingerprint.push_back(c);
+		}
+	}
+	if (const Json* d = JGet(r, "resolution_controller"); d != nullptr && d->is_object()) {
+		uint64_t table = 0, renderer = 0, over = 0, index = 0, tptr = 0, rs = 0, scale = 0, levels = 0;
+		const bool all = JU64(JGet(d, "table_rva"), &table) && JU64(JGet(d, "renderer_rva"), &renderer) &&
+		                 JU64(JGet(d, "override_offset"), &over) && JU64(JGet(d, "index_offset"), &index) &&
+		                 JU64(JGet(d, "table_pointer_offset"), &tptr) && JU64(JGet(d, "render_size_rva"), &rs) &&
+		                 JU64(JGet(d, "scale_pair_rva"), &scale) && JU64(JGet(d, "levels"), &levels);
+		if (all && levels == 16 && JStr(JGet(d, "kind")) == "level_table_override") {
+			p.drs             = true;
+			p.drs_table       = p.base + table;
+			p.drs_override    = p.base + renderer + over;
+			p.drs_index       = p.base + renderer + index;
+			p.drs_table_ptr   = p.base + renderer + tptr;
+			p.drs_render_size = p.base + rs;
+			p.drs_scale       = p.base + scale;
+		}
+	}
+	p.usable = ok && p.return_count != 0 && p.job_slot < 0 && p.backend_slot < 0 && p.desc_slot < 0 && p.shader_lo <= p.shader_hi &&
+	           p.disp_lo < p.disp_hi && !p.fingerprint.empty();
+	if (!p.usable) p.why = "profile runtime block incomplete";
+	return p;
+}
+
+
+} // namespace NativeUpscaler::Profiles

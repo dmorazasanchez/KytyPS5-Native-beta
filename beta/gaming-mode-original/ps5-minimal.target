@@ -1,0 +1,13 @@
+[Unit]
+Description=PS5 Minimal Mode (labwc + KytyPS5, no reboot)
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target
+Wants=systemd-user-sessions.service systemd-logind.service
+Wants=cyan-skillfish-governor-smu.service kyty-lodhw.service bluetooth.service
+Wants=ps5-minimal-session.service
+Wants=getty@tty4.service
+Wants=ps5-minimal-health.timer
+Conflicts=shutdown.target graphical.target ps5-game.target ps5-dev.target ps5.target
+Before=shutdown.target
+AllowIsolate=yes

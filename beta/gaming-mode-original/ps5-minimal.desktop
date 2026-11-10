@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=PS5 Minimal (KytyPS5)
+Comment=Minimal PS5 emulator session; switches without rebooting and closes current applications
+Exec=/usr/local/bin/ps5-minimal-start
+TryExec=/usr/local/libexec/ps5-minimal-control
+Type=Application
+Icon=applications-games

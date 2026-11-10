@@ -1,0 +1,268 @@
+#!/usr/bin/python3
+"""Fixed-purpose, root-owned transition between PS5 Minimal and the desktop."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import subprocess
+import stat
+import sys
+import time
+
+USER = "david"
+UID = 1000
+STATE_DIR = Path("/run/ps5-minimal")
+STATE = STATE_DIR / "state.json"
+HISTORY = Path("/var/lib/ps5-minimal/last-session.json")
+READY = Path("/run/user/1000/ps5-minimal-ready")
+UI_HEALTH = Path("/run/user/1000/ps5-minimal-ui.json")
+FRONTEND = Path("/home/david/sharpemu-upscaling-20261108/artifacts/kytyps5/KytyPS5")
+TARGET = "ps5-minimal.target"
+SESSION = "ps5-minimal-session.service"
+RUNTIME_UNITS = Path("/run/systemd/system")
+LOCAL_UNITS = Path("/etc/systemd/system")
+VENDOR_UNITS = Path("/usr/lib/systemd/system")
+ENV = {"PATH": "/usr/bin:/usr/local/bin", "LANG": "C.UTF-8", "SYSTEMD_COLORS": "0", "SYSTEMD_PAGER": "cat"}
+# Runtime-only masks prevent D-Bus/socket activation from undoing isolation.
+# Existing masks are preserved; only masks created by this transition are removed.
+QUIET_UNITS = (
+    "user@1000.service",
+    "NetworkManager.service", "NetworkManager-dispatcher.service",
+    "wpa_supplicant.service", "systemd-resolved.service", "systemd-timesyncd.service",
+    "docker.socket", "docker.service", "containerd.service",
+    "avahi-daemon.socket", "avahi-daemon.service", "tailscaled.service",
+    "udisks2.service", "upower.service", "power-profiles-daemon.service",
+    "scx_loader.service", "ananicy-cpp.service", "bc250-cec.service",
+)
+
+
+def run(*args, check=True, timeout=60):
+    result = subprocess.run(args, text=True, capture_output=True, env=ENV, cwd="/", timeout=timeout)
+    if check and result.returncode:
+        raise RuntimeError(f"{' '.join(args)}: {result.stderr.strip() or result.stdout.strip()}")
+    return result
+
+
+def ctl(*args, **kwargs):
+    return run("/usr/bin/systemctl", *args, **kwargs)
+
+
+def active(unit):
+    return ctl("is-active", "--quiet", unit, check=False).returncode == 0
+
+
+def memory():
+    wanted = {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree", "SReclaimable", "SUnreclaim"}
+    return {line.split(":")[0]: int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines()
+            if line.split(":")[0] in wanted}
+
+
+def save(state):
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp = STATE.with_suffix(".tmp")
+    temp.write_text(json.dumps(state, indent=2) + "\n")
+    temp.chmod(0o600)
+    temp.replace(STATE)
+
+
+def snapshot():
+    units = json.loads(ctl("list-units", "--type=service,socket,timer,path,target",
+                           "--state=active,activating", "--output=json", "--no-pager").stdout)
+    return {"version": 1, "phase": "preparing", "created": time.time(), "masks": [],
+            "units": [u["unit"] for u in units], "before_kib": memory()}
+
+
+def preflight():
+    for path in (FRONTEND, Path("/usr/bin/labwc"), Path("/usr/bin/dbus-run-session"),
+                 Path("/usr/bin/pipewire"), Path("/usr/bin/pipewire-pulse"), Path("/usr/bin/wireplumber"),
+                 Path("/usr/bin/xdotool"), Path("/usr/bin/timeout"),
+                 Path("/usr/lib/steamos/steam-set-session")):
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f"Required executable missing: {path}")
+    if ctl("show", TARGET, "-p", "LoadState", "--value").stdout.strip() != "loaded":
+        raise RuntimeError(f"{TARGET} is not loaded")
+
+
+def add_masks(state):
+    for unit in QUIET_UNITS:
+        path = RUNTIME_UNITS / unit
+        if path.exists() or path.is_symlink():
+            continue
+        # /etc takes precedence over /run; never alter an administrator's unit.
+        if os.path.lexists(LOCAL_UNITS / unit):
+            continue
+        load = ("loaded" if (VENDOR_UNITS / unit).exists() else "not-found") if "@.service" in unit else \
+            ctl("show", unit, "-p", "LoadState", "--value", check=False).stdout.strip()
+        if load in ("not-found", "masked", ""):
+            continue
+        # Journal intent before changing anything, so interrupted entry is recoverable.
+        state["masks"].append(unit)
+        save(state)
+        ctl("mask", "--runtime", unit)
+    ctl("daemon-reload")
+
+
+def remove_masks(state):
+    errors = []
+    for unit in state["masks"]:
+        if unit not in (*QUIET_UNITS, "getty@.service", "autovt@.service"):
+            raise RuntimeError("Unrecognized runtime mask in saved state")
+        path = RUNTIME_UNITS / unit
+        if path.is_symlink() and os.readlink(path) == "/dev/null":
+            result = ctl("unmask", "--runtime", unit, check=False)
+            if result.returncode:
+                errors.append(result.stderr.strip())
+    ctl("daemon-reload")
+    if errors:
+        raise RuntimeError("Could not remove runtime masks: " + "; ".join(errors))
+
+
+def end_user():
+    run("/usr/bin/loginctl", "terminate-user", USER, check=False)
+    ctl("stop", f"user@{UID}.service", f"user-runtime-dir@{UID}.service")
+
+
+def check_ui_health():
+    if not STATE.exists() or json.loads(STATE.read_text())["phase"] != "active":
+        return
+    # Read only a small, regular file belonging to the session user. Never follow
+    # a user-supplied symlink as root or block on a device/FIFO.
+    fd = os.open(UI_HEALTH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != UID or info.st_size > 4096:
+            raise RuntimeError("Invalid GUI heartbeat file")
+        data = json.loads(os.read(fd, 4096))
+    finally:
+        os.close(fd)
+    if time.time() - info.st_mtime > 15 or not data.get("loaded"):
+        raise RuntimeError("The emulator GUI stopped responding; restoring the desktop")
+
+
+def enter():
+    preflight()
+    if STATE.exists() or active(TARGET):
+        raise RuntimeError("A PS5 Minimal transition/session already exists; return to desktop first")
+    state = snapshot()
+    save(state)
+    # A failed session must not relogin to its own entry in a loop.
+    run("/usr/lib/steamos/steam-set-session", "plasma.desktop")
+    add_masks(state)
+    state["phase"] = "entering"
+    save(state)
+    ctl("stop", "display-manager.service")
+    end_user()
+    gettys = [u for u in state["units"] if u.startswith(("getty@", "autovt@")) and
+              u.endswith(".service") and u not in ("getty@tty4.service", "autovt@tty4.service")]
+    if gettys:
+        ctl("stop", *gettys)
+    ctl("reset-failed", SESSION, check=False)
+    ctl("isolate", TARGET)
+    for _ in range(150):
+        if READY.exists() and active(SESSION):
+            state["phase"] = "active"
+            state["ready_kib"] = memory()
+            save(state)
+            print("PS5 Minimal ready: labwc + KytyPS5, private audio/session bus, no desktop user manager.", flush=True)
+            return
+        if not active(SESSION):
+            raise RuntimeError("The compositor/launcher exited during startup")
+        time.sleep(0.2)
+    raise RuntimeError("The PS5 launcher did not signal readiness within 30 seconds")
+
+
+def return_desktop():
+    if not STATE.exists():
+        return
+    if ctl("is-system-running", check=False).stdout.strip() == "stopping":
+        return  # Do not turn a shutdown into a desktop restart.
+    state = json.loads(STATE.read_text())
+    state["phase"] = "restoring"
+    save(state)
+    # Stop the compositor and its children before rebuilding the normal user login.
+    ctl("stop", SESSION, TARGET, check=False)
+    remove_masks(state)
+    end_user()
+    run("/usr/lib/steamos/steam-set-session", "plasma.desktop")
+    ctl("reset-failed", "display-manager.service", check=False)
+    ctl("isolate", "graphical.target")
+    # graphical.target restores enabled services. Also restore services that had
+    # been started manually, without changing any enable/disable settings.
+    restore = [u for u in state["units"] if not (
+        u.startswith(("ps5-", "user@", "user-runtime-dir@")) or
+        u in ("graphical.target", "default.target")
+    )]
+    errors = []
+    for unit in restore:
+        if not active(unit):
+            result = ctl("start", unit, check=False, timeout=45)
+            if result.returncode:
+                errors.append({"unit": unit, "error": result.stderr.strip()})
+    ctl("start", "display-manager.service")
+    state["phase"] = "returned"
+    state["returned_kib"] = memory()
+    state["restore_errors"] = errors
+    HISTORY.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    HISTORY.write_text(json.dumps(state, indent=2) + "\n")
+    HISTORY.chmod(0o600)
+    STATE.unlink()
+    print("Returned to KDE without rebooting.", flush=True)
+    for error in errors:
+        print(f"Could not restore {error['unit']}: {error['error']}", file=sys.stderr)
+
+
+def main():
+    if os.geteuid() != 0:
+        raise RuntimeError("Run with pkexec or sudo")
+    action = sys.argv[1] if len(sys.argv) == 2 else ""
+    if action not in ("enter", "desktop", "check", "status", "_enter", "_return", "_health"):
+        raise RuntimeError("Usage: ps5-minimal-control {enter|desktop|check|status}")
+    if "PKEXEC_UID" in os.environ:
+        if os.environ["PKEXEC_UID"] != str(UID) or action.startswith("_"):
+            raise RuntimeError("This action is reserved for the configured local user/system service")
+    if action == "check":
+        preflight()
+        print("Ready: PS5 Minimal can launch KytyPS5 and return to KDE without a reboot.")
+        print("Entering ends david's open sessions and stops networking/background services.")
+        return
+    if action == "status":
+        print("PS5 Minimal: " + ("active" if active(TARGET) else "inactive"))
+        print(json.dumps(json.loads(STATE.read_text()) if STATE.exists() else
+                         {"memory_kib": memory()}, indent=2))
+        return
+    if action == "_health":
+        check_ui_health()
+        return
+    if action == "enter":
+        preflight()
+        if STATE.exists() or active(TARGET):
+            raise RuntimeError("PS5 Minimal is already active or changing modes")
+        ctl("reset-failed", "ps5-minimal-enter.service", check=False)
+        ctl("start", "--no-block", "ps5-minimal-enter.service")
+        return
+    if action == "desktop":
+        if not STATE.exists():
+            # Also support returning from the existing minimal Limine targets.
+            if not any(active(unit) for unit in (TARGET, "ps5-game.target", "ps5-dev.target", "ps5.target")):
+                raise RuntimeError("No PS5 minimal session is active; the current desktop was left running")
+            state = snapshot()
+            state["phase"] = "active"
+            save(state)
+        ctl("reset-failed", "ps5-minimal-return.service", check=False)
+        ctl("start", "--no-block", "ps5-minimal-return.service")
+        return
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (STATE_DIR / "transition.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if action == "_enter":
+            enter()
+        else:
+            return_desktop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(f"PS5 Minimal: {error}", file=sys.stderr, flush=True)
+        sys.exit(1)

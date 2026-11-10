@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+bundle_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export KYTYPS5_BUNDLE_ROOT="$bundle_root"
+export KYTYPS5_CONFIG_ROOT="${KYTYPS5_CONFIG_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/KytyPS5-Beta}"
+export KYTYPS5_PROFILE_ROOT="${KYTYPS5_PROFILE_ROOT:-$KYTYPS5_CONFIG_ROOT/profiles}"
+export KYTYPS5_DATA_ROOT="${KYTYPS5_DATA_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/KytyPS5-Beta}"
+export KYTYPS5_AUDIO_ROOT="${KYTYPS5_AUDIO_ROOT:-$KYTYPS5_DATA_ROOT/audio}"
+export KYTYPS5_PATCH_ROOT="$KYTYPS5_DATA_ROOT/runtime/_Patches"
+export KYTYPS5_FFMPEG="$bundle_root/bin/ffmpeg"
+export KYTYPS5_UPSCALER_PROFILE_DIR="$KYTYPS5_CONFIG_ROOT/upscaler-profiles"
+export KYTYPS5_UPSCALER_SCANNER="$bundle_root/tools/upscaler-scan/kyty-upscaler-scan"
+export KYTYPS5_SESSION_CONTROL="/var/lib/kyty-beta-system/session/ps5-minimal-control"
+export KYTY_SHARP_EMULATOR="$bundle_root/runtime-selector.sh"
+export PATH="$bundle_root/bin:$PATH"
+export PYTHONDONTWRITEBYTECODE=1
+export DOTNET_ROOT="$bundle_root/dotnet" DOTNET_MULTILEVEL_LOOKUP=0
+export DOTNET_gcServer=0 DOTNET_GCConserveMemory=9
+# Use the desktop's PulseAudio protocol (including PipeWire-Pulse) consistently.
+export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-pulseaudio}" SDL_AUDIO_DRIVER="${SDL_AUDIO_DRIVER:-pulseaudio}"
+case "${1:-}" in
+    --version) cat "$bundle_root/VERSION"; exit 0 ;;
+    --help)
+        cat <<'HELP'
+KytyPS5 Beta for AMD BC-250 Linux
+  (no arguments)             Open the controller-first launcher
+  --doctor                   Check host requirements without launching a game
+  --verify                   Run isolated launcher verification
+  --runtime [emulator args]  Run the packaged runtime selector
+  --install-desktop          Install a shortcut for this AppImage/folder
+  --install-helper           Install/update the privileged GPU helper (sudo)
+  --install-gaming-mode      Install the optional minimal session (sudo)
+  --uninstall-system         Remove beta system components
+  --import-upscalers ...     Import your locally prepared Helix/Lossless files
+  --collect-report [path]    Save a local diagnostic report
+  --version                 Print the release version
+See README.md for first-run setup and platform limitations.
+HELP
+        exit 0 ;;
+    --doctor) shift; exec "$bundle_root/bin/python3" "$bundle_root/doctor.py" "$@" ;;
+    --install-desktop) shift; exec "$bundle_root/bin/python3" "$bundle_root/install-desktop.py" "$@" ;;
+    --install-helper|--install-gaming-mode|--uninstall-system)
+        action="$1"; shift
+        launcher_path="${APPIMAGE:-$bundle_root/AppRun}"
+        if [[ $EUID == 0 ]]; then
+            exec "$bundle_root/bin/python3" "$bundle_root/install-system.py" "$action" --launcher "$launcher_path" "$@"
+        fi
+        # Root cannot always read a user's FUSE mount. Stage the small installer payload first.
+        install_stage="$(mktemp -d "${TMPDIR:-/tmp}/kyty-beta-install.XXXXXXXX")"
+        trap 'rm -rf -- "$install_stage"' EXIT
+        cp "$bundle_root/install-system.py" "$install_stage/"
+        cp -a "$bundle_root/system" "$install_stage/system"
+        sudo -- /usr/bin/python3 "$install_stage/install-system.py" "$action" --payload "$install_stage" --launcher "$launcher_path" --user "$(id -un)" "$@"
+        if [[ "$action" == --install-gaming-mode ]]; then "$bundle_root/bin/python3" "$bundle_root/install-desktop.py" --gaming-mode; fi
+        exit $? ;;
+    --import-upscalers) shift; exec "$bundle_root/bin/python3" "$bundle_root/import-upscalers.py" "$@" ;;
+    --collect-report) shift; exec "$bundle_root/bin/python3" "$bundle_root/collect-report.py" "$@" ;;
+    --verify)
+        verify_dir="$(mktemp -d "${TMPDIR:-/tmp}/kyty-beta-verify.XXXXXXXX")"
+        trap 'rm -rf -- "$verify_dir"' EXIT
+        export KYTYPS5_CONFIG_ROOT="$verify_dir/config" KYTYPS5_PROFILE_ROOT="$verify_dir/profiles" KYTYPS5_AUDIO_ROOT="$verify_dir/audio"
+        export KYTYPS5_PATCH_ROOT="$verify_dir/patches"
+        export SDL_AUDIODRIVER=dummy SDL_AUDIO_DRIVER=dummy
+        "$bundle_root/runtime/run-elf" "$bundle_root/dotnet/dotnet" "$bundle_root/launcher/KytyPS5.dll" "$@"
+        exit $? ;;
+esac
+"$bundle_root/bin/python3" "$bundle_root/prepare-runtime.py" --init
+if [[ "${1:-}" == --runtime ]]; then shift; exec "$bundle_root/runtime-selector.sh" "$@"; fi
+exec "$bundle_root/runtime/run-elf" "$bundle_root/dotnet/dotnet" "$bundle_root/launcher/KytyPS5.dll" "$@"

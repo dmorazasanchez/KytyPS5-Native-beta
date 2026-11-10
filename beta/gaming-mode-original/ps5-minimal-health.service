@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover KDE if the PS5 GUI stops responding
+DefaultDependencies=no
+After=sysinit.target
+ConditionPathExists=/run/ps5-minimal/state.json
+OnFailure=ps5-minimal-return.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ps5-minimal-control _health
+TimeoutStartSec=5

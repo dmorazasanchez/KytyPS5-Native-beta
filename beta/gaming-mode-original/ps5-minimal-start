@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/bin/pkexec /usr/local/libexec/ps5-minimal-control enter
+# Keep SDDM's session alive until the system service takes over. Otherwise its
+# Relogin setting could race the handoff and launch this entry repeatedly.
+exec /usr/bin/sleep infinity

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ready="$XDG_RUNTIME_DIR/ps5-minimal-ready"
+health="$XDG_RUNTIME_DIR/ps5-minimal-ui.json"
+trap 'rm -f "$ready" "$health"' EXIT
+trap 'exit 0' TERM INT
+export PS5_MINIMAL_SESSION=1
+# SDL's native PipeWire driver can wait indefinitely during device negotiation.
+# Use the same PipeWire server through its PulseAudio interface instead.
+export SDL_AUDIODRIVER=pulseaudio SDL_AUDIO_DRIVER=pulseaudio
+export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+export KYTYPS5_SESSION_HEALTH="$health"
+rm -f "$ready" "$health"
+/home/david/sharpemu-upscaling-20261108/run-kytyps5.sh &
+launcher=$!
+printf '%s\n' "$launcher" > "$XDG_RUNTIME_DIR/ps5-minimal-gui.pid"
+# A live process is insufficient: wait for a mapped window and a responding UI.
+window=
+for ((i=0; i<100; i++)); do
+    kill -0 "$launcher"
+    window=$(/usr/bin/xdotool search --onlyvisible --pid "$launcher" 2>/dev/null | head -n 1) || true
+    if [[ -n "$window" ]]; then break; fi
+    sleep 0.1
+done
+[[ -n "$window" ]] || { echo 'PS5 Minimal: no visible GUI window appeared' >&2; exit 1; }
+/usr/bin/timeout 3 /usr/bin/xdotool windowactivate --sync "$window"
+/usr/bin/timeout 3 /usr/bin/xdotool windowfocus --sync "$window"
+for ((i=0; i<100; i++)); do
+    kill -0 "$launcher"
+    if [[ -s "$health" ]] && /usr/bin/python3 - "$health" <<'PY'
+import json, sys, time
+try:
+    health = json.load(open(sys.argv[1]))
+    good = health['ticks'] >= 3 and health['active'] and health['loaded'] and time.time() * 1000 - health['time'] < 2000
+except (OSError, ValueError, KeyError):
+    good = False
+sys.exit(0 if good else 1)
+PY
+    then
+        touch "$ready"
+        break
+    fi
+    sleep 0.1
+done
+[[ -e "$ready" ]] || { echo 'PS5 Minimal: GUI did not become responsive and focused' >&2; exit 1; }
+wait "$launcher"

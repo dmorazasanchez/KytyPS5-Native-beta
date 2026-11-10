@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export PS5_MINIMAL_SESSION=1
+export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=labwc XDG_SESSION_DESKTOP=ps5-minimal
+export NO_AT_BRIDGE=1 GTK_A11Y=none GTK_USE_PORTAL=0 QT_ACCESSIBILITY=0 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=0
+export DOTNET_gcServer=0 DOTNET_GCConserveMemory=9
+# Start on DRM/KMS, with no inherited desktop compositor or forced rendering scale.
+unset DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+unset QT_QPA_PLATFORM SDL_VIDEODRIVER
+exec /usr/bin/dbus-run-session --config-file=/etc/ps5-minimal/dbus-session.conf -- /usr/local/libexec/ps5-minimal-compositor

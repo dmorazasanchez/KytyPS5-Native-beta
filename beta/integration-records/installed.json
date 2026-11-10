@@ -1,0 +1,90 @@
+{
+  "time": "2026-11-10T18:37:26.654508+01:00",
+  "source_commit": "aa1dff5e3c4b2152d1f88f5ea019abefe5bdf0b8",
+  "release": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery",
+  "selector": "/home/david/sharpemu-upscaling-20261108/kytyps5-runtime.sh",
+  "selector_sha256": "43de965f0c3ae64647cccd64477fa6ff06b1913a1ec1b9bb9bc4e531314465fe",
+  "selector_backup": "/home/david/sharpemu-upscaling-20261108/kytyps5-runtime.before-recovery-cheats-20261110.sh",
+  "executables": {
+    "kyty_emulator_native": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_native",
+      "sha256": "0358d5b2511ee99515b48076ee1677007caa2b14257e97668006ea4b2acce7a0",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_auto_upscaler": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_auto_upscaler",
+      "sha256": "2486103b599f73e5714a4af40188d51d0daabdf4449e19cf9af9e1e4ba7d1ad6",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_launcher_taa_fg": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_launcher_taa_fg",
+      "sha256": "2486103b599f73e5714a4af40188d51d0daabdf4449e19cf9af9e1e4ba7d1ad6",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_native_upscaler": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_native_upscaler",
+      "sha256": "2486103b599f73e5714a4af40188d51d0daabdf4449e19cf9af9e1e4ba7d1ad6",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_astro": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_astro",
+      "sha256": "46c9bf79ff3e5bf78d13c37e1884b9e667604533dc02e5e7f34c95161964cf1c",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_guard": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_guard",
+      "sha256": "9c52bbb3e713a1ae285237c78d3b241aa06fcbed35fc2b2cca4e9974522fa852",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    },
+    "kyty_emulator_audio": {
+      "path": "/home/david/kyty-native-vmid-20261110/release/20261110-recovery/kyty_emulator_audio",
+      "sha256": "9c52bbb3e713a1ae285237c78d3b241aa06fcbed35fc2b2cca4e9974522fa852",
+      "scream_handler_present": true,
+      "vmid_fix_present": true
+    }
+  },
+  "game_launched": false,
+  "cpu_fault_replay_passed": true,
+  "cheats_original_bytes_verified": true,
+  "archive_profiles_restored": [
+    {
+      "title": "PPSA26344",
+      "version": "02.002.000",
+      "from": "/home/david/.config/kyty-sharp-frontend/PPSA26344-ccf31a372ff6.json",
+      "to": "/home/david/.config/kyty-sharp-frontend/PPSA26344-f8194b8cdd93.json",
+      "patch": "/home/david/kyty-native-instructions-20261106/release/_Patches/PPSA26344.json",
+      "recovery": null,
+      "new_profile_created": true,
+      "restored_keys": [
+        "patch"
+      ],
+      "other_options": "Inherit current global settings; unrelated old per-game preferences were not migrated."
+    },
+    {
+      "title": "PPSA01341",
+      "version": "01.007.000",
+      "from": "/home/david/.config/kyty-sharp-frontend/PPSA01341-1691f67137f0.json",
+      "to": "/home/david/.config/kyty-sharp-frontend/PPSA01341-07ddb11bb8cc.json",
+      "patch": "/home/david/kyty-upstream-clean-47857b4-20261104/release/_Patches/PPSA01341_01.007.000.json",
+      "recovery": "1",
+      "new_profile_created": true,
+      "restored_keys": [
+        "patch",
+        "KYTY_DEMONS_SCREAM_ASSERT_RECOVERY"
+      ],
+      "other_options": "Inherit current global settings; unrelated old per-game preferences were not migrated."
+    }
+  ],
+  "astro_cheats_installed": false,
+  "real_launch_profiles_verified": true,
+  "recovery_off_case_verified": true,
+  "installed_routing_checks_passed": 10,
+  "cheat_files_changed": false,
+  "astro_catalog_generated": "2026-11-09T21:57:55Z"
+}

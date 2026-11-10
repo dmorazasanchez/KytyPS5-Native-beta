@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore the desktop after PS5 Minimal
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target
+IgnoreOnIsolate=yes
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/run/ps5-minimal/state.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ps5-minimal-control _return
+TimeoutStartSec=240

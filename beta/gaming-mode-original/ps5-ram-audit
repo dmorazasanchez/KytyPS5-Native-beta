@@ -1,0 +1,92 @@
+#!/usr/bin/python3
+"""Low-impact diagnostic: same RAM metric for KDE and PS5 Minimal."""
+from pathlib import Path
+from datetime import datetime
+import json
+import os
+import subprocess
+import sys
+
+DEST = Path("/var/log/ps5-ram-audit")
+DEST.mkdir(mode=0o700, parents=True, exist_ok=True)
+mode = ("ps5" if subprocess.run(
+            ["systemctl", "is-active", "--quiet", "ps5-minimal.target"],
+            capture_output=True, text=True, timeout=3).returncode == 0
+        else "desktop")
+
+def memory():
+    out = {}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        cols=v.split()
+        if cols and cols[0].isdigit():
+            out[k] = int(cols[0])
+    return out
+
+def process_stat(pid):
+    try:
+        d=Path("/proc")/str(pid)
+        roll=(d/"smaps_rollup").read_text()
+        vals={}
+        for line in roll.splitlines():
+            if ":" not in line:
+                continue
+            k,v=line.split(":",1)
+            cols=v.split()
+            if cols and cols[0].isdigit() and k in ("Rss","Pss","Pss_Anon","Pss_File",
+                                                     "Pss_Shmem","Private_Clean","Private_Dirty","Swap"):
+                vals[k]=int(cols[0])
+        return {"pid":pid,"name":(d/"comm").read_text().strip(),"pss_mib":round(vals.get("Pss",0)/1024,2),
+                "rss_mib":round(vals.get("Rss",0)/1024,2),
+                "private_mib":round((vals.get("Private_Clean",0)+vals.get("Private_Dirty",0))/1024,2),
+                "swap_mib":round(vals.get("Swap",0)/1024,2)}
+    except (OSError, ValueError, ProcessLookupError):
+        return None
+
+def main():
+    now=datetime.now().astimezone()
+    m=memory()
+    ps=[x for entry in Path("/proc").iterdir()
+        if entry.name.isdigit() if (x:=process_stat(int(entry.name))) is not None]
+    ps.sort(key=lambda p: p["pss_mib"], reverse=True)
+    gpu={}
+    for path in Path("/sys/class/drm").glob("card*/device/mem_info_*"):
+        if path.name in {"mem_info_vram_total","mem_info_vram_used","mem_info_gtt_total",
+                         "mem_info_gtt_used","mem_info_vis_vram_used"}:
+            try:
+                gpu[str(path)]=round(int(path.read_text())/1048576,1)
+            except (OSError,ValueError):
+                pass
+    def call(*args):
+        try:
+            return subprocess.run(args, capture_output=True, text=True, timeout=5).stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            return "unavailable"
+    output={
+        "captured_at":now.isoformat(),
+        "mode":mode,
+        "boot_id":Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "cmdline":Path("/proc/cmdline").read_text().strip(),
+        "free_h":call("free","-h"),
+        "meminfo_kib":m,
+        "unavailable_gib":round((m["MemTotal"]-m["MemAvailable"])/1048576,3),
+        "process_total_pss_mib":round(sum(p["pss_mib"] for p in ps),1),
+        "processes":ps[:60],
+        "gpu_mib":gpu,
+        "system_services":call("systemctl","--no-pager","--plain","--type=service","--state=running",
+                               "--no-legend").splitlines(),
+        "sessions":call("loginctl","list-sessions","--no-legend").splitlines(),
+    }
+    stamp=now.strftime("%Y%m%d-%H%M%S")
+    target=DEST/(stamp+"-"+mode+".json")
+    temp=target.with_suffix(".tmp")
+    temp.write_text(json.dumps(output,indent=2)+"\n")
+    os.chmod(temp,0o600)
+    os.replace(temp,target)
+    print(f"RAM audit [{mode}]: non-available={output['unavailable_gib']} GiB, "
+          f"process PSS={output['process_total_pss_mib']} MiB. Saved: {target}")
+    print("Top processes:",", ".join(f"{p['name']} {p['pss_mib']} MiB" for p in ps[:8]))
+if __name__=="__main__":
+    main()

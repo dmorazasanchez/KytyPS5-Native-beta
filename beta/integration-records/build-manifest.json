@@ -1,0 +1,24 @@
+{
+  "native_sha256": "0358d5b2511ee99515b48076ee1677007caa2b14257e97668006ea4b2acce7a0",
+  "upscaling_sha256": "2486103b599f73e5714a4af40188d51d0daabdf4449e19cf9af9e1e4ba7d1ad6",
+  "astro_sha256": "46c9bf79ff3e5bf78d13c37e1884b9e667604533dc02e5e7f34c95161964cf1c",
+  "astro_baseline_reproduced_sha256": "a8bbf327e1a724741fb139a63777e91ce60c31431ce7fc8f30d3017e6d1edebb",
+  "astro_change": "Only nativeShadow.o and runtimeLinker.o replaced; remaining Astro objects preserved byte for byte.",
+  "main_sources": {
+    "src/libs/agc.cpp": "53c3a3d7b19f8c21fc0f39035b347051bec4c3d97beb7545318ddd9fed75629d",
+    "src/loader/runtimeLinker.cpp": "ea9c3e5d657c3b70ac0f62f22de0ee0bbc1a2a7304e56b23350db122ca6f6237",
+    "src/graphics/native_gpu/nativePm4.cpp": "9e09d354209f47a8d27dc11bf801ebf5df6302fa37073df82b3a36a3cace75b5",
+    "src/graphics/native_gpu/nativeShadow.cpp": "701dd09b1b96aa195fe710be7ec66bdb711134dbd6514f7d19df94cce6cbfdd4",
+    "src/graphics/presentation/gameMenu.cpp": "66d29a08951654c9ae882b4232f2e13c4e4e4edf6e71ea28de3dfc7c997821f3",
+    "src/graphics/presentation/window/swapchain.cpp": "9c9f6b02fd0f24c074a089dfdfe7fc256a71c8c3bdb8b765aedc292d5776ada1",
+    "src/graphics/presentation/videoOut.cpp": "a707cf9c76afb5b1dabdcfc2a4944b7bdbc52b747ae45a691f7ddd4d8dfa38c3",
+    "src/graphics/native_gpu/nativeUpscaler.cpp": "e0d0cf32f2a5501b7753084596f2507acd0ad8eaa733614942fddaf89506a57b",
+    "src/graphics/presentation/window/frameGen.cpp": "14c8209b4cdb632d150cb09eac6f0f7d7fc07b07d8c7a9bdaeddf5a909b85f84",
+    "src/graphics/native_gpu/nativePassCapture.cpp": "3b0249aa1c106dc18797d3c728f11f7d5583c8706a18e981f80a24e8a1f3bebc"
+  },
+  "production_native_sha256_unchanged": "8b45be1d9d9544e0615a9931f761f5fc7b078361ac11ac87e1a95a91ea2dd9f2",
+  "default_native_reservation": true,
+  "requires_test_env": false,
+  "title_specific_enable_check": false,
+  "game_launched": false
+}

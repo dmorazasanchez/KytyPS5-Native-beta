@@ -1,0 +1,33 @@
+[Unit]
+Description=PS5 Minimal compositor, audio and emulator GUI
+DefaultDependencies=no
+Requires=systemd-user-sessions.service systemd-logind.service
+After=sysinit.target systemd-user-sessions.service systemd-logind.service systemd-udevd.service display-manager.service
+Conflicts=display-manager.service getty@tty1.service ps5-game-session.service ps5-dev-session.service ps5-session.service shutdown.target
+Before=shutdown.target
+ConditionFileIsExecutable=/usr/bin/labwc
+OnSuccess=ps5-minimal-return.service
+OnFailure=ps5-minimal-return.service
+
+[Service]
+Type=simple
+User=david
+Group=david
+PAMName=ps5-minimal
+WorkingDirectory=/home/david
+Environment=HOME=/home/david USER=david LOGNAME=david PATH=/usr/local/bin:/usr/bin
+Environment=XDG_SESSION_CLASS=user-light XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=labwc
+Environment=XDG_SESSION_DESKTOP=ps5-minimal XDG_SEAT=seat0 XDG_VTNR=1
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+UtmpIdentifier=tty1
+UtmpMode=user
+ExecStart=/usr/local/libexec/ps5-minimal-session
+KillMode=control-group
+TimeoutStopSec=15

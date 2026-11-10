@@ -1,0 +1,14 @@
+[Unit]
+Description=Switch to PS5 Minimal without rebooting
+DefaultDependencies=no
+Requires=sysinit.target
+After=sysinit.target
+IgnoreOnIsolate=yes
+Conflicts=shutdown.target
+Before=shutdown.target
+OnFailure=ps5-minimal-return.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ps5-minimal-control _enter
+TimeoutStartSec=150

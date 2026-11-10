@@ -1,0 +1,6 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends libsdl2-2.0-0 libxcb-present0 libxcb-dri3-0 libicu74 libssl3 libfontconfig1 libfreetype6 xvfb xauth && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --uid 12345 beta
+USER beta
+WORKDIR /home/beta

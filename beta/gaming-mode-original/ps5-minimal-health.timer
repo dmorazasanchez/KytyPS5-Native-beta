@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch the PS5 GUI event loop
+DefaultDependencies=no
+PartOf=ps5-minimal.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Timer]
+OnActiveSec=10
+OnUnitActiveSec=5
+AccuracySec=1
+Unit=ps5-minimal-health.service

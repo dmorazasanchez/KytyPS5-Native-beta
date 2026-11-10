@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>KytyPS5</AssemblyName>
+    <RootNamespace>KytyPS5</RootNamespace>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="ZstdSharp.Port" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Reuse the standalone archive reader without loading the emulator runtime. -->
+    <Compile Include="../SharpEmu.HLE/FileSystem/ZArchive.cs" Link="ZArchive.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+    <EmbeddedResource Include="AudioAssets/*.f32" LogicalName="KytyPS5.Sound.%(Filename)" />
+    <None Include="AudioAssets/KENNEY-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="AudioAssets/sources.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

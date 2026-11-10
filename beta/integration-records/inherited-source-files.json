@@ -1,0 +1,19 @@
+{
+  "src/graphics/native_gpu/nativePm4.cpp": "27261c7a64b2f25dc8dc89b5bc35765dee628eba8cf15b4399573212802f1919",
+  "src/graphics/native_gpu/nativeUpscaler.cpp": "5c123209672d456792f12971c6bc977a5b41b290e242978773ab905b102397a6",
+  "src/graphics/native_gpu/nativeUpscaler.h": "5d80d061402873c9b40588c53074695cc5523a6961cdb3fb85a2de0a4f5f49e4",
+  "src/graphics/native_gpu/upscaler/fg_guides.s": "4ef3be235840e85f8528f806dd8cfc4df83c6a17096e757e37a608b8a0348bb2",
+  "src/graphics/native_gpu/upscaler/fg_hudless.s": "7f74f8648277455eef8a41551266c5fa76cf52318dc7d79f5c59aaf4bbe6c134",
+  "src/graphics/native_gpu/upscaler/gen.sh": "d79c2042d46214b34c86ac96ee6db0fe4f6e3d82e34e2c4de56a4169c3ae45f1",
+  "src/graphics/native_gpu/upscaler/titleProfile.h": "b37f4026e48c608907c9caa92e881772dcb946a66a5af52fe3c97633a71f91ee",
+  "src/graphics/native_gpu/upscaler/upscalerShaders.h": "880bda50a1c914e20ba0d7a8405714e292d6c6f9888b82e915145175c9c03525",
+  "src/graphics/presentation/window/frameGen.cpp": "495d4bf2636a61d02ce36c89b2b7cdf72a7f456983b182efd734e4ed07abda4c",
+  "src/graphics/presentation/window/swapchain.cpp": "8b7348be83abc9f4db9fc7d39fdcf857ddf6404ad1bbaa60b6fb1bda61eabd67",
+  "src/loader/runtimeLinker.cpp": "fe1f69b073555077661f51c5b0ee16535d0d544f6307ea8a0a410066c66c8c74",
+  "src/graphics/native_gpu/upscaler/cal_luma.s": "d14d0802cba1660d037469ac5050a6d22d60a471097e64c7467363f21a924e78",
+  "src/graphics/native_gpu/upscaler/copy4_a1.s": "9982af3f02e486c2458b3e9f8b51dca10534a0676bf34c68dcd54801cff135c9",
+  "src/graphics/native_gpu/upscaler/taaCalibration.h": "67a6b0db720a774cf40bbe92002628150741d7afb67c863eeb52040657e22396",
+  "src/graphics/native_gpu/upscaler/taaCalibrationTest.cpp": "45bd81cdafd55a6d4522d05b8ca789d599a3763952c7d8acd7de4d713b72f5e0",
+  "src/loader/astroFrameTime.h": "1a8e19d7a1b939bd9d643341c4c0469fd79631a6a88dc3ea26d49422b063180b",
+  "src/loader/astroTiming.h": "e48b60982c9103e1b2ed7ab595f3eabf55be27779d272a269faed7418b6e6f43"
+}

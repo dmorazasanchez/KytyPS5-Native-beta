@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=PS5 Minimal Mode
+Comment=Close current sessions and open the PS5 emulator with minimal background services; no reboot
+Exec=/usr/local/bin/ps5-minimal-start
+TryExec=/usr/local/libexec/ps5-minimal-control
+Type=Application
+Icon=applications-games
+Categories=Game;Emulator;
+Terminal=false

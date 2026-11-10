@@ -1,0 +1,10 @@
+{
+  "baseline_sha256": "6349d24f5f9ba76708918afa2b20fa3db17b9f845d59fe575052283cf0bd1013",
+  "baseline_matches_existing_audio_backend": true,
+  "sha256": "9c52bbb3e713a1ae285237c78d3b241aa06fcbed35fc2b2cca4e9974522fa852",
+  "changed_objects": [
+    "CMakeFiles/kyty_emulator.dir/src/graphics/native_gpu/nativeShadow.cpp.o",
+    "CMakeFiles/kyty_emulator.dir/src/loader/runtimeLinker.cpp.o"
+  ],
+  "game_launched": false
+}

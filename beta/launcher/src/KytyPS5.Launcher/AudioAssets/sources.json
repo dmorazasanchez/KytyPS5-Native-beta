@@ -1,0 +1,20 @@
+{
+  "author": "Kenney",
+  "license": "CC0-1.0",
+  "source": "https://kenney.nl/assets/interface-sounds",
+  "download": "https://opengameart.org/sites/default/files/kenney_interfaceSounds.zip",
+  "files": {
+    "move": "tick_002",
+    "confirm": "confirmation_002",
+    "back": "back_001",
+    "previous": "switch_003",
+    "next": "switch_003",
+    "open": "open_001",
+    "close": "close_001",
+    "enable": "toggle_001",
+    "disable": "toggle_002",
+    "error": "error_004",
+    "launch": "confirmation_004"
+  },
+  "adaptation": "Level attenuation, gentle filtering and attack ramps. Previous/next use different pitches and stereo balance."
+}

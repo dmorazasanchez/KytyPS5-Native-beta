@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+pids=()
+cleanup() {
+    rm -f "$XDG_RUNTIME_DIR/ps5-minimal-ready"
+    if (( ${#pids[@]} )); then kill "${pids[@]}" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+# Audio runs inside this login, without a shared systemd user manager.
+/usr/bin/pipewire & pids+=("$!")
+for ((i=0; i<100; i++)); do
+    [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
+    kill -0 "${pids[0]}"
+    sleep 0.05
+done
+[[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]]
+/usr/bin/pipewire-pulse & pids+=("$!")
+/usr/bin/wireplumber & pids+=("$!")
+# -S binds the compositor lifetime to the GUI: closing it returns to KDE.
+/usr/bin/labwc --verbose --config-dir /etc/ps5-minimal/labwc --session /usr/local/libexec/ps5-minimal-launcher
