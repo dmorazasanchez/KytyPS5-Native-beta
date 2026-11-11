@@ -1,8 +1,8 @@
-# KytyPS5 BC-250 beta: release guidance
+# Historical Beta 1 setup — superseded by Beta 3
 
-**This file documents the original Beta 1.** For the latest installation instructions, SteamOS limitations and downloads, see the [main README](../README.md) and [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases). Previously downloaded Beta 2 builds do not gain the new SteamOS fixes merely by reinstalling.
+**This is an archived guide for the original Beta 1, not the current installation procedure.** For the latest installation instructions, SteamOS limitations and downloads, see the **[main Beta 3 README](../README.md)** and [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases). Previously downloaded Beta 2 builds do not gain the new SteamOS fixes merely by reinstalling.
 
-# KytyPS5 BC-250 beta — 2026.11.10-beta1
+## Archived Beta 1 instructions — 2026.11.10-beta1
 
 Controller-first Linux launcher, native BC-250 emulator, automatic upscaler discovery,
 native FSR3 frame generation, exact-version render presets, Scream assertion recovery,
