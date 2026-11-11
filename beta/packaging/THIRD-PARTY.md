@@ -1,5 +1,11 @@
 # Third-party runtime inventory
 
+## Principal project credits
+
+- [Superkeka — KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native): **original main upstream** and core native BC-250 PS5 emulation.
+- [Lonewolf — HelixSR](https://github.com/lonewolf0622/HelixSR): **original author of HelixSR**, used through the optional upscaler integration; not developed by this fork.
+- [KytyPS5](https://github.com/KytyPS5/KytyPS5): original KytyPS5 emulator code and contributors.
+
 Kyty native emulator: GPL-2.0-only, with original Kyty MIT notices. Source and
 build/integration records accompany this beta. Launcher adaptation: GPL-2.0-or-later.
 

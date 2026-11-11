@@ -8,6 +8,15 @@ The Beta 2 glibc 2.39 compatibility fix and bundled labwc/xdotool remain include
 
 [First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [SteamOS quirks](#steamos-quirks-and-limitations) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
 
+## Original projects and credits
+
+> **This is a community fork, not an independent reimplementation.**
+>
+> - **[Superkeka — KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)** is the **main upstream project** and foundation of this BC-250 PS5 emulator. The native emulator, its core emulation work and original improvements belong to Superkeka and the upstream contributors. This repository builds on that work.
+> - **[Lonewolf — HelixSR](https://github.com/lonewolf0622/HelixSR)** is the creator of **HelixSR**, whose upscaling work underpins the optional HLX/FSR 4 and HLX/DLSS integration used here. This fork does **not** claim authorship of HelixSR, and proprietary or separately licensed runtime assets must be obtained from their respective sources.
+>
+> Thanks also to the original [KytyPS5 project](https://github.com/KytyPS5/KytyPS5) and its contributors. This fork's packaging, launcher integration and BC-250-specific experiments are downstream additions; please credit the original authors when discussing or redistributing the project.
+
 ## System requirements
 
 - An x86-64 AMD BC-250 system with glibc 2.38 or newer, a working amdgpu/Mesa stack, X11 or Xwayland, and user access to the DRM render node and `/dev/kfd`.
@@ -162,6 +171,8 @@ The launcher respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. You can also set `K
 After returning to Desktop Mode, run the AppImage with `--uninstall-system` to remove the helper and minimal-session system files. Run with `--install-desktop --remove` to remove the shortcuts. The uninstall keeps beta saves and settings.
 
 ## Source and credits
+
+**Primary acknowledgments:** [Superkeka / KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native) (the core upstream fork and native GPU work) and [Lonewolf / HelixSR](https://github.com/lonewolf0622/HelixSR) (the optional HelixSR upscaler technology), plus the upstream KytyPS5 and all contributors. The optional HLX/FSR 4 and HLX/DLSS routes are integrations of Lonewolf's work, not original upscalers created by this fork.
 
 The original project and Superkeka are credited under their respective licenses. Public source excludes proprietary NVIDIA NGX SDK headers, Helix-generated models/shaders, Lossless Scaling DLLs, console firmware and games. NVIDIA NGX headers must be obtained under a separate vendor license if rebuilding the optional helper. The release includes launcher/packaging source and third-party notices. [Beta source notes](beta/SOURCE.md) · [GPL-2.0 license](LICENSE) · [Original Kyty MIT notice](LICENSES/Kyty-MIT.txt)
 

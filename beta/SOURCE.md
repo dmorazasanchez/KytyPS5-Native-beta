@@ -1,5 +1,11 @@
 # KytyPS5 beta source snapshot
 
+## Attribution and project lineage
+
+This project is a downstream fork of **[Superkeka's KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)**. Superkeka and its contributors created the emulator's main native BC-250 implementation. It also descends from the original [KytyPS5](https://github.com/KytyPS5/KytyPS5).
+
+**[Lonewolf's HelixSR](https://github.com/lonewolf0622/HelixSR)** provides the separately developed HelixSR technology used by this fork's optional HLX upscaling integration. Neither HelixSR nor its required proprietary/vendor runtime assets are represented as this fork's original work. Credit their authors and respect their licensing and installation instructions.
+
 `launcher/` is the exact staged launcher source used for this beta. Build with
 .NET SDK 10 (`dotnet publish src/KytyPS5.Launcher/KytyPS5.Launcher.csproj -c Release`).
 `packaging/` contains the complete release/installation/relocation scripts.
