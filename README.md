@@ -26,6 +26,8 @@ chmod +x KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
 ./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
 ```
 
+**The GPU helper and driver options are separate setup steps.** `--install-helper` installs `kyty-lodhw`; it does not apply `sched_policy=2 vm_update_mode=0 cwsr_enable=0` or change boot configuration. With the stock driver, `sched_policy=0` disables Kyty's default KFD queue path. The fallback can be slow or hang. Review `--doctor` warnings and the [GPU configuration instructions](tools/bc250-amdgpu/README.md); driver options take effect after a reboot. Changing them should be a deliberate host setup step.
+
 `--install-desktop` adds **KytyPS5 Beta** to the application menu. The GPU helper runs as `kyty-lodhw.service` and uses `/var/lib/kyty-beta-system` and `/etc/systemd/system`. Installation works with the read-only system root on SteamOS and Bazzite.
 
 For the ZIP or tar.gz, extract the package, open a terminal in the extracted folder, and use `./AppRun` in place of the AppImage filename in every command below. If the AppImage reports a FUSE error, use the tar.gz or run the AppImage with `--appimage-extract` and use `./squashfs-root/AppRun`.

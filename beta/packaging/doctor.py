@@ -5,7 +5,7 @@ from pathlib import Path
 def report():
     data = {'version': (Path(__file__).resolve().parent / 'VERSION').read_text().strip(),
             'os': Path('/etc/os-release').read_text() if Path('/etc/os-release').exists() else platform.platform(),
-            'kernel': platform.release(), 'architecture': platform.machine(), 'checks': [], 'notes': []}
+            'kernel': platform.release(), 'architecture': platform.machine(), 'checks': [], 'notes': [], 'warnings': []}
     def check(name, ok, detail): data['checks'].append({'name':name, 'ok': bool(ok), 'detail': detail})
     try:
         libc = ctypes.CDLL(None)
@@ -27,6 +27,23 @@ def report():
     for name, path in [('GTT page limit','/sys/module/ttm/parameters/pages_limit'), ('AMDGPU scheduler','/sys/module/amdgpu/parameters/sched_policy'), ('VM update mode','/sys/module/amdgpu/parameters/vm_update_mode'), ('CWSR','/sys/module/amdgpu/parameters/cwsr_enable')]:
         try: data['notes'].append(name + ': ' + Path(path).read_text().strip())
         except OSError: pass
+    if any(device in ('0x1002:0x13fe', '0x1002:0x13da') for device in devices):
+        # Match nativeDefaults.cpp: patched AMDGPU supplies its VM/wave-save setup.
+        patched = Path('/sys/module/amdgpu/parameters/bc250_gfx_queues').exists()
+        expected = {'sched_policy': '2'} if patched else {
+            'sched_policy': '2', 'vm_update_mode': '0', 'cwsr_enable': '0'}
+        observed = {}
+        for name in expected:
+            try: observed[name] = Path('/sys/module/amdgpu/parameters', name).read_text().strip()
+            except OSError: observed[name] = 'unavailable'
+        data['native_gpu_options_recommended'] = all(observed[name] == value for name, value in expected.items())
+        if not data['native_gpu_options_recommended']:
+            mismatch = ', '.join(f'{name}={observed[name]} (recommended {value})'
+                                 for name, value in expected.items() if observed[name] != value)
+            data['warnings'].append('Native GPU driver options differ: ' + mismatch +
+                '. Kyty disables its default KFD queue path unless sched_policy=2; the fallback may be slow or hang. '
+                '--install-helper installs kyty-lodhw only and does not configure these options. '
+                'See README System requirements and tools/bc250-amdgpu/README.md; boot options require a reboot.')
     for p in Path('/sys/class/drm').glob('card[0-9]*/device/mem_info_vram_total'):
         try: data['notes'].append('VRAM: ' + str(int(p.read_text()) // (1024*1024)) + ' MiB (512 MiB recommended for large games)')
         except OSError: pass
@@ -40,6 +57,7 @@ if __name__ == '__main__':
     else:
         print('KytyPS5 Beta ' + data['version'])
         for c in data['checks']: print(('PASS ' if c['ok'] else 'FAIL ') + c['name'] + ': ' + c['detail'])
+        for warning in data['warnings']: print('WARN ' + warning)
         for note in data['notes']: print('INFO ' + note)
         print('No game launched and no system settings changed.')
     sys.exit(0 if data['ok'] else 1)
