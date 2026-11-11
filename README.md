@@ -1,6 +1,6 @@
-# KytyPS5-Native BC-250 beta
+# KytyPS5-Native BC-250 Beta — a fork of Superkeka
 
-This public, experimental Linux beta pairs the controller-first KytyPS5 launcher with the native AMD BC-250 emulator. It includes per-game upscaling and frame generation, extracted-game and `.zar` support, and the optional standalone PS5 Minimal session. [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)
+This is an experimental, community-maintained **GitHub fork of [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)**, not a separate emulator or an official Sony project. Superkeka and the original KytyPS5 contributors created the emulator foundation. This BC-250 Linux beta adds a controller-first launcher, packaging, per-game upscaling and frame-generation integration, extracted-game and `.zar` support, and an optional standalone PS5 Minimal session. The optional HelixSR technology is credited to [Lonewolf](https://github.com/lonewolf0622/HelixSR).
 
 **Beta 3** includes the newest SteamOS Minimal Mode PAM/EGL installer fixes and native GPU configuration warnings. Download the current prerelease from [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases). **Beta 2 binaries do not contain those fixes.** SteamOS and Bazzite remain experimental, with game compatibility strongly dependent on the kernel/AMDGPU setup.
 
