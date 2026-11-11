@@ -44,6 +44,23 @@ session_tools = select_session_tools() if a.install_gaming_mode else {}
 bundled_tools = [name for name, path in session_tools.items() if path.parent == SESSION_TOOLS]
 session_payload = source / 'system/session-runtime'
 
+def host_wayland_client():
+    # Keep the client ABI aligned with the host Mesa loaded by bundled labwc.
+    for directory in ('/usr/lib', '/usr/lib64', '/usr/lib/x86_64-linux-gnu'):
+        library = Path(directory) / 'libwayland-client.so.0'
+        if library.is_file():
+            return library
+    raise RuntimeError('Bundled labwc requires the host libwayland-client.so.0 alongside host Mesa')
+
+
+def write_generated(dest, content, mode):
+    if mode is None:
+        dest.symlink_to(content.decode())
+    else:
+        dest.write_bytes(content)
+        dest.chmod(mode)
+
+
 def generated_files():
     files = {}
     def add(path, content, mode=0o644): files[str(path)] = (content.encode() if isinstance(content,str) else content, mode)
@@ -58,6 +75,16 @@ def generated_files():
                 if file.is_file():
                     add(SESSION_TOOLS / file.relative_to(session_payload), file.read_bytes(),
                         0o755 if file.stat().st_mode & 0o111 else 0o644)
+        if 'labwc' in bundled_tools:
+            # A manifest-owned symlink follows SteamOS library updates.
+            add(SESSION_TOOLS / 'egl-compat/libwayland-client.so.0',
+                str(host_wayland_client()), None)
+            wrapper = (session_payload / 'labwc').read_text().replace(
+                '--library-path "$base/lib"', '--library-path "$base/egl-compat:$base/lib"')
+            add(SESSION_TOOLS / 'labwc', wrapper, 0o755)
+        if Path('/usr/lib/systemd/system/systemd-userdbd.service').is_file():
+            add('/etc/systemd/system/ps5-minimal-session.service.d/10-keep-userdbd.conf',
+                '[Unit]\nRequires=systemd-userdbd.service\nAfter=systemd-userdbd.service\n')
         original = source / 'system/session'
         home = account.pw_dir
         prefix = str(SYSTEM / 'session')
@@ -109,6 +136,8 @@ def host_preflight():
         version = subprocess.check_output(['systemctl','--version'], text=True).split()[1]
         if int(version) < 256: raise RuntimeError('Minimal session needs systemd >= 256 for user-light PAM sessions')
         if not Path('/etc/pam.d/system-local-login').exists() and not Path('/etc/pam.d/system-auth').exists(): raise RuntimeError('No supported PAM login account policy found')
+        if 'labwc' in bundled_tools:
+            host_wayland_client()
         for name in bundled_tools:
             tool = session_payload / 'bin' / name
             if not tool.is_file() or not (session_payload / name).is_file():
@@ -126,7 +155,9 @@ def main():
         files = generated_files() if not a.uninstall_system else {}
         if a.output:
             for path, (data, mode) in files.items():
-                dest = a.output / path.lstrip('/'); dest.parent.mkdir(parents=True, exist_ok=True); dest.write_bytes(data); dest.chmod(mode)
+                dest = a.output / path.lstrip('/'); dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.unlink(missing_ok=True)
+                write_generated(dest, data, mode)
         print(json.dumps({'user':account.pw_name,'uid':account.pw_uid,'gid':account.pw_gid,'launcher':str(launcher),'files':list(files),'system_changed':False}, indent=2))
         return
     if os.geteuid() != 0: raise RuntimeError('Use AppRun --install-helper or --install-gaming-mode (sudo required)')
@@ -140,7 +171,8 @@ def main():
         for path, entry in reversed(list(manifest['files'].items())):
             dest = Path(path)
             if entry['backup']:
-                shutil.copy2(entry['backup'], dest)
+                dest.unlink(missing_ok=True)
+                shutil.copy2(entry['backup'], dest, follow_symlinks=False)
             else: dest.unlink(missing_ok=True)
         subprocess.run(['systemctl','daemon-reload'], check=True)
         if manifest.get('helper_was_enabled'): subprocess.run(['systemctl','enable','kyty-lodhw.service'], check=True)
@@ -164,7 +196,10 @@ def main():
             manifest_file.write_text(json.dumps(manifest, indent=2) + '\n')
         dest.parent.mkdir(parents=True, exist_ok=True)
         temporary = dest.with_name(dest.name + '.kyty-beta-new')
-        temporary.write_bytes(content); temporary.chmod(mode); os.chown(temporary,0,0); temporary.replace(dest)
+        temporary.unlink(missing_ok=True)
+        write_generated(temporary, content, mode)
+        os.chown(temporary, 0, 0, follow_symlinks=False)
+        temporary.replace(dest)
     subprocess.run(['systemctl','daemon-reload'], check=True)
     if a.install_helper:
         subprocess.run(['systemctl','enable','kyty-lodhw.service'], check=True)
