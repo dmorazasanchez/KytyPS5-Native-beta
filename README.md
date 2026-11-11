@@ -1,12 +1,12 @@
 # KytyPS5-Native BC-250 beta
 
-This private Linux beta pairs the controller-first KytyPS5 launcher with the native AMD BC-250 emulator. It includes per-game upscaling and frame generation, extracted-game and `.zar` support, and the optional standalone PS5 Minimal session. [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)
+This public, experimental Linux beta pairs the controller-first KytyPS5 launcher with the native AMD BC-250 emulator. It includes per-game upscaling and frame generation, extracted-game and `.zar` support, and the optional standalone PS5 Minimal session. [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)
 
-**Beta 2** targets CachyOS, Bazzite, and SteamOS. Accept your GitHub invitation and sign in to download the AppImage, portable ZIP or tar.gz, source archive, and checksums. [Beta 2 downloads](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta2)
+**Beta 3** includes the newest SteamOS Minimal Mode PAM/EGL installer fixes and native GPU configuration warnings. Download the current prerelease from [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases). **Beta 2 binaries do not contain those fixes.** SteamOS and Bazzite remain experimental, with game compatibility strongly dependent on the kernel/AMDGPU setup.
 
-Beta 2 fixes the native backend startup error on hosts without glibc 2.43/2.44 and adds bundled labwc and xdotool for PS5 Minimal Mode.
+The Beta 2 glibc 2.39 compatibility fix and bundled labwc/xdotool remain included. Beta 3 additionally preserves systemd-userdbd during PS5 Minimal Mode PAM startup and uses the host Wayland client library with host Mesa/EGL when running the bundled labwc.
 
-[First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
+[First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [SteamOS quirks](#steamos-quirks-and-limitations) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
 
 ## System requirements
 
@@ -19,11 +19,11 @@ Beta 2 fixes the native backend startup error on hosts without glibc 2.43/2.44 a
 Download the AppImage in **Desktop Mode** and keep it in the folder you plan to launch it from. Open a terminal in that folder and run the following commands as your normal user. The GPU helper installer asks for sudo when it needs it.
 
 ```sh
-chmod +x KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-helper
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --doctor
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-desktop
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage
+chmod +x KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-helper
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --doctor
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-desktop
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage
 ```
 
 **The GPU helper and driver options are separate setup steps.** `--install-helper` installs `kyty-lodhw`; it does not apply `sched_policy=2 vm_update_mode=0 cwsr_enable=0` or change boot configuration. With the stock driver, `sched_policy=0` disables Kyty's default KFD queue path. The fallback can be slow or hang. Review `--doctor` warnings and the [GPU configuration instructions](tools/bc250-amdgpu/README.md); driver options take effect after a reboot. Changing them should be a deliberate host setup step.
@@ -34,7 +34,7 @@ For the ZIP or tar.gz, extract the package, open a terminal in the extracted fol
 
 Open **Add games** and select the folder containing your extracted games or `.zar` archives. An extracted game folder contains `eboot.bin`. Use your own game files.
 
-**Updating from Beta 1.** Point any Steam shortcut at the Beta 2 AppImage. Run `--install-desktop` again to update the application menu shortcut. If you use PS5 Minimal Mode, rerun `--install-gaming-mode` from Desktop Mode to point the session at Beta 2.
+**Updating from Beta 1 or 2.** Point any Steam shortcut at the Beta 3 AppImage. Run `--install-desktop` again to update the application menu shortcut. If you use PS5 Minimal Mode, rerun `--install-gaming-mode` from Desktop Mode to point the session at Beta 3.
 
 ## Upscaling and frame generation
 
@@ -57,7 +57,7 @@ Set **Native frame generation** on the same page. **FSR 3 · 2×** inserts a fra
 2. Return to the folder containing KytyPS5 and import the prepared HelixSR folder. Replace the example path with the directory containing `HLX-FSR4/` and `HelixSR/`.
 
 ```sh
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --import-upscalers \
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --import-upscalers \
   --helix-release "/path/to/HelixSR-3.2.0"
 ```
 
@@ -70,7 +70,7 @@ Open **Game settings → Frame generation** for the separate Lossless Scaling mo
 For **Ghost of Yōtei (PPSA26344)** in Upstream mode, **Adaptive 60 FPS** uses **MAKO Renderer 4.6.0** and your own **Lossless Scaling 3.2.2** `Lossless.dll`. Extract `MAKO-Renderer-v4.6.0-linux.tar.xz` and point the import at the folder containing `lib/libmako-render.so`. [MAKO Renderer 4.6.0 download](https://github.com/eugeniosegala/MAKO/releases/tag/render-v4.6.0)
 
 ```sh
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --import-upscalers \
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --import-upscalers \
   --lossless-dll "/path/to/your/Lossless.dll" \
   --mako "/path/to/extracted/MAKO-Renderer"
 ```
@@ -94,7 +94,7 @@ PS5 Minimal Mode starts Kyty in a dedicated labwc session with fewer background 
 After completing the first-run setup, run the installer from **Desktop Mode**.
 
 ```sh
-./KytyPS5-BC250-2026.11.11-beta2-x86_64.AppImage --install-gaming-mode
+./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-gaming-mode
 ```
 
 For an extracted archive, run `./AppRun --install-gaming-mode`. The installer adds **KytyPS5 Beta Minimal Mode** to the application menu. You can check the installed session before entering it.
@@ -119,6 +119,22 @@ sudo /var/lib/kyty-beta-system/session/ps5-minimal-control desktop
 
 In Desktop Mode, run the first-run steps through `--install-desktop`. Add **KytyPS5 Beta** to Steam as a non-Steam game, leave **Force the use of a specific Steam Play compatibility tool** unchecked for this Linux launcher, then open it in Steam Gaming Mode.
 
+## SteamOS quirks and limitations
+
+**Minimal Mode launching successfully does not establish game compatibility.** The SteamOS observations below are from the BC-250 test system; results can differ across kernels, BIOS settings and games.
+
+- **Immutable OS:** GPU helper and Minimal Mode installation writes only to /var/lib/kyty-beta-system and /etc, not /usr. The beta does not unlock SteamOS's read-only root, install kernel patches, configure AMDGPU boot options, or modify GRUB/Limine. Run the doctor after OS updates and after installing the helper.
+- **Gaming Mode versus Minimal Mode:** Add the native Linux launcher to Steam as a non-Steam game, with Steam Play/Proton forced compatibility **disabled**. PS5 Minimal Mode is a separate optional labwc session; it is not the Steam client or Valve Gaming Mode.
+- **PAM startup issue:** On SteamOS, userdbd was stopped during target isolation, causing ps5-minimal-session.service to fail with 224/PAM. Beta 3's system installer adds a conditional systemd service drop-in requiring and ordering systemd-userdbd when the host provides that unit. Running Beta 2's installer again will not install this fix.
+- **EGL renderer issue:** The older bundled Wayland client lacked a symbol needed by SteamOS Mesa. Beta 3's installer builds a compatibility symlink to the host libwayland-client.so.0 and gives it priority only in the bundled labwc wrapper. It does not replace Mesa or change the library search path for Kyty or Xwayland. If host labwc supports the required session option, the installer uses the host version.
+- **AMDGPU scheduler/VM/CWSR:** The helper installer and GPU driver setup are separate operations. SteamOS logs showed sched_policy=0, vm_update_mode=-1, cwsr_enable=1; that configuration disables Kyty's preferred KFD path. Run the doctor and consult [BC-250 GPU settings](tools/bc250-amdgpu/README.md). Stock and patched AMDGPU kernels require different settings; changing options takes effect on reboot.
+- **VRAM and GTT:** For large titles, follow the upstream guidance to use 512 MiB UMA/VRAM and up to 14 GiB GTT, and ensure the user can open the render node and /dev/kfd. These are requirements to check, not changes made by the installer.
+- **External library drives:** Keep the game-storage filesystem mounted. SteamOS paths such as /run/media/deck, /mnt and /var/mnt can differ after a reboot or repartition. Update stored library folders, LastGame entries and per-game profiles if a path moved; old saved locations are not evidence of an emulator backend defect.
+- **Ghost of Yotei (PPSA26344):** The content-registration fix and the NV12 VideoDec2 output allocation correction were verified inside the earlier Beta 2 AppImage. Later SteamOS logs still reported a native COND_EXEC (opcode 0x22) translation refusal in frame 4, followed by queue waits. Disabling DCB chunking in a controlled diagnostic bypassed the immediate refusal but **did not demonstrate a complete fix**. Never skip this command or force queues signaled to hide the failure. Vulkan fragmentShaderBarycentric support was also missing in some SteamOS logs, but its role in this specific failure is unproven.
+- **Logs and reproduction:** Capture the complete launch log, kernel version, AMDGPU options, game title/version, selected renderer, upscaler and FG profile. Test with frame generation disabled when comparing failure modes. Do not upload games, game keys, save files or private logs.
+
+For evidence and exact limits of the testing, see [SteamOS PAM/EGL investigation](docs/steamos-bc250-minimal-mode.md) and [SteamOS AppImage/game path audit](docs/steamos-appimage-path-audit.md). These reports describe Beta 2 test observations, not confirmation of Beta 3 gameplay compatibility.
+
 ## Cheats and recovery
 
 **Game settings → Cheats** shows matching patches for Ghost of Yōtei **02.002.000** and Demon's Souls **01.007.000**. Cheats start disabled and require the matching title ID and version. The Demon's Souls Scream assertion recovery is a separate opt-in per-game workaround.
@@ -130,7 +146,7 @@ In Desktop Mode, run the first-run steps through `--install-desktop`. Add **Kyty
 - For an HLX launch error, confirm the Helix import completed or select **Game default**. For a Lossless Scaling error, set **Frame generation → Off** and retry.
 - Run with `--verify` for launcher and controller checks. Run with `--collect-report` to save diagnostics locally. Include your distro and version, kernel, game and version, upscaler and frame generation selections, and steps to reproduce.
 
-All ten Beta 2 backend routes reached `--help` on glibc 2.39, and the launcher passed **113 checks** there. A headless test opened and focused the Kyty window using bundled labwc, Xwayland, and bundled xdotool. Gameplay on Bazzite and SteamOS and the physical display switch into PS5 Minimal Mode still need tester validation. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta2)
+All ten Beta 2 backend routes reached `--help` on glibc 2.39, and the launcher passed **113 checks** there. Beta 3 retains those backend binaries and changes the system installer and GPU doctor. A headless test opened and focused the Kyty window using bundled labwc, Xwayland, and bundled xdotool. Gameplay on Bazzite and SteamOS still needs reproducible title-by-title validation. SteamOS Minimal Mode compositor launched after the observed local PAM/EGL fixes, but a fresh Beta 3 installation and physical game performance remain to be validated. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta3)
 
 ## Data and removal
 
@@ -147,7 +163,7 @@ After returning to Desktop Mode, run the AppImage with `--uninstall-system` to r
 
 ## Source and credits
 
-The emulator retains Superkeka’s Git history. The release includes the launcher and packaging source snapshot and third-party notices. [Beta source notes](beta/SOURCE.md) · [GPL-2.0 license](LICENSE) · [Original Kyty MIT notice](LICENSES/Kyty-MIT.txt)
+The original project and Superkeka are credited under their respective licenses. Public source excludes proprietary NVIDIA NGX SDK headers, Helix-generated models/shaders, Lossless Scaling DLLs, console firmware and games. NVIDIA NGX headers must be obtained under a separate vendor license if rebuilding the optional helper. The release includes launcher/packaging source and third-party notices. [Beta source notes](beta/SOURCE.md) · [GPL-2.0 license](LICENSE) · [Original Kyty MIT notice](LICENSES/Kyty-MIT.txt)
 
 <details>
 <summary>Original upstream README and build instructions</summary>

@@ -33,3 +33,11 @@ Proton/Wine source: https://github.com/CachyOS/proton-cachyos (packaged version
 cachyos-11.0-20261005-slr); original notices are in the binary package.
 The package excludes Helix-generated neural weights/shaders and the proprietary
 Lossless DLL. Each tester prepares/imports their own files.
+
+## Public-source exception: NVIDIA NGX headers
+
+NVIDIA NGX SDK headers formerly under beta/hlx-helper/deps/nvngx_dlss_sdk/
+were labeled LicenseRef-NvidiaProprietary and prohibit redistribution
+without an express NVIDIA license. They are not part of the public source
+or release archives. Build the optional HLX helper using vendor headers
+that you obtained independently under appropriate licensing.

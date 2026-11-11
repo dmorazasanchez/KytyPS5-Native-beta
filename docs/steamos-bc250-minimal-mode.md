@@ -65,9 +65,9 @@ Essential: the userdbd dependency and ordering, host client symlink, and labwc w
 
 Troubleshooting artifacts: labwc.before-egl-fix; Downloads/kyty-minimal-userdb-fix.sh; Downloads/kyty-minimal-egl-fix.sh; Downloads/kyty-minimal-egl-fix-v2.sh; Downloads/kyty-egl-client-probe.py. These are not runtime dependencies. Keep the backup until a packaged upgrade has been validated.
 
-The current install-manifest.json does not track the manually added drop-in or compatibility symlink. The current wrapper path is tracked, but a reinstall from Beta 2 can overwrite its manual correction. An uninstall can leave the untracked drop-in and symlink behind.
+The original Beta 2 install-manifest.json did not track the manually added drop-in or compatibility symlink. The current wrapper path is tracked, but a reinstall from Beta 2 can overwrite its manual correction. An uninstall can leave the untracked drop-in and symlink behind.
 
-## Proposed permanent installer integration
+## Installer integration completed in source after Beta 2
 
 The accompanying beta/packaging/install-system.py change generates the working drop-in when the host ships systemd-userdbd.service. On hosts lacking that unit it leaves the dependency absent, rather than introducing an unavailable required service.
 

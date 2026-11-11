@@ -34,3 +34,7 @@ No Helix generated neural network/shader payloads, Lossless Scaling DLL, games,
 console firmware, user saves or personal configuration are distributed here.
 The MIT HLX IPC helper source is included separately. Optional MAKO and LSFG
 components are imported from the tester's own installation, not bundled.
+
+NVIDIA NGX SDK headers are excluded from the public repository and source
+releases. They must be obtained separately under suitable NVIDIA terms to
+build any optional helper that depends on them.
