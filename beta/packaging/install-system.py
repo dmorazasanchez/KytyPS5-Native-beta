@@ -89,27 +89,21 @@ def generated_files():
         home = account.pw_dir
         prefix = str(SYSTEM / 'session')
         for f in original.iterdir():
-            if not f.is_file() or f.name in ('install-ram-audit.py','ps5-ram-audit','ps5-ram-compare','40-memory-audit.conf','org.bc250.ps5.minimal.policy','ps5-minimal.desktop','ps5-minimal-mode.desktop'): continue
+            if not f.is_file() or f.name in ('org.bc250.ps5.minimal.policy','ps5-minimal.desktop','ps5-minimal-mode.desktop'): continue
             text = f.read_text()
             for name, path in session_tools.items():
                 text = text.replace(f'/usr/bin/{name}', str(path))
-            text = text.replace('/home/david/sharpemu-upscaling-20261108/run-kytyps5.sh', shlex.quote(str(launcher)))
-            text = text.replace('/home/david/sharpemu-upscaling-20261108/artifacts/kytyps5/KytyPS5', str(SYSTEM / 'launch-user'))
+            # Templates use @PLACEHOLDERS@ for the account and the launcher this session starts.
+            text = text.replace('@KYTYPS5_LAUNCHER@', shlex.quote(str(launcher)))
+            text = text.replace('@KYTYPS5_FRONTEND@', str(SYSTEM / 'launch-user'))
             text = text.replace('/usr/local/libexec/', prefix + '/').replace('/usr/local/bin/ps5-minimal-start', prefix + '/ps5-minimal-start')
-            text = text.replace('USER = "david"', 'USER = ' + repr(account.pw_name)).replace('UID = 1000', 'UID = ' + str(account.pw_uid))
-            text = text.replace('/run/user/1000/', '/run/user/' + str(account.pw_uid) + '/').replace('user@1000.service', 'user@' + str(account.pw_uid) + '.service')
-            text = text.replace('User=david', 'User=' + account.pw_name).replace('Group=david', 'Group=' + str(account.pw_gid))
-            text = text.replace('USER=david LOGNAME=david', 'USER=' + account.pw_name + ' LOGNAME=' + account.pw_name)
-            text = text.replace('/home/david', home)
-            text = text.replace('"/usr/lib/steamos/steam-set-session",', '') if False else text
+            text = text.replace('@USER@', account.pw_name).replace('@GROUP@', str(account.pw_gid))
+            text = text.replace('@UID@', str(account.pw_uid)).replace('@HOME@', home)
             if f.name == 'ps5-minimal-control':
                 text = text.replace('                 Path("/usr/lib/steamos/steam-set-session")):', '                 Path("/usr/bin/pkexec")):')
                 text = text.replace('    run("/usr/lib/steamos/steam-set-session", "plasma.desktop")', '    if Path("/usr/lib/steamos/steam-set-session").is_file():\n        run("/usr/lib/steamos/steam-set-session", "plasma.desktop")')
-                text = text.replace("david's", account.pw_name + "'s")
             if f.name == 'ps5-minimal.pam' and not Path('/etc/pam.d/system-local-login').exists():
                 text = text.replace('system-local-login', 'system-auth')
-            if f.name == 'rc.xml':
-                text = re.sub(r'    <keybind key="Print">.*?</keybind>\n', '', text, flags=re.S)
             if f.name.endswith(('.service','.timer','.target')):
                 target = Path('/etc/systemd/system') / f.name
             elif f.name == 'ps5-minimal.pam': target = Path('/etc/pam.d/ps5-minimal')

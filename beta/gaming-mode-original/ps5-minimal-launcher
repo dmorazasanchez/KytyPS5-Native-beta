@@ -11,7 +11,7 @@ export SDL_AUDIODRIVER=pulseaudio SDL_AUDIO_DRIVER=pulseaudio
 export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
 export KYTYPS5_SESSION_HEALTH="$health"
 rm -f "$ready" "$health"
-/home/david/sharpemu-upscaling-20261108/run-kytyps5.sh &
+@KYTYPS5_LAUNCHER@ &
 launcher=$!
 printf '%s\n' "$launcher" > "$XDG_RUNTIME_DIR/ps5-minimal-gui.pid"
 # A live process is insufficient: wait for a mapped window and a responding UI.

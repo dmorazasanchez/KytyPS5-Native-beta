@@ -1,180 +1,305 @@
-# KytyPS5-Native BC-250 Beta — a fork of Superkeka
+# KytyPS5-Native BC-250 — plug-and-play beta
 
-This is an experimental, community-maintained **GitHub fork of [Superkeka’s KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)**, not a separate emulator or an official Sony project. Superkeka and the original KytyPS5 contributors created the emulator foundation. This BC-250 Linux beta adds a controller-first launcher, packaging, per-game upscaling and frame-generation integration, extracted-game and `.zar` support, and an optional standalone PS5 Minimal session. The optional HelixSR technology is credited to [Lonewolf](https://github.com/lonewolf0622/HelixSR).
+A ready-to-play package of this community **GitHub fork of [Superkeka's KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)** (not a separate emulator, not an official Sony project) for the
+**AMD BC-250** on **SteamOS** and **CachyOS** (Bazzite and other Arch/Fedora systems are supported by the setup but
+less tested). Download one file, prepare your system once, add **your own games**, and play. Every fix, per-game
+setting, cheat list and upscaler this fork uses is already inside the package.
 
-**Beta 3** includes the newest SteamOS Minimal Mode PAM/EGL installer fixes and native GPU configuration warnings. Download the current prerelease from [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases). **Beta 2 binaries do not contain those fixes.** SteamOS and Bazzite remain experimental, with game compatibility strongly dependent on the kernel/AMDGPU setup.
+The only things you provide:
 
-The Beta 2 glibc 2.39 compatibility fix and bundled labwc/xdotool remain included. Beta 3 additionally preserves systemd-userdbd during PS5 Minimal Mode PAM startup and uses the host Wayland client library with host Mesa/EGL when running the bundled labwc.
+- **Your games** (PS5 games you own, as extracted folders or `.zar` archives).
+- **Optionally, your Lossless Scaling** (from Steam), only if you want Lossless Scaling frame generation. Everything
+  else, including HLX FSR 4 upscaling and native FSR 3 frame generation, works without it.
 
-[First run](#first-run) · [Upscaling and frame generation](#upscaling-and-frame-generation) · [PS5 Minimal Mode](#ps5-minimal-mode) · [SteamOS quirks](#steamos-quirks-and-limitations) · [Steam Gaming Mode](#steam-gaming-mode) · [Troubleshooting](#troubleshooting)
+> [!IMPORTANT]
+> Unaffiliated with Sony Interactive Entertainment or PlayStation. No games, firmware, keys or saves are included.
+> Use only game files you obtained legally.
 
-## Original projects and credits
+[Downloads](#downloads) · [1. Prepare the system](#1-prepare-the-system-once) · [2. Install](#2-install-kytyps5) ·
+[3. Add games](#3-add-your-games) · [4. PS5 Minimal Mode](#4-ps5-minimal-mode-optional-recommended) ·
+[Upscaling and frame generation](#upscaling-and-frame-generation) · [Tested games](#tested-games) ·
+[Troubleshooting](#troubleshooting) · [Credits](#credits-and-licenses)
 
-> **This is a community fork, not an independent reimplementation.**
->
-> - **[Superkeka — KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)** is the **main upstream project** and foundation of this BC-250 PS5 emulator. The native emulator, its core emulation work and original improvements belong to Superkeka and the upstream contributors. This repository builds on that work.
-> - **[Lonewolf — HelixSR](https://github.com/lonewolf0622/HelixSR)** is the creator of **HelixSR**, whose upscaling work underpins the optional HLX/FSR 4 and HLX/DLSS integration used here. This fork does **not** claim authorship of HelixSR, and proprietary or separately licensed runtime assets must be obtained from their respective sources.
->
-> Thanks also to the original [KytyPS5 project](https://github.com/KytyPS5/KytyPS5) and its contributors. This fork's packaging, launcher integration and BC-250-specific experiments are downstream additions; please credit the original authors when discussing or redistributing the project.
+## Downloads
 
-## System requirements
+From [Releases](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases), pick **one** of the first three:
 
-- An x86-64 AMD BC-250 system with glibc 2.38 or newer, a working amdgpu/Mesa stack, X11 or Xwayland, and user access to the DRM render node and `/dev/kfd`.
-- For larger games, the upstream baseline is 512 MiB of reserved VRAM and a 14 GiB GTT limit (`ttm.pages_limit=3670016`). The recommended amdgpu settings are `sched_policy=2 vm_update_mode=0 cwsr_enable=0`. Run `--doctor` to see your current values. [Upstream GPU configuration](tools/bc250-amdgpu/README.md)
-- The package bundles the launcher runtimes and Wine 11.0 for the optional Helix helper. PS5 Minimal Mode has its own host dependencies listed below.
+| File | What it is |
+| --- | --- |
+| `KytyPS5-BC250-<version>-x86_64.AppImage` | The whole emulator in one file. Recommended. |
+| `KytyPS5-BC250-<version>-x86_64.tar.gz` | The same program as a folder (no FUSE needed). Extract, then use `./AppRun`. |
+| `KytyPS5-BC250-<version>-x86_64.zip` | The same folder as a ZIP. |
+| `KytyPS5-BC250-<version>-PS5-Minimal-Mode.tar.gz` | Optional separate installer for PS5 Minimal Mode, the low-RAM game session. |
+| `KytyPS5-BC250-<version>-source.tar.gz` | Source of the launcher and packaging. |
+| `SHA256SUMS` | Checksums: `sha256sum -c SHA256SUMS`. |
 
-## First run
+Keep the AppImage or the extracted folder in a permanent place (for example `~/Applications`). The menu entry,
+Steam shortcut and Minimal Mode all point to it. If you move it, run `--install-desktop` again (and the Minimal Mode
+installer, if you use it).
 
-Download the AppImage in **Desktop Mode** and keep it in the folder you plan to launch it from. Open a terminal in that folder and run the following commands as your normal user. The GPU helper installer asks for sudo when it needs it.
+## What you need
+
+| | Requirement |
+| --- | --- |
+| Hardware | AMD BC-250 (GPU `1002:13fe`). Ordinary PC GPUs are not supported. |
+| BIOS | **512 MB UMA / VRAM.** On the modded P3.00 "Chipset Menu" BIOS: *Chipset → GFX Configuration → UMA Frame Buffer Size → 512M*. On the stock BIOS, set it without flashing with [bc250_memcfg](https://github.com/fanoush/bc250_memcfg): `sudo ./bc250memcfg UMA_SIZE 512`. More VRAM takes RAM that games need. |
+| System | SteamOS 3.9 (tested: 3.9.5), CachyOS (tested), or another x86-64 Linux with glibc 2.38+, a working amdgpu/Mesa (RADV) stack and systemd. |
+| RAM | 16 GB (the BC-250's). Large games use about 13–14 GB of it; see [Memory](#memory-why-the-session-matters). |
+| Disk | About 2.5 GB for KytyPS5, plus your games. |
+
+## 1. Prepare the system (once)
+
+Do this in **Desktop Mode**, in a terminal (SteamOS: *Konsole*). It needs your password (on SteamOS, set one first
+with `passwd` if you never did).
 
 ```sh
-chmod +x KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-helper
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --doctor
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-desktop
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage
+chmod +x KytyPS5-BC250-*-x86_64.AppImage
+./KytyPS5-BC250-*-x86_64.AppImage --prepare-system
 ```
 
-**The GPU helper and driver options are separate setup steps.** `--install-helper` installs `kyty-lodhw`; it does not apply `sched_policy=2 vm_update_mode=0 cwsr_enable=0` or change boot configuration. With the stock driver, `sched_policy=0` disables Kyty's default KFD queue path. The fallback can be slow or hang. Review `--doctor` warnings and the [GPU configuration instructions](tools/bc250-amdgpu/README.md); driver options take effect after a reboot. Changing them should be a deliberate host setup step.
+Then **reboot**, and check:
 
-`--install-desktop` adds **KytyPS5 Beta** to the application menu. The GPU helper runs as `kyty-lodhw.service` and uses `/var/lib/kyty-beta-system` and `/etc/systemd/system`. Installation works with the read-only system root on SteamOS and Bazzite.
+```sh
+./KytyPS5-BC250-*-x86_64.AppImage --prepare-system --status
+```
 
-For the ZIP or tar.gz, extract the package, open a terminal in the extracted folder, and use `./AppRun` in place of the AppImage filename in every command below. If the AppImage reports a FUSE error, use the tar.gz or run the AppImage with `--appimage-extract` and use `./squashfs-root/AppRun`.
+Every line should say `OK`. `--prepare-system` detects your system and adds only what is missing:
 
-Open **Add games** and select the folder containing your extracted games or `.zar` archives. An extracted game folder contains `eboot.bin`. Use your own game files.
+| Setting | Why | SteamOS | CachyOS / Arch with Limine | Arch with GRUB | Bazzite / rpm-ostree |
+| --- | --- | --- | --- | --- | --- |
+| `amdgpu sched_policy=2 vm_update_mode=0 cwsr_enable=0` | KytyPS5's GPU queues (KFD). **Without them games stall on a black screen**: SteamOS's defaults (0 / −1 / 1) make Ghost of Yōtei stop at its first frames. | `/etc/modprobe.d/kytyps5-native.conf` | `KERNEL_CMDLINE` lines in `/etc/default/limine` | `/etc/default/grub` | kernel arguments |
+| `ttm.pages_limit=3670016` (14 GiB GTT) | Games with more than 8 GiB of memory stall while loading without it. | `/etc/default/grub.d/kytyps5-native.cfg` + `update-grub` | same Limine lines + `limine-update` | `/etc/default/grub` + `grub-mkconfig` | kernel argument |
+| `kyty-lodhw` GPU helper | Sets the PS5 GPU registers the games expect. | systemd service | systemd service | systemd service | systemd service |
 
-**Updating from Beta 1 or 2.** Point any Steam shortcut at the Beta 3 AppImage. Run `--install-desktop` again to update the application menu shortcut. If you use PS5 Minimal Mode, rerun `--install-gaming-mode` from Desktop Mode to point the session at Beta 3.
+- A value you already set yourself is never overwritten; `--status` shows it as `CONFLICT` so you can decide.
+- `--prepare-system --dry-run` shows the exact changes first. `--prepare-system --revert` removes exactly what it
+  added (then reboot). Everything it added is recorded in `/var/lib/kyty-beta-system/prepare-system.json`.
+- On SteamOS these files live in `/etc` and `/var`, which SteamOS keeps across updates; the read-only `/usr` is only
+  unlocked for the moment `update-grub` runs. A SteamOS update that changes the kernel keeps them.
+- It does not touch the BIOS, the kernel package, the GPU driver module or the clocks.
+
+### Recommended: GPU clock governor
+
+Without a governor the BC-250's GPU stays near **1500 MHz**. Games run, but upscaling costs more time per frame
+(measured with Ghost of Yōtei: HLX FSR 4 took **5.5 ms** a frame at the default clock and **4.4 ms** with the governor).
+Install [cyan-skillfish-governor](https://github.com/filippor/cyan-skillfish-governor) (SMU branch):
+
+- **CachyOS:** `cyan-skillfish-governor-smu` from the `bc250-cachyos` repository of
+  [linux-cachyos-bc250](https://github.com/MastaG/linux-cachyos-bc250).
+- **SteamOS:** through [bc250-steamos](https://github.com/keyboardspecialist/bc250-steamos) (*Power and thermals*).
+
+Pick a clock range your cooling can hold; the setup above does not change clocks. `--doctor` warns when no governor
+runs.
+
+### Optional: patched amdgpu (more memory for frame generation)
+
+Games run on the stock amdgpu with the options above. Superkeka's BC-250 amdgpu patch adds the PS5's second graphics
+ring and interrupt routing; with the stock module, heavy games measured about **400 MiB more GPU memory**, enough to
+keep native frame generation paused in Ghost of Yōtei (Helix upscaling still runs).
+
+- **CachyOS:** the `linux-cachyos-bc250` kernel from [linux-cachyos-bc250](https://github.com/MastaG/linux-cachyos-bc250)
+  includes it.
+- **SteamOS:** build it for your kernel with [`tools/bc250-amdgpu`](tools/bc250-amdgpu/README.md). This replaces the
+  GPU driver module; read that README first, keep its rollback, and rebuild after a SteamOS kernel update.
+
+`--prepare-system` adjusts its options automatically when the patched module is loaded.
+
+## 2. Install KytyPS5
+
+```sh
+./KytyPS5-BC250-*-x86_64.AppImage --install-desktop     # adds "KytyPS5 Beta" to the application menu
+./KytyPS5-BC250-*-x86_64.AppImage --doctor              # checks everything; changes nothing
+```
+
+Start **KytyPS5 Beta** from the menu. The launcher works with a controller (DualSense, DualShock 4, Xbox) or a
+keyboard and mouse.
+
+**Steam Game Mode (SteamOS):** in Desktop Mode, Steam → *Add a Game* → *Add a Non-Steam Game* → pick
+**KytyPS5 Beta**. Then in its *Properties → Compatibility*, leave *Force the use of a specific Steam Play compatibility
+tool* **off**: KytyPS5 is a Linux program, not a Windows one.
+
+**Without FUSE** (some minimal systems): use the `.tar.gz`, or run the AppImage with `--appimage-extract` and start
+`squashfs-root/AppRun`. If a ZIP extractor dropped the executable bits:
+`chmod +x AppRun bin/* runtime/run-elf *.sh emulator/kyty_* framegen/mako/lib/*`.
+
+## 3. Add your games
+
+In the launcher: **Settings → Game folders → Add**, and pick the folder that holds your games. KytyPS5 finds:
+
+- **Extracted games:** a folder with `eboot.bin` and `sce_sys/param.json`.
+- **`.zar` archives:** played directly, without extracting.
+- **Updates and DLC:** keep them merged into the game (the usual patched dumps). For Ghost of Yōtei, the
+  Complete Edition's add-on licences are registered automatically.
+
+External drives work. Keep the drive mounted under the same path; after you move games, add the new folder again.
+
+## 4. PS5 Minimal Mode (optional, recommended)
+
+PS5 Minimal Mode is a separate game session: it closes the desktop (KDE, Steam and their background services) and
+starts only a small compositor (labwc), audio and the KytyPS5 launcher, the way a console boots into its game. That
+leaves the most RAM for games, which upscaling and frame generation need. You return to your desktop without
+rebooting.
+
+Download `KytyPS5-BC250-<version>-PS5-Minimal-Mode.tar.gz`, and with KytyPS5 already installed (step 2):
+
+```sh
+tar -xf KytyPS5-BC250-*-PS5-Minimal-Mode.tar.gz
+cd KytyPS5-BC250-*-PS5-Minimal-Mode
+./install.sh --check     # shows what it will install on this system
+./install.sh             # installs (asks for your password)
+```
+
+The installer detects the system and uses the matching setup:
+
+| | SteamOS | CachyOS / Arch |
+| --- | --- | --- |
+| Compositor | labwc bundled with the installer (SteamOS has none), with the host's Wayland client library so it matches SteamOS's Mesa | the system's `labwc` (`sudo pacman -S labwc` if missing; the bundled one is used otherwise) |
+| Login | `systemd-userdbd` kept running during the switch (SteamOS otherwise fails the session login) | same, where the unit exists |
+| Return | back to SteamOS Desktop Mode | back to your display manager's session |
+| Needs | nothing else | `xorg-xwayland dbus pipewire pipewire-pulse wireplumber polkit` (the installer names any that are missing) |
+
+**Use it:** start **KytyPS5 PS5 Minimal Mode** from the application menu, or add that entry to Steam as a non-Steam
+game to start it from Game Mode. **Save your work first:** entering closes your desktop apps and turns off networking
+until you return.
+
+**Leave it:** in the launcher, *Control centre → Return to Desktop Mode*, or press **Super+Shift+E**. If the screen
+ever stays black: **Ctrl+Alt+F4**, log in, and run `sudo /var/lib/kyty-beta-system/session/ps5-minimal-control desktop`.
+
+The AppImage can install the same session with `--install-gaming-mode`. Remove it with `./install.sh --uninstall`
+(or the AppImage's `--uninstall-system`); this also removes the GPU helper, so run `--prepare-system` again if you
+keep using KytyPS5. Saves and settings stay.
 
 ## Upscaling and frame generation
 
-Select a game in the library and open **Game settings → Upscaling**. Fresh beta profiles use the **Upstream** renderer, **Game default** upscaling, and frame generation **Off**. Keep the renderer on **Upstream** for the upscaler routes below. The launcher scans each game for a supported interface and shows the result on this settings page.
+Set these per game in the launcher (**game → Settings → Upscaling / Frame generation**), or globally in Settings.
+The [tested games](#tested-games) start with their tested choice.
 
-| Upscaler | What it uses | Setup |
+| Option | What it does | Needs |
 | --- | --- | --- |
-| **Game default** | The game's own reconstruction, such as TAA or FSR where the title provides it | Bundled |
-| **Automatic** | HLX / FSR 4 on compatible titles after Kyty verifies the game's inputs. Other titles keep their own reconstruction | Import HelixSR before using this on an HLX-compatible title |
-| **HLX / FSR 4** | The Helix FSR 4 path on supported titles | Import HelixSR |
-| **HLX / DLSS (Model E)** | The Helix DLSS Model E path on supported titles | Import HelixSR |
+| **Upscaler → HLX FSR 4** | [HelixSR](https://github.com/lonewolf0622/HelixSR)'s FSR 4-class upscaler, run in place of the game's own FSR 3. | Nothing: included and set up automatically. |
+| **Upscaler → HLX DLSS** | HelixSR's DLSS Model E upscaler. | Built once on your PC: `--setup-helix-dlss` (below). Until then KytyPS5 uses HLX FSR 4. |
+| **Upscaler → Auto** | HLX FSR 4 once KytyPS5 has verified the game's upscaler inputs; the game's own otherwise. | Nothing. |
+| **Upscaler → Game** | The game's own upscaler. | Nothing. |
+| **Render preset** | Render resolution the upscaler starts from: DLAA, Ultra Quality, **Quality** (2560×1440 for 4K), Balanced, Performance, or Dynamic (the game's own). | |
+| **Native frame generation → FSR 3** | KytyPS5's own FSR 3.1 frame interpolation from the game's depth and motion vectors. **Auto** turns it on below 50 FPS. | Free RAM (it pauses itself rather than run the game out of memory). |
+| **Lossless Scaling FG → Fixed 2× / Adaptive 60 FPS** | Lossless Scaling frame generation through the bundled [MAKO Renderer](https://github.com/eugeniosegala/MAKO) 4.6.0. Replaces native frame generation for that launch. | **Your** Lossless Scaling. |
 
-Use **Render resolution preset** to adjust the internal resolution on a supported route. **Native / DLAA** renders at output resolution. **Quality**, **Balanced**, and **Performance** lower the internal resolution in that order. **Upscaled output resolution** sets the target separately. On the 4K HLX path, the 1800p and 1440p options reduce the reconstruction target and scale the result to the game's 4K output. Astro Bot's manual presets require the matching title ID, version, and executable hash.
+Only one game upscaler interface is replaced; titles KytyPS5 has no verified route for keep their own upscaler, and
+the options above have no effect there.
 
-Set **Native frame generation** on the same page. **FSR 3 · 2×** inserts a frame on supported games. **Automatic** enables it below 50 real FPS and the runtime can pause generation when shared memory is low. The matching manual Astro Bot profile uses fixed 2× when frame generation is enabled. You can adjust native frame generation during play under **PS button → Upscaling**. Set the upscaler and resolution preset before launching, since switching upscalers during play can crash the BC-250 when memory is tight.
-
-### Install HelixSR for HLX
-
-1. Download and extract `HelixSR-3.2.0.zip`, then run `./helixsr-setup.sh` from its extracted folder and follow the vendor's Linux setup prompts. The setup prepares the files needed for the Model E route. [HelixSR 3.2.0 release and setup instructions](https://github.com/lonewolf0622/HelixSR/releases/tag/v3.2.0)
-2. Return to the folder containing KytyPS5 and import the prepared HelixSR folder. Replace the example path with the directory containing `HLX-FSR4/` and `HelixSR/`.
-
-```sh
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --import-upscalers \
-  --helix-release "/path/to/HelixSR-3.2.0"
-```
-
-3. Choose **HLX / FSR 4**, **HLX / DLSS (Model E)**, or **Automatic** in the game's Upscaling settings and launch the game. You can use **Game default** and native FSR 3 frame generation while you set up Helix.
-
-### Optional Lossless Scaling frame generation
-
-Open **Game settings → Frame generation** for the separate Lossless Scaling modes. Kyty switches native FSR 3 frame generation off for a launch using Lossless Scaling.
-
-For **Ghost of Yōtei (PPSA26344)** in Upstream mode, **Adaptive 60 FPS** uses **MAKO Renderer 4.6.0** and your own **Lossless Scaling 3.2.2** `Lossless.dll`. Extract `MAKO-Renderer-v4.6.0-linux.tar.xz` and point the import at the folder containing `lib/libmako-render.so`. [MAKO Renderer 4.6.0 download](https://github.com/eugeniosegala/MAKO/releases/tag/render-v4.6.0)
+**HLX DLSS (optional):**
 
 ```sh
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --import-upscalers \
-  --lossless-dll "/path/to/your/Lossless.dll" \
-  --mako "/path/to/extracted/MAKO-Renderer"
+./KytyPS5-BC250-*-x86_64.AppImage --setup-helix-dlss
 ```
 
-Select **Adaptive 60 FPS** and relaunch the game. **Fixed 2×** and Adaptive on other titles use separate LSFG Vulkan layers and profiles from an existing LSFG setup. The launcher reports the missing file or layer when a selected mode is unavailable.
+This runs HelixSR's own setup. It asks before downloading NVIDIA's DLSS 310.7.0 DLL from NVIDIA, builds the network
+on your PC (a few minutes) and stores it with KytyPS5. When it lists PC games at the end, press **Enter** on an empty
+line: KytyPS5 does not need HelixSR in any PC game. The built files contain NVIDIA's work: they stay on your PC and must
+not be shared.
 
-<details>
-<summary>Paths for existing LSFG setups</summary>
-
-| Mode | Config file | Vulkan layer manifest | Profile name |
-| --- | --- | --- | --- |
-| Fixed 2× | `~/.config/lsfg-vk/kyty-bc250-2x-verified.toml` | `~/.local/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_frame_generation.json` | `Kyty BC-250 verified 2x` |
-| Adaptive on the experimental LSFG route | `~/.config/lsfg-vk/kyty-bc250-adaptive.toml` | `~/.local/opt/lsfg-vk-experimental/share/vulkan/implicit_layer.d/VkLayer_LSFGVK_experimental_frame_generation.json` | `Kyty BC-250 Adaptive 60 FPS` |
-
-</details>
-
-## PS5 Minimal Mode
-
-PS5 Minimal Mode starts Kyty in a dedicated labwc session with fewer background services. It is optional. The installer uses the host's labwc when it supports `--session` and its xdotool when available. Beta 2 includes labwc 0.8.3 and xdotool fallbacks under `/var/lib/kyty-beta-system/session-runtime`. The host provides **Xwayland, dbus-run-session, PipeWire, PipeWire Pulse, WirePlumber, polkit, PAM, and systemd 256 or newer**. The installer checks the dependencies before writing system files. If they are unavailable, you can run the beta from Desktop Mode or [Steam Gaming Mode](#steam-gaming-mode).
-
-After completing the first-run setup, run the installer from **Desktop Mode**.
+**Lossless Scaling frame generation:** KytyPS5 finds `Lossless.dll` by itself when Lossless Scaling is installed
+through Steam (any Steam library, also on an SD card or second drive). Otherwise point it at your copy once:
 
 ```sh
-./KytyPS5-BC250-2026.11.11-beta3-x86_64.AppImage --install-gaming-mode
+./KytyPS5-BC250-*-x86_64.AppImage --setup-lossless /path/to/Lossless.dll
 ```
 
-For an extracted archive, run `./AppRun --install-gaming-mode`. The installer adds **KytyPS5 Beta Minimal Mode** to the application menu. You can check the installed session before entering it.
+If the DLL is not found, the game still starts, with Lossless Scaling off (the reason is in the game's log).
 
-```sh
-pkexec /var/lib/kyty-beta-system/session/ps5-minimal-control check
-```
+### Memory: why the session matters
 
-**Save your work before switching.** Entering Minimal Mode closes the configured user's current applications and sessions and temporarily stops background services, including networking. Open **KytyPS5 Beta Minimal Mode** from the application menu or run the following command from a local desktop.
+On the BC-250 the GPU's memory *is* the system's RAM. Ghost of Yōtei uses about 13.5 GB of the 16 GB, so whatever else
+runs takes memory from upscaling and frame generation:
 
-```sh
-pkexec /var/lib/kyty-beta-system/session/ps5-minimal-control enter
-```
+- **Native frame generation** needs about 320 MB free and pauses itself below that (`"why":"memory"` in the log),
+  resuming when memory is available again.
+- **HLX upscaling** stops if the system runs out of memory (the game continues with its own FSR 3; select it again
+  to retry).
 
-To leave, open **Control centre → Return to Desktop Mode** or press **Super+Shift+E**. On hosts with Valve's session switcher, this requests KDE. Other hosts return to the configured display-manager session or login screen. If the session is stuck, press **Ctrl+Alt+F4**, log in, and run this recovery command.
+So for the best results play in **PS5 Minimal Mode** (or Steam Game Mode), not in a desktop with other apps open.
+With the stock amdgpu, frame generation can still stay paused in the heaviest scenes; the
+[patched amdgpu](#optional-patched-amdgpu-more-memory-for-frame-generation) gives it the extra room.
 
-```sh
-sudo /var/lib/kyty-beta-system/session/ps5-minimal-control desktop
-```
+## Tested games
 
-## Steam Gaming Mode
+What this package was tested with on BC-250 hardware. Other games and versions may work; KytyPS5 applies
+version-specific fixes only to the exact versions listed.
 
-In Desktop Mode, run the first-run steps through `--install-desktop`. Add **KytyPS5 Beta** to Steam as a non-Steam game, leave **Force the use of a specific Steam Play compatibility tool** unchecked for this Linux launcher, then open it in Steam Gaming Mode.
+| Game | Title ID | Version | Starts with | Notes |
+| --- | --- | --- | --- | --- |
+| **Ghost of Yōtei** (Complete Edition) | PPSA26344 | 02.002.000 | HLX FSR 4, Quality, 4K output, FSR 3 frame generation | Plays on SteamOS and CachyOS. Complete Edition add-on licences registered automatically (fixes the endless loading screen); VideoDec2 frame-size fix for its videos; ray tracing mode uses the reserved graphics VMID fix (verified in a bounded test, not long sessions). Cheats available. |
+| **Demon's Souls** (Deluxe Edition) | PPSA01341 | 01.007.000 | Scream assertion recovery on | Tested on CachyOS. Recovery skips the in-game "Scream" assertion that otherwise stops the game; turn it off in the game's settings if you do not need it. The optional HDR-pass skip only applies to 01.004.000 / 01.007.000. Cheats available. |
+| **ASTRO BOT** (EU) | PPSA21567 | 01.018.000 | HLX FSR 4, Performance preset, FSR 3 frame generation | Tested on CachyOS. Its manual upscaling presets are applied only to the exact 01.018.000 EU executable; other regions keep the automatic route. |
 
-## SteamOS quirks and limitations
+**Cheats:** *game → Settings → Cheats* lists the included cheats for Ghost of Yōtei 02.002.000 (infinite health,
+one-hit kill, max resources, uncapped FPS) and Demon's Souls 01.007.000 (infinite health, infinite stamina, 9,999,999
+souls). They start **off**; turn on the ones you want. You can also import your own patch JSON there.
 
-**Minimal Mode launching successfully does not establish game compatibility.** The SteamOS observations below are from the BC-250 test system; results can differ across kernels, BIOS settings and games.
+**Settings you choose always win:** the per-game starting values above only apply until you change that game's
+settings. The global defaults are HLX/automatic upscaling, Quality preset, automatic native frame generation and
+4K output.
 
-- **Immutable OS:** GPU helper and Minimal Mode installation writes only to /var/lib/kyty-beta-system and /etc, not /usr. The beta does not unlock SteamOS's read-only root, install kernel patches, configure AMDGPU boot options, or modify GRUB/Limine. Run the doctor after OS updates and after installing the helper.
-- **Gaming Mode versus Minimal Mode:** Add the native Linux launcher to Steam as a non-Steam game, with Steam Play/Proton forced compatibility **disabled**. PS5 Minimal Mode is a separate optional labwc session; it is not the Steam client or Valve Gaming Mode.
-- **PAM startup issue:** On SteamOS, userdbd was stopped during target isolation, causing ps5-minimal-session.service to fail with 224/PAM. Beta 3's system installer adds a conditional systemd service drop-in requiring and ordering systemd-userdbd when the host provides that unit. Running Beta 2's installer again will not install this fix.
-- **EGL renderer issue:** The older bundled Wayland client lacked a symbol needed by SteamOS Mesa. Beta 3's installer builds a compatibility symlink to the host libwayland-client.so.0 and gives it priority only in the bundled labwc wrapper. It does not replace Mesa or change the library search path for Kyty or Xwayland. If host labwc supports the required session option, the installer uses the host version.
-- **AMDGPU scheduler/VM/CWSR:** The helper installer and GPU driver setup are separate operations. SteamOS logs showed sched_policy=0, vm_update_mode=-1, cwsr_enable=1; that configuration disables Kyty's preferred KFD path. Run the doctor and consult [BC-250 GPU settings](tools/bc250-amdgpu/README.md). Stock and patched AMDGPU kernels require different settings; changing options takes effect on reboot.
-- **VRAM and GTT:** For large titles, follow the upstream guidance to use 512 MiB UMA/VRAM and up to 14 GiB GTT, and ensure the user can open the render node and /dev/kfd. These are requirements to check, not changes made by the installer.
-- **External library drives:** Keep the game-storage filesystem mounted. SteamOS paths such as /run/media/deck, /mnt and /var/mnt can differ after a reboot or repartition. Update stored library folders, LastGame entries and per-game profiles if a path moved; old saved locations are not evidence of an emulator backend defect.
-- **Ghost of Yotei (PPSA26344):** The content-registration fix and the NV12 VideoDec2 output allocation correction were verified inside the earlier Beta 2 AppImage. Later SteamOS logs still reported a native COND_EXEC (opcode 0x22) translation refusal in frame 4, followed by queue waits. Disabling DCB chunking in a controlled diagnostic bypassed the immediate refusal but **did not demonstrate a complete fix**. Never skip this command or force queues signaled to hide the failure. Vulkan fragmentShaderBarycentric support was also missing in some SteamOS logs, but its role in this specific failure is unproven.
-- **Logs and reproduction:** Capture the complete launch log, kernel version, AMDGPU options, game title/version, selected renderer, upscaler and FG profile. Test with frame generation disabled when comparing failure modes. Do not upload games, game keys, save files or private logs.
+## Data, updates and removal
 
-For evidence and exact limits of the testing, see [SteamOS PAM/EGL investigation](docs/steamos-bc250-minimal-mode.md) and [SteamOS AppImage/game path audit](docs/steamos-appimage-path-audit.md). These reports describe Beta 2 test observations, not confirmation of Beta 3 gameplay compatibility.
+| Data | Location |
+| --- | --- |
+| Settings and per-game choices | `~/.config/KytyPS5-Beta` |
+| **Saves** | `~/.local/share/KytyPS5-Beta/runtime/_SaveData/<TITLE ID>` |
+| Shader caches, trophies | `~/.local/share/KytyPS5-Beta/runtime` |
+| Upscalers, Lossless DLL copy, logs | `~/.local/share/KytyPS5-Beta/upscalers`, `lossless`, `logs` |
+| Game logs | `~/.config/KytyPS5-Beta/logs` |
 
-## Cheats and recovery
+**Update:** download the new AppImage, replace the old one at the same path (or run `--install-desktop` from the new
+location). Saves and settings are kept. Earlier betas' untouched global defaults (upscaling and frame generation off)
+are upgraded to the new defaults once; settings you changed are left alone.
 
-**Game settings → Cheats** shows matching patches for Ghost of Yōtei **02.002.000** and Demon's Souls **01.007.000**. Cheats start disabled and require the matching title ID and version. The Demon's Souls Scream assertion recovery is a separate opt-in per-game workaround.
+**Back up saves:** copy `~/.local/share/KytyPS5-Beta/runtime/_SaveData`.
+
+**Remove:** `--uninstall-system` (helper and Minimal Mode), `--prepare-system --revert` (driver options; reboot),
+`--install-desktop --remove` (menu entries), then delete the AppImage. Delete the two data folders above to remove
+saves and settings too.
 
 ## Troubleshooting
 
-- If Steam shows only `ELFCLASS32` overlay warnings, run the Beta 2 AppImage in a Desktop Mode terminal and capture the full output. The overlay warnings alone give no backend failure.
-- Run the AppImage with `--doctor` to check the BC-250, render node, KFD, and GPU helper. If the helper is missing, rerun `--install-helper` and check `systemctl status kyty-lodhw.service`.
-- For an HLX launch error, confirm the Helix import completed or select **Game default**. For a Lossless Scaling error, set **Frame generation → Off** and retry.
-- Run with `--verify` for launcher and controller checks. Run with `--collect-report` to save diagnostics locally. Include your distro and version, kernel, game and version, upscaler and frame generation selections, and steps to reproduce.
+Start with `--doctor`: every warning names its fix.
 
-All ten Beta 2 backend routes reached `--help` on glibc 2.39, and the launcher passed **113 checks** there. Beta 3 retains those backend binaries and changes the system installer and GPU doctor. A headless test opened and focused the Kyty window using bundled labwc, Xwayland, and bundled xdotool. Gameplay on Bazzite and SteamOS still needs reproducible title-by-title validation. SteamOS Minimal Mode compositor launched after the observed local PAM/EGL fixes, but a fresh Beta 3 installation and physical game performance remain to be validated. [Beta validation reports](https://github.com/dmorazasanchez/KytyPS5-Native-beta/releases/tag/2026.11.11-beta3)
-
-## Data and removal
-
-| Data | Default location |
+| Symptom | Cause and fix |
 | --- | --- |
-| Settings | `~/.config/KytyPS5-Beta` |
-| Saves | `~/.local/share/KytyPS5-Beta/runtime/_SaveData` |
-| Shader caches and trophies | Adjacent directories under `~/.local/share/KytyPS5-Beta/runtime` |
-| Upscaler files and logs | `~/.local/share/KytyPS5-Beta/upscalers` |
+| Black screen or endless loading, Ghost of Yōtei log shows `refused, unknown packet op 0x22` | The amdgpu options are not active. `--prepare-system`, reboot, `--prepare-system --status`. |
+| Large game stops while loading | GTT below 14 GiB: same fix. |
+| `GPU helper socket` FAIL in `--doctor` | `--prepare-system` (it installs the helper), or `systemctl status kyty-lodhw.service`. |
+| Frame generation never turns on | Not enough free RAM. Play in PS5 Minimal Mode, close other apps, use the Quality preset (not Dynamic), or the patched amdgpu. |
+| HLX upscaling "stopped" | The system ran out of memory; same as above. Select the upscaler again to retry. |
+| Upscaling costs more ms than expected | No GPU governor; the GPU stays near 1500 MHz. |
+| Lossless Scaling does nothing | `Lossless.dll` not found: install Lossless Scaling from Steam or use `--setup-lossless`. |
+| Minimal Mode screen stays black | Ctrl+Alt+F4, log in, `sudo /var/lib/kyty-beta-system/session/ps5-minimal-control desktop`. |
+| The AppImage does not start | FUSE missing: use the `.tar.gz`. glibc older than 2.38: update the system. |
 
-The launcher respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`. You can also set `KYTYPS5_CONFIG_ROOT`, `KYTYPS5_PROFILE_ROOT`, and `KYTYPS5_DATA_ROOT` explicitly.
+**Reporting a problem:** run `--collect-report`. It saves a local report (system, GPU options, recent logs) for you to
+review; nothing is uploaded. Open an issue with it, your system and version, the game and its version, the upscaler
+and frame-generation choices, and whether it also happens with frame generation off. Never attach games, keys or
+save files.
 
-After returning to Desktop Mode, run the AppImage with `--uninstall-system` to remove the helper and minimal-session system files. Run with `--install-desktop --remove` to remove the shortcuts. The uninstall keeps beta saves and settings.
+## Credits and licenses
 
-## Source and credits
+> **This is a community fork, not an independent reimplementation.**
+>
+> - **[Superkeka — KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)** is the main upstream project: the
+>   native BC-250 emulator, its GPU work and the amdgpu patch belong to Superkeka and the upstream contributors.
+> - **[KytyPS5](https://github.com/KytyPS5/KytyPS5)** is the original emulator it descends from.
+> - **[Lonewolf — HelixSR](https://github.com/lonewolf0622/HelixSR)** created HelixSR (HLX FSR 4 and HLX DLSS). This
+>   package redistributes the complete, unmodified official HelixSR 3.2.0 release free of charge, as its license
+>   allows; this fork does not claim authorship of it.
+> - **[Eugenio Segala — MAKO](https://github.com/eugeniosegala/MAKO)**: MAKO Renderer 4.6.0 (GPL-3.0-or-later),
+>   bundled unmodified for Lossless Scaling frame generation. It contains no Lossless Scaling.
+> - The controller-first launcher is based on the SharpEmu frontend.
 
-**Primary acknowledgments:** [Superkeka / KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native) (the core upstream fork and native GPU work) and [Lonewolf / HelixSR](https://github.com/lonewolf0622/HelixSR) (the optional HelixSR upscaler technology), plus the upstream KytyPS5 and all contributors. The optional HLX/FSR 4 and HLX/DLSS routes are integrations of Lonewolf's work, not original upscalers created by this fork.
-
-The original project and Superkeka are credited under their respective licenses. Public source excludes proprietary NVIDIA NGX SDK headers, Helix-generated models/shaders, Lossless Scaling DLLs, console firmware and games. NVIDIA NGX headers must be obtained under a separate vendor license if rebuilding the optional helper. The release includes launcher/packaging source and third-party notices. [Beta source notes](beta/SOURCE.md) · [GPL-2.0 license](LICENSE) · [Original Kyty MIT notice](LICENSES/Kyty-MIT.txt)
+This fork adds the packaging, launcher integration, system preparation, Minimal Mode session and BC-250 fixes. The
+emulator is GPL-2.0 ([LICENSE](LICENSE)); [Kyty MIT notice](LICENSES/Kyty-MIT.txt). Bundled third-party licenses are
+in the package's `licenses/` folder ([THIRD-PARTY](beta/packaging/THIRD-PARTY.md), [source notes](beta/SOURCE.md)).
+Not included: games, firmware, Lossless Scaling, NVIDIA's DLSS (HLX DLSS is built from it on your PC), and NVIDIA NGX
+SDK headers (needed only to rebuild the HLX helper).
 
 <details>
 <summary>Original upstream README and build instructions</summary>

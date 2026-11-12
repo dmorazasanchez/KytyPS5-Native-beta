@@ -145,7 +145,13 @@ internal static class KytyBridge
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var option in Options) result[option.Id] = option.Default;
         ImportExistingKytyPreferences(result, gamePath);
-        foreach (var file in new[] { ProfileFile(null, null), ProfileFile(titleId, gamePath) }.Distinct())
+        // Global settings, then the defaults this package ships for the title (tested settings, read-only), then the
+        // user's own choices for this game, which always win.
+        var layers = new List<string> { ProfileFile(null, null) };
+        var titleDefaults = TitleDefaultsFile(titleId);
+        if (titleDefaults is not null && gamePath is not null) layers.Add(titleDefaults);
+        if (gamePath is not null) layers.Add(ProfileFile(titleId, gamePath));
+        foreach (var file in layers.Distinct())
         {
             if (!File.Exists(file)) continue;
             try
@@ -261,6 +267,16 @@ internal static class KytyBridge
             if (entries.GetValueOrDefault("custom_settings", "false") == "true") Apply(entries);
             break;
         }
+    }
+
+    // $KYTYPS5_BUNDLE_ROOT/title-defaults/<TITLE ID>.json: the settings this package was tested with for a game.
+    public static string? TitleDefaultsFile(string? titleId)
+    {
+        var bundle = Environment.GetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT");
+        if (string.IsNullOrEmpty(bundle) || string.IsNullOrWhiteSpace(titleId) || !titleId.All(char.IsAsciiLetterOrDigit))
+            return null;
+        var file = Path.Combine(bundle, "title-defaults", titleId + ".json");
+        return File.Exists(file) ? file : null;
     }
 
     public static void Save(string? titleId, string? gamePath, IReadOnlyDictionary<string, string> values)

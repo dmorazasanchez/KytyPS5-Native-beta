@@ -24,17 +24,22 @@ case "${1:-}" in
         cat <<'HELP'
 KytyPS5 Beta for AMD BC-250 Linux
   (no arguments)             Open the controller-first launcher
+  --prepare-system           Set the GPU driver options, 14 GiB GTT and GPU helper this PC needs (sudo, once;
+                             reboot after). --status shows them, --dry-run previews, --revert undoes.
   --doctor                   Check host requirements without launching a game
+  --install-desktop          Add KytyPS5 to the application menu (then add it to Steam as a non-Steam game)
+  --install-gaming-mode      Install PS5 Minimal Mode, the low-RAM game session (sudo)
+  --setup-lossless DLL       Use your Lossless.dll for Lossless Scaling frame generation (only needed when
+                             Lossless Scaling is not installed through Steam)
+  --setup-helix-dlss         Optional: build HLX DLSS with HelixSR's official setup (HLX FSR 4 is ready already)
+  --install-helper           Install/update only the GPU helper (sudo; --prepare-system includes it)
+  --uninstall-system         Remove the helper and Minimal Mode (saves and settings are kept)
   --verify                   Run isolated launcher verification
   --runtime [emulator args]  Run the packaged runtime selector
-  --install-desktop          Install a shortcut for this AppImage/folder
-  --install-helper           Install/update the privileged GPU helper (sudo)
-  --install-gaming-mode      Install the optional minimal session (sudo)
-  --uninstall-system         Remove beta system components
-  --import-upscalers ...     Import your locally prepared Helix/Lossless files
+  --import-upscalers ...     Import a HelixSR release you prepared yourself (advanced)
   --collect-report [path]    Save a local diagnostic report
-  --version                 Print the release version
-See README.md for first-run setup and platform limitations.
+  --version                  Print the release version
+First time: --prepare-system, reboot, then start KytyPS5 and add your game folder. See README.md.
 HELP
         exit 0 ;;
     --doctor) shift; exec "$bundle_root/bin/python3" "$bundle_root/doctor.py" "$@" ;;
@@ -58,6 +63,67 @@ HELP
         if [[ "$action" == --install-gaming-mode ]]; then "$bundle_root/bin/python3" "$bundle_root/install-desktop.py" --gaming-mode; fi
         exit $? ;;
     --import-upscalers) shift; exec "$bundle_root/bin/python3" "$bundle_root/import-upscalers.py" "$@" ;;
+    --prepare-system)
+        shift
+        case "${1:-}" in
+            --status|--json) exec "$bundle_root/bin/python3" "$bundle_root/prepare-system.py" --status "$@" ;;
+            --dry-run) exec "$bundle_root/bin/python3" "$bundle_root/prepare-system.py" --apply --dry-run ;;
+        esac
+        "$bundle_root/bin/python3" "$bundle_root/prepare-system.py" --status || true
+        action=--apply; [[ "${1:-}" == --revert ]] && action=--revert
+        # Root cannot always read a user's FUSE mount: stage the small payload first.
+        stage="$(mktemp -d "${TMPDIR:-/tmp}/kyty-beta-prepare.XXXXXXXX")"
+        trap 'rm -rf -- "$stage"' EXIT
+        cp "$bundle_root/prepare-system.py" "$bundle_root/install-system.py" "$stage/"
+        mkdir "$stage/system"; cp "$bundle_root/system/kyty-lodhw" "$stage/system/"
+        launcher_path="${APPIMAGE:-$bundle_root/AppRun}"
+        echo; echo "Administrator password needed to change system settings:"
+        if [[ "$action" == --apply ]]; then
+            sudo -- /usr/bin/python3 "$stage/prepare-system.py" --apply
+            sudo -- /usr/bin/python3 "$stage/install-system.py" --install-helper --payload "$stage" --launcher "$launcher_path" --user "$(id -un)"
+            echo; echo "Reboot now, then run: $launcher_path --prepare-system --status"
+        else
+            sudo -- /usr/bin/python3 "$stage/prepare-system.py" --revert
+        fi
+        exit 0 ;;
+    --setup-lossless)
+        shift; [[ $# == 1 ]] || { echo "Usage: --setup-lossless /path/to/Lossless.dll" >&2; exit 2; }
+        exec "$bundle_root/bin/python3" "$bundle_root/prepare-runtime.py" --setup-lossless "$1" ;;
+    --setup-helix-dlss)
+        shift
+        # HelixSR's own setup builds HLX DLSS's network on this PC from NVIDIA's DLSS DLL (it asks before
+        # downloading it). Its files must not be shared, so they are made here and never shipped.
+        release="$KYTYPS5_DATA_ROOT/upscalers/helixsr-release/HelixSR-3.2.0"
+        if [[ ! -x "$release/helixsr-setup.sh" ]]; then
+            mkdir -p "$KYTYPS5_DATA_ROOT/upscalers/helixsr-release"
+            "$bundle_root/bin/python3" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+                "$bundle_root/upscalers/HelixSR-3.2.0.zip" "$KYTYPS5_DATA_ROOT/upscalers/helixsr-release"
+            chmod +x "$release/helixsr-setup.sh" "$release/helixsr-uninstall.sh"
+            find "$release/setup" -type f \( -name '*.sh' -o -name 'launch_synth' \) -exec chmod +x {} +
+        fi
+        # The setup runs its shader compiler through Wine: offer the bundled Wine 11.0 when the PC has no Proton/Wine.
+        shim="$(mktemp -d "${TMPDIR:-/tmp}/kyty-helix-wine.XXXXXXXX")"
+        trap 'rm -rf -- "$shim"' EXIT
+        ln -s "$bundle_root/proton/files/bin/wine" "$shim/wine"
+        echo "HelixSR's setup will ask before downloading NVIDIA's DLSS DLL. When it shows a list of PC games at the"
+        echo "end, press Enter on an empty line: KytyPS5 does not need HelixSR in any PC game."
+        echo
+        PATH="$shim:$PATH" "$release/helixsr-setup.sh" --no-fg "$@" || true
+        if "$bundle_root/bin/python3" - "$release" "$KYTYPS5_DATA_ROOT/upscalers/dlls/hlx-dlss" <<'PY'
+import shutil, subprocess, sys
+from pathlib import Path
+rel, dest = Path(sys.argv[1]), Path(sys.argv[2])
+dll = rel / 'HelixSR/helixsr.dll'
+# The ZIP's DLL holds only code; the built one carries the network (several times larger).
+if not dll.is_file() or dll.stat().st_size < 20_000_000: sys.exit(1)
+dest.mkdir(parents=True, exist_ok=True)
+shutil.copy2(dll, dest / 'helixsr.dll')
+shutil.copy2(rel / 'HelixSR/helixsr.ini', dest / 'helixsr.ini')
+PY
+        then echo; echo "HLX DLSS is ready: choose it as the upscaler in a game's settings."
+        else echo; echo "HLX DLSS was not built (see HelixSR's messages above). HLX FSR 4 keeps working."; exit 1
+        fi
+        exit 0 ;;
     --collect-report) shift; exec "$bundle_root/bin/python3" "$bundle_root/collect-report.py" "$@" ;;
     --verify)
         verify_dir="$(mktemp -d "${TMPDIR:-/tmp}/kyty-beta-verify.XXXXXXXX")"

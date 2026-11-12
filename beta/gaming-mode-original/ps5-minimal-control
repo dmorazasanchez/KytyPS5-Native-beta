@@ -9,14 +9,14 @@ import stat
 import sys
 import time
 
-USER = "david"
-UID = 1000
+USER = "@USER@"
+UID = @UID@
 STATE_DIR = Path("/run/ps5-minimal")
 STATE = STATE_DIR / "state.json"
 HISTORY = Path("/var/lib/ps5-minimal/last-session.json")
-READY = Path("/run/user/1000/ps5-minimal-ready")
-UI_HEALTH = Path("/run/user/1000/ps5-minimal-ui.json")
-FRONTEND = Path("/home/david/sharpemu-upscaling-20261108/artifacts/kytyps5/KytyPS5")
+READY = Path("/run/user/@UID@/ps5-minimal-ready")
+UI_HEALTH = Path("/run/user/@UID@/ps5-minimal-ui.json")
+FRONTEND = Path("@KYTYPS5_FRONTEND@")
 TARGET = "ps5-minimal.target"
 SESSION = "ps5-minimal-session.service"
 RUNTIME_UNITS = Path("/run/systemd/system")
@@ -26,7 +26,7 @@ ENV = {"PATH": "/usr/bin:/usr/local/bin", "LANG": "C.UTF-8", "SYSTEMD_COLORS": "
 # Runtime-only masks prevent D-Bus/socket activation from undoing isolation.
 # Existing masks are preserved; only masks created by this transition are removed.
 QUIET_UNITS = (
-    "user@1000.service",
+    "user@@UID@.service",
     "NetworkManager.service", "NetworkManager-dispatcher.service",
     "wpa_supplicant.service", "systemd-resolved.service", "systemd-timesyncd.service",
     "docker.socket", "docker.service", "containerd.service",
@@ -223,7 +223,7 @@ def main():
     if action == "check":
         preflight()
         print("Ready: PS5 Minimal can launch KytyPS5 and return to KDE without a reboot.")
-        print("Entering ends david's open sessions and stops networking/background services.")
+        print("Entering ends @USER@'s open sessions and stops networking/background services.")
         return
     if action == "status":
         print("PS5 Minimal: " + ("active" if active(TARGET) else "inactive"))

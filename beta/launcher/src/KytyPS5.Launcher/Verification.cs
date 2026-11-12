@@ -9,7 +9,11 @@ internal static class Verification
         var root = Path.Combine(Path.GetTempPath(), "kytyps5-verify-" + Guid.NewGuid().ToString("N"));
         var previous = Environment.GetEnvironmentVariable("KYTYPS5_PROFILE_ROOT");
         var previousConfig = Environment.GetEnvironmentVariable("KYTYPS5_CONFIG_ROOT");
+        var previousBundle = Environment.GetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT");
         Directory.CreateDirectory(root);
+        // The generic checks run without the package's per-title defaults; a dedicated check covers them below.
+        var testBundle = Path.Combine(root, "bundle");
+        Environment.SetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT", testBundle);
         Environment.SetEnvironmentVariable("KYTYPS5_PROFILE_ROOT", root);
         Environment.SetEnvironmentVariable("KYTYPS5_CONFIG_ROOT", Path.Combine(root, "config"));
         var passed = 0;
@@ -36,6 +40,14 @@ internal static class Verification
             var loaded = KytyBridge.Load(game.TitleId, eboot);
             Check(loaded["fg_mode"] == "adaptive" && loaded["futureKey"] == "keep" && loaded["upscaler"] == "hlx_fsr4", "Global inheritance, per-game overrides and unknown values");
             Check(KytyBridge.ProfileFile(game.TitleId, eboot) != KytyBridge.ProfileFile(game.TitleId, Path.Combine(root, "other/eboot.bin")), "Separate profiles for separate installs");
+            Directory.CreateDirectory(Path.Combine(testBundle, "title-defaults"));
+            var titleDefaults = Path.Combine(testBundle, "title-defaults", game.TitleId + ".json");
+            File.WriteAllText(titleDefaults, """{"framegen":"fsr3","upscale_preset":"performance","upscaler":"game"}""");
+            var layered = KytyBridge.Load(game.TitleId, eboot);
+            Check(layered["fg_mode"] == "adaptive" && layered["framegen"] == "fsr3" && layered["upscale_preset"] == "quality" &&
+                  layered["upscaler"] == "hlx_fsr4", "Shipped title defaults sit between global settings and the player's own choices");
+            Check(KytyBridge.Load(game.TitleId, null)["framegen"] != "fsr3", "Title defaults never change the global settings page");
+            File.Delete(titleDefaults);
             var command = KytyBridge.Build(eboot, game.TitleId);
             Check(command.Arguments.Contains(eboot) && command.Arguments.Count(a => a == eboot) == 1, "Game path remains a single argument");
             Check(command.Environment["KYTY_NATIVE_GPU_PM4_MODE"] == "upstream" && !command.Environment.ContainsKey("KYTY_NATIVE_GPU_KFD_QUEUES"), "Upstream renderer overrides stay filtered");
@@ -127,6 +139,7 @@ internal static class Verification
         {
             Environment.SetEnvironmentVariable("KYTYPS5_PROFILE_ROOT", previous);
             Environment.SetEnvironmentVariable("KYTYPS5_CONFIG_ROOT", previousConfig);
+            Environment.SetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT", previousBundle);
             Directory.Delete(root, true);
         }
     }

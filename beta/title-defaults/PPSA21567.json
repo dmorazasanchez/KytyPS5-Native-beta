@@ -1,0 +1,5 @@
+{
+  "upscaler": "hlx_fsr4",
+  "upscale_preset": "performance",
+  "framegen": "fsr3"
+}

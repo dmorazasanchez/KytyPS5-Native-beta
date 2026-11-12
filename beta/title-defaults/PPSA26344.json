@@ -1,0 +1,6 @@
+{
+  "upscaler": "hlx_fsr4",
+  "upscale_preset": "quality",
+  "upscale_output": "3840x2160",
+  "framegen": "fsr3"
+}

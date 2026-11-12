@@ -13,9 +13,6 @@
       <action name="Execute" command="/usr/bin/pkexec /usr/local/libexec/ps5-minimal-control desktop" />
     </keybind>
     <keybind key="A-F4"><action name="Close" /></keybind>
-    <keybind key="Print">
-      <action name="Execute" command="/home/david/.local/bin/autosave-screenshot" />
-    </keybind>
   </keyboard>
   <mouse>
     <default />

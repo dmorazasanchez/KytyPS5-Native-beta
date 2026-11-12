@@ -22,7 +22,7 @@ internal sealed partial class ConsoleWindow
     private readonly (string Id, string Title, string Symbol, string Description)[] _groups = [
         ("Display", "Screen & video", "◫", "Resolution, refresh rate and the way your games are presented."),
         ("Upscaling", "Upscaling", "↗", "Choose the reconstruction method and balance image quality with performance."),
-        ("Frame Generation", "Frame generation", "▥", "Smooth presentation with the existing Lossless Scaling profiles."),
+        ("Frame Generation", "Frame generation", "▥", "Lossless Scaling frame generation (needs your own Lossless Scaling from Steam)."),
         ("Audio", "Audio", "♪", "Background music and interface sounds. Changes take effect immediately."),
         ("BC-250 Renderer", "Native renderer", "◇", "Native GPU translation, memory and descriptor options."),
         ("GPU / Synchronization", "GPU & synchronization", "⇄", "Hardware queues, synchronization and version-specific workarounds."),
@@ -84,7 +84,7 @@ internal sealed partial class ConsoleWindow
         if (group.Id == "Upscaling")
             content.Children.Add(Note(UpscalerProfiles.Describe(_settingsGame)));
         if (group.Id == "Frame Generation")
-            content.Children.Add(Note("Lossless Scaling: Fixed uses the verified 2× profile. Adaptive targets 60 FPS. Works with the native upscaling build. Changes apply at the next game launch."));
+            content.Children.Add(Note("Lossless Scaling (MAKO Renderer, bundled): Fixed doubles the frame rate, Adaptive targets 60 FPS. Needs Lossless.dll from your Steam copy of Lossless Scaling, found automatically, or AppRun --setup-lossless. Replaces native frame generation for that launch. Changes apply at the next game launch."));
         foreach (var option in KytyBridge.Options.Where(o => o.Group == group.Id))
         {
             var description = Describe(option.Id);

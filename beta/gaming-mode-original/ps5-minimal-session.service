@@ -11,11 +11,11 @@ OnFailure=ps5-minimal-return.service
 
 [Service]
 Type=simple
-User=david
-Group=david
+User=@USER@
+Group=@GROUP@
 PAMName=ps5-minimal
-WorkingDirectory=/home/david
-Environment=HOME=/home/david USER=david LOGNAME=david PATH=/usr/local/bin:/usr/bin
+WorkingDirectory=@HOME@
+Environment=HOME=@HOME@ USER=@USER@ LOGNAME=@USER@ PATH=/usr/local/bin:/usr/bin
 Environment=XDG_SESSION_CLASS=user-light XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=labwc
 Environment=XDG_SESSION_DESKTOP=ps5-minimal XDG_SEAT=seat0 XDG_VTNR=1
 UnsetEnvironment=DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
