@@ -1,3 +1,6 @@
+MY BC-250 BROKE TODAY DURING TRANSPORTATION AND AS OF TODAY I WON'T BE ABLE TO KEEP WORKING ON THIS PROJECT. I DON'T HAVE A SPARE ONE OR ANY OTHER GAMING DEVICES, SO I WON'T BE ABLE TO WORK ON ANYTHING OR GAME ON ANYTHING.
+SORRY GUYS.
+RIP
 # KytyPS5-Native BC-250 — plug-and-play beta
 
 A ready-to-play package of this community **GitHub fork of [Superkeka's KytyPS5-Native](https://github.com/superkeka/KytyPS5-Native)** (not a separate emulator, not an official Sony project) for the
