@@ -164,6 +164,16 @@ struct Generator::Impl {
 	bool                                     created = false, failed = false;
 	vk::Extent2D                             display {}, max_render {};
 	vk::Format                               format = vk::Format::eUndefined;
+	bool                                     linear_source = false;
+
+	FfxBackbufferTransferFunction TransferFunction() const {
+		return linear_source ? FFX_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+	}
+
+	float MaxLuminance() const {
+		// FidelityFX divides scRGB by (max - min) / 80. A 0..80 range preserves normalized linear SDR.
+		return linear_source ? 80.0f : 1.0f;
+	}
 
 	// The guide buffer (imported DMA-BUF) and Kyty's own images FidelityFX reads.
 	vk::Buffer       buffer       = nullptr;
@@ -578,6 +588,11 @@ struct Generator::Impl {
 
 	// FidelityFX contexts and Kyty's images for this display size, format and render size.
 	bool EnsureResources(const Target& real, vk::Extent2D render) {
+		if (linear_source != real.linear) {
+			linear_source = real.linear;
+			reset = true;
+			fi_reset_pending = true;
+		}
 		if (created && display == real.extent && format == real.format && render.width <= max_render.width &&
 		    render.height <= max_render.height) {
 			return true;
@@ -733,7 +748,7 @@ struct Generator::Impl {
 			        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite, vk::PipelineStageFlagBits2::eTransfer,
 			        vk::AccessFlagBits2::eTransferRead);
 		}
-		const Target source = hudless_valid ? Target {Hudless().image.image, real.format, real.extent, real.usage, real.guides} : real;
+		const Target source = hudless_valid ? Target {Hudless().image.image, real.format, real.extent, real.usage, real.guides, real.linear} : real;
 		// Optical flow's half-size frame (linear filter: a 2x2 box at exactly half).
 		vk::ImageBlit blit {};
 		blit.srcSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
@@ -789,7 +804,7 @@ struct Generator::Impl {
 		Barrier(command, dst.image.image, L::eTransferDstOptimal, result_layout, S::eTransfer, A::eTransferWrite, S::eAllCommands, A::eMemoryRead);
 		dst.layout = result_layout;
 		if (source_layout != L::eTransferSrcOptimal) Barrier(command, src.image, L::eTransferSrcOptimal, source_layout, S::eTransfer, A::eTransferRead, S::eAllCommands, A::eMemoryRead);
-		*result = {dst.image.image, src.format, e, dst.image.usage, src.guides};
+		*result = {dst.image.image, src.format, e, dst.image.usage, src.guides, src.linear};
 		return true;
 	}
 
@@ -804,7 +819,7 @@ struct Generator::Impl {
 	i.working_current.layout = L::eShaderReadOnlyOptimal;
 	Barrier(command, i.working_output.image.image, i.working_output.layout, L::eGeneral,
 	    S::eAllCommands, A::eMemoryRead | A::eMemoryWrite, S::eComputeShader, A::eShaderWrite);
-	const Target cur {i.working_current.image.image, real.format, e, i.working_current.image.usage, real.guides};
+	const Target cur {i.working_current.image.image, real.format, e, i.working_current.image.usage, real.guides, real.linear};
 	const Target out {i.working_output.image.image, output.format, e, i.working_output.image.usage};
 	i.working_output.layout = L::eGeneral;
 	if (!(fixed ? i.Record(command, cur, out) : i.Generate(command, cur, out, phase))) return false;
@@ -864,7 +879,7 @@ struct Generator::Impl {
 			Hudless().layout = L::eTransferSrcOptimal;
 			hudless_valid = true;
 		}
-		const Target source = hudless_valid ? Target {Hudless().image.image, real.format, real.extent, Hudless().image.usage, real.guides} : real;
+		const Target source = hudless_valid ? Target {Hudless().image.image, real.format, real.extent, Hudless().image.usage, real.guides, real.linear} : real;
 		vk::ImageBlit blit {};
 		blit.srcSubresource = vk::ImageSubresourceLayers {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
 		blit.dstSubresource = blit.srcSubresource;
@@ -937,8 +952,8 @@ struct Generator::Impl {
 		flow.opticalFlowVector          = b.fpGetResource(&b, flow_vectors);
 		flow.opticalFlowSCD             = b.fpGetResource(&b, scene_change);
 		flow.reset                      = !cont;
-		flow.backbufferTransferFunction = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-		flow.minMaxLuminance            = {0.0f, 1.0f};
+		flow.backbufferTransferFunction = TransferFunction();
+		flow.minMaxLuminance            = {0.0f, MaxLuminance()};
 		KYTY_FG_CHECK2(ffxOpticalflowContextDispatch(&optical_flow, &flow));
 		if (!cont) fi_reset_pending = true;
 		reset = false;
@@ -970,9 +985,9 @@ struct Generator::Impl {
 		d.viewSpaceToMetersFactor         = 1.0f;
 		d.frameTimeDelta                  = f.frame_ms;
 		d.reset                           = fi_reset_pending;
-		d.backBufferTransferFunction      = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+		d.backBufferTransferFunction      = TransferFunction();
 		d.minMaxLuminance[0]              = 0.0f;
-		d.minMaxLuminance[1]              = 1.0f;
+		d.minMaxLuminance[1]              = MaxLuminance();
 		d.frameID                         = pair_id;
 		d.dilatedDepth                    = b.fpGetResource(&b, dilated_depth);
 		d.dilatedMotionVectors            = b.fpGetResource(&b, dilated_motion);
@@ -1021,8 +1036,8 @@ struct Generator::Impl {
 		flow.opticalFlowVector          = fv;
 		flow.opticalFlowSCD             = fs;
 		flow.reset                      = reset;
-		flow.backbufferTransferFunction = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-		flow.minMaxLuminance            = {0.0f, 1.0f};
+		flow.backbufferTransferFunction = TransferFunction();
+		flow.minMaxLuminance            = {0.0f, MaxLuminance()};
 		KYTY_FG_CHECK(ffxOpticalflowContextDispatch(&optical_flow, &flow));
 
 		FfxFrameInterpolationDispatchDescription d {};
@@ -1047,9 +1062,9 @@ struct Generator::Impl {
 		d.viewSpaceToMetersFactor         = 1.0f;
 		d.frameTimeDelta                  = f.frame_ms;
 		d.reset                           = reset;
-		d.backBufferTransferFunction      = FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+		d.backBufferTransferFunction      = TransferFunction();
 		d.minMaxLuminance[0]              = 0.0f;
-		d.minMaxLuminance[1]              = 1.0f;
+		d.minMaxLuminance[1]              = MaxLuminance();
 		d.frameID                         = frame_id;
 		d.dilatedDepth                    = dd;
 		d.dilatedMotionVectors            = dm;

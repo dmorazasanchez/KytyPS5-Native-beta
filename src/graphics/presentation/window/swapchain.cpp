@@ -47,6 +47,7 @@ struct Presenter::Frame {
 	uint64_t      fg_boundary  = 0; // frame generation: the boundary whose guides are this frame's (SetFrameGuides)
 
 	[[nodiscard]] bool IsHdr() const { return (source_flags & 4u) != 0; }
+	[[nodiscard]] bool IsLinear() const { return (source_flags & 8u) != 0; }
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
 	void CopyFrom(CommandBuffer& command, Image& source);
@@ -1430,8 +1431,8 @@ bool Presenter::Impl::DynamicTick() {
 	const vk::Extent2D extent = B != nullptr ? vk::Extent2D {B->frame->image.extent.width, B->frame->image.extent.height} : vk::Extent2D {};
 	FrameGen::Target   bt {}, at {};
 	if (B != nullptr) {
-		bt = {B->frame->image.image, B->frame->image.format, extent, B->frame->image.usage, B->frame->fg_boundary};
-		at = {A.frame->image.image, A.frame->image.format, extent, A.frame->image.usage, A.frame->fg_boundary};
+		bt = {B->frame->image.image, B->frame->image.format, extent, B->frame->image.usage, B->frame->fg_boundary, B->frame->IsLinear()};
+		at = {A.frame->image.image, A.frame->image.format, extent, A.frame->image.usage, A.frame->fg_boundary, A.frame->IsLinear()};
 	}
 	// The generator follows every pair in order, as soon as its second frame is here, generating or not: optical flow
 	// and FSR's history need each frame (a pair of back-to-back frames, which needs no generated frame, included).
@@ -1573,7 +1574,7 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
 	const vk::Extent2D extent {real.image.extent.width, real.image.extent.height};
 	auto&              command = present_scheduler.BeginCommand();
 	real.Transit(command.Handle(), vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead);
-	const FrameGen::Target source {real.image.image, real.image.format, extent, real.image.usage, real.fg_boundary};
+	const FrameGen::Target source {real.image.image, real.image.format, extent, real.image.usage, real.fg_boundary, real.IsLinear()};
 	Frame*                 generated = nullptr;
 	bool                   shown     = false;
 	bool                   dumping   = false;

@@ -32,6 +32,7 @@ struct Target {
 	vk::Extent2D        extent {};
 	vk::ImageUsageFlags usage {};
 	uint64_t            guides = 0; // a real frame: the boundary whose guides are its own (0: unknown, the newest)
+	bool                linear = false; // normalized linear SDR input to optical flow and interpolation
 };
 
 class Generator final {
