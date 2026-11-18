@@ -177,6 +177,43 @@ internal sealed partial class ConsoleWindow
         Focus(_modalRows.ElementAtOrDefault(1)?.FirstOrDefault() ?? _modalRows[0][0]);
     }
 
+    private async void ShowActivities(Game game)
+    {
+        var loading = BeginModal("Launch activity", "Reading the game's activities…");
+        var pending = _modal;
+        ModalButtons(loading, ("Cancel", CloseModal));
+        Focus(_modalRows[0][0]);
+        string[] activities;
+        try
+        {
+            activities = await KytyBridge.ListActivitiesAsync(game);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            if (_modal == pending && !_closing) Message("Could not read activities", e.Message);
+            return;
+        }
+        if (_modal != pending || _closing) return;
+        if (activities.Length == 0)
+        {
+            Message("Launch activity", "The game lists no activities.");
+            return;
+        }
+
+        var stack = BeginModal("Launch activity", game.Name);
+        ModalButtons(stack, ("Cancel", CloseModal));
+        var entries = new StackPanel { Spacing = 8 };
+        foreach (var id in activities)
+        {
+            var row = Button(id, () => { CloseModal(); Launch(game, id); });
+            row.MinHeight = 55;
+            entries.Children.Add(row);
+            _modalRows.Add([row]);
+        }
+        stack.Children.Add(new ScrollViewer { Content = entries, Height = 535 });
+        Focus(_modalRows[1][0]);
+    }
+
     private void NavigateModal(PadAction action)
     {
         if (action == PadAction.Back) { _modalBack?.Invoke(); return; }

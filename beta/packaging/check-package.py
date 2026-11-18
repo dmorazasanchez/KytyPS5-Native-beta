@@ -64,6 +64,20 @@ with tempfile.TemporaryDirectory(prefix='kyty-beta-package-') as temp:
               [f'Argument: --screen-width\nArgument: {width}', f'Argument: --screen-height\nArgument: {height}'],
               ['KYTY_UPSCALE_OUTPUT=', 'Argument: 3840', 'Argument: 2160'],
               args=['--game', str(temp/'eboot.bin'), '--screen-width', '3840', '--screen-height', '2160'])
+    route({}, 'Native ray tracing and activity', 'kyty_emulator_native',
+          ['Argument: --native-rt', 'Argument: --launch-activity', 'Argument: Mission'], args=['--native-rt', '--launch-activity', 'Mission'])
+    route({'KYTY_NATIVE_GPU_PM4_MODE': 'fast'}, 'Fast with native RT enabled', 'kyty_emulator_fast',
+          absent=['Argument: --native-rt'], args=['--native-rt'])
+    legacy = subprocess.run([str(bundle/'selector-relocated.sh'), '--launch-activity', 'Mission'],
+                            env=dict(env, KYTY_NATIVE_GPU_PM4_MODE='fast'), text=True, capture_output=True)
+    check(legacy.returncode == 78 and 'legacy backend cannot launch activities' in legacy.stderr,
+          'Legacy backends give an actionable error for an explicit activity launch')
+    dlc = temp/'Installed DLC'/'package'/'sce_sys'
+    dlc.mkdir(parents=True)
+    (dlc/'param.json').write_text('{"contentId":"EP0000-PPSA26344_00-GHOST2LEGENDS000"}')
+    route({'KYTY_BC250_TITLE_ID': 'PPSA26344'}, 'Yotei with installed DLC', 'kyty_emulator_native',
+          ['Argument: --addcont-dir', 'Argument: GHOST2LEGENDSUPG'], ['Argument: GHOST2LEGENDS000'],
+          args=['--addcont-dir', str(dlc.parent.parent)])
     # Read-only validation against the developer's current real archive; never execute the game.
     original = Path('/home/david/astro-helix-framegen-20261110/manual/astro-manual.json')
     g = json.loads(original.read_text())['game']['location']

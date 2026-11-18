@@ -34,7 +34,7 @@ internal static class Verification
             Check(Game.Scan(settings).Count == 1, "Nested library scan deduplicates installs");
             settings.ExcludedGames.Add(eboot); Check(Game.Scan(settings).Count == 0, "Excluded games remain excluded");
             Check(KytyBridge.Options.Select(o => o.Id).Distinct().Count() == KytyBridge.Options.Count, "All native setting IDs are unique");
-            Check(KytyBridge.Options.Count == 75 && KytyBridge.Options.Any(o => o.Id == "upscale_preset"), "Complete native settings manifest including upscaling");
+            Check(KytyBridge.Options.Count == 76 && KytyBridge.Options.Any(o => o.Id == "upscale_preset"), "Complete native settings manifest including upscaling");
             KytyBridge.Save(null, null, new Dictionary<string, string> { ["resolution"] = "1920x1080", ["fg_mode"] = "adaptive", ["futureKey"] = "keep" });
             KytyBridge.Save(game.TitleId, eboot, new Dictionary<string, string> { ["KYTY_NATIVE_GPU_PM4_MODE"] = "upstream", ["upscaler"] = "hlx_fsr4", ["upscale_preset"] = "quality", ["upscale_output"] = "3840x2160" });
             var loaded = KytyBridge.Load(game.TitleId, eboot);
@@ -53,9 +53,31 @@ internal static class Verification
             Check(command.Environment["KYTY_NATIVE_GPU_PM4_MODE"] == "upstream" && !command.Environment.ContainsKey("KYTY_NATIVE_GPU_KFD_QUEUES"), "Upstream renderer overrides stay filtered");
             Check(command.Environment["KYTY_SHARP_FG_MODE"] == "adaptive", "Frame generation survives upstream filtering");
             Check(command.Environment["KYTY_NATIVE_UPSCALER_BUILD"] == "1" && command.Environment["KYTY_UPSCALER"] == "hlx_fsr4" && command.Environment["KYTY_UPSCALE_PRESET"] == "quality", "Native upscaling survives upstream filtering");
+            File.WriteAllText(metadata, """{"titleId":"PPSA26344","contentVersion":"02.002.000","localizedParameters":{"en-US":{"titleName":"Test Game"}}}""");
             var width = command.Arguments.IndexOf("--screen-width");
             Check(command.Arguments[width + 1] == "3840" && command.Arguments[width + 3] == "2160", "Upscaling output replaces resolution exactly once");
             Check(!command.Environment.ContainsKey("KYTY_UPSCALE_OUTPUT"), "4K output needs no HLX output override");
+            Check(!game.SupportsActivityLaunch && !command.Arguments.Contains("--native-rt") &&
+                !command.Arguments.Contains("--launch-activity"), "Regular Play leaves optional launch features off");
+            File.WriteAllText(metadata, """{"titleId":"PPSA26344","contentVersion":"02.002.000","gameIntent":{"permittedIntents":[null,{"intentType":"launchActivity"}]}}""");
+            Check(Game.Read(eboot).SupportsActivityLaunch, "Games declaring a launchActivity intent offer the activity picker");
+            var automaticDlc = Path.Combine(folder, "addcont");
+            var configuredDlc = Path.Combine(root, "Selected DLC folder");
+            Directory.CreateDirectory(automaticDlc);
+            Directory.CreateDirectory(configuredDlc);
+            string? Arg(List<string> args, string key)
+            {
+                var index = args.IndexOf(key);
+                return index >= 0 ? args[index + 1] : null;
+            }
+            Check(Arg(KytyBridge.Build(eboot, game.TitleId).Arguments, "--addcont-dir") == automaticDlc,
+                "The default launch route discovers addcont beside an extracted game");
+            KytyBridge.Save(game.TitleId, eboot, new Dictionary<string, string> { ["nativeRt"] = "1", ["addcont"] = configuredDlc });
+            var activity = KytyBridge.Build(eboot, game.TitleId, "Mission 1");
+            Check(activity.Arguments.Contains("--native-rt") && Arg(activity.Arguments, "--launch-activity") == "Mission 1",
+                "A native ray tracing toggle and a one-shot activity reach the runtime");
+            Check(Arg(activity.Arguments, "--addcont-dir") == configuredDlc &&
+                activity.Arguments.Count(a => a == "--addcont-dir") == 1, "An explicit DLC directory overrides automatic discovery");
             KytyBridge.Save(game.TitleId, eboot, new Dictionary<string, string> { ["KYTY_NATIVE_GPU_PM4_MODE"] = "upstream", ["upscaler"] = "hlx_fsr4", ["upscale_preset"] = "ultra_quality", ["upscale_output"] = "2560x1440" });
             var hlx1440 = KytyBridge.Build(eboot, game.TitleId);
             var width1440 = hlx1440.Arguments.IndexOf("--screen-width");

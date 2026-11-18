@@ -1,8 +1,10 @@
+#include "common/additionalContent.h"
 #include "common/archive.h"
 #include "common/common.h"
 #include "common/file.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "common/trophies.h"
 #include "emulator.h"
 #include "graphics/native_gpu/nativeShadow.h"
 #include "graphics/presentation/exitVideo.h"
@@ -27,6 +29,8 @@ static void PrintUsage() {
 	::printf("Options:\n");
 	::printf("  --game <dir|elf|zar>                 Game directory, ELF, or ZArchive to load.\n");
 	::printf("  --game-patch <json>                  ETAHen cheat file.\n");
+	::printf("  --list-addon-labels <dir> <title>    List installed DLC entitlement labels and exit.\n");
+	::printf("  --list-activities <dir|elf|zar>       List activity IDs and exit.\n");
 	::printf("  --zar-cat <zar> <file>               Write a file from a ZArchive to stdout and exit.\n");
 	::printf("  --addcont-dir <dir>                  Add-ons (DLC) folder (default: none).\n");
 	::printf(
@@ -231,6 +235,11 @@ static constexpr Flag FLAGS[] = {
 #endif
 };
 
+static bool IsValidActivityId(std::string_view id) {
+	return !id.empty() && id.size() <= 32 &&
+	       std::ranges::all_of(id, [](char c) { return c >= ' ' && c <= '~'; });
+}
+
 static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_help) {
 	show_help = false;
 
@@ -342,8 +351,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 			options.config.user_name = value;
 		} else if (arg == "--launch-activity") {
-			if (value.empty() || value.size() > 32 ||
-			    !std::ranges::all_of(value, [](char c) { return c >= ' ' && c <= '~'; })) {
+			if (!IsValidActivityId(value)) {
 				::printf("invalid activity ID: must contain 1-32 printable ASCII characters\n");
 				return false;
 			}
@@ -482,12 +490,35 @@ static int ZarCat(const char* archive, const char* member) {
 	}
 }
 
+static int ListActivities(const char* game) {
+	const auto path = Common::PathFromUtf8(Common::FixFilenameSlash(game));
+	auto root       = path;
+	if (!File::IsDirectoryExisting(path)) {
+		root = Common::IsSupportedArchive(path) ? Common::MakeArchivePath(path) : path.parent_path();
+	}
+	for (const auto& id: Common::Trophies::LoadActivityIds(root / Common::Trophies::UdsPackagePath(0))) {
+		if (IsValidActivityId(id)) {
+			std::puts(id.c_str());
+		}
+	}
+	return 0;
+}
+
 static int Main(int argc, char* argv[]) {
 	if (argc == 3 && std::string_view(argv[1]) == "--play-video") {
 		return Libs::Graphics::PlayExitVideo(argv[2]);
 	}
 	if (argc == 4 && std::string_view(argv[1]) == "--zar-cat") {
 		return ZarCat(argv[2], argv[3]);
+	}
+	if (argc == 3 && std::string_view(argv[1]) == "--list-activities") {
+		return ListActivities(argv[2]);
+	}
+	if (argc == 4 && std::string_view(argv[1]) == "--list-addon-labels") {
+		for (const auto& addon: Common::FindAddContent(Common::PathFromUtf8(argv[2]), argv[3])) {
+			std::puts(addon.entitlement_label.c_str());
+		}
+		return 0;
 	}
 	Libs::Graphics::NativeGpu::ApplyNativeDefaults();
 	InitializeThreads();

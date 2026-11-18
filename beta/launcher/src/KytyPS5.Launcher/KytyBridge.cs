@@ -1,5 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project; BC-250 frontend adaptation.
 // SPDX-License-Identifier: GPL-2.0-or-later
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -37,6 +38,7 @@ internal static class KytyBridge
         new("rawsync", "Synchronize raw image buffers", "Display", "0", ["0","1"], Boolean:true),
         new("tessellation", "Enable tessellation", "Display", "0", ["0","1"], Boolean:true),
 
+        new("nativeRt", "Native ray tracing", "BC-250 Renderer", "0", ["0","1"], Boolean:true),
         new("KYTY_NATIVE_GPU_PM4_MODE", "GPU command translation", "BC-250 Renderer", "upstream", ["fast","upstream"]),
         new("KYTY_NATIVE_GPU_UNRESTRICTED_MEMORY", "GPU memory budget (1=unrestricted)", "BC-250 Renderer", "1", ["1","0"]),
         new("KYTY_NATIVE_GPU_RESIDENCY", "GPU memory residency", "BC-250 Renderer", "partial", ["partial","full"]),
@@ -227,6 +229,7 @@ internal static class KytyBridge
             Bool("readback_tiled_images", "readbackTiled");
             Bool("sync_raw_image_buffers", "rawsync");
             Bool("tessellation_enabled", "tessellation");
+            Bool("native_rt", "nativeRt");
             Bool("amd_cpu_enabled", "amd");
             Set("console_language", "language");
             Set("user_name", "user");
@@ -310,7 +313,22 @@ internal static class KytyBridge
 
     public sealed record Command(string Exe, List<string> Arguments, IReadOnlyDictionary<string, string?> Environment);
 
-    public static Command Build(string ebootPath, string? titleId)
+    public static async Task<string[]> ListActivitiesAsync(Game game)
+    {
+        var bundle = Environment.GetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT");
+        var backend = bundle is null ? EmulatorPath : Path.Combine(bundle, "emulator", "kyty_emulator_native");
+        var info = new ProcessStartInfo(backend) { UseShellExecute = false, RedirectStandardOutput = true };
+        info.ArgumentList.Add("--list-activities");
+        info.ArgumentList.Add(GameArchive.LaunchPath(game.Path));
+        using var process = Process.Start(info) ?? throw new IOException("Could not read the game's activities.");
+        var output = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+            throw new IOException("The native emulator could not read the game's activities.");
+        return output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    public static Command Build(string ebootPath, string? titleId, string? activity = null)
     {
         var values = Load(titleId, ebootPath);
         string Value(string id) => values.GetValueOrDefault(id) ?? "";
@@ -364,6 +382,8 @@ internal static class KytyBridge
         }
         if (Value("fullscreen") == "1") args.Add("--fullscreen");
         if (Value("hdr") == "1") args.Add("--hdr");
+        if (Value("nativeRt") == "1") args.Add("--native-rt");
+        if (activity is not null) args.AddRange(["--launch-activity", activity]);
         if (Value("overlay") == "1") args.Add("--perf-overlay");
         if (Value("nosplash") == "1") args.AddRange(["--no-splash", "--skip-notice-screen"]);
         if (Value("amd") == "1") args.Add("--amd-cpu");
@@ -393,7 +413,6 @@ internal static class KytyBridge
         }
         if (File.Exists(Value("patch")) && PatchMatchesGame(Value("patch"), ebootPath, titleId))
             args.AddRange(["--game-patch", Value("patch")]);
-        if (!cleanUpstream && Directory.Exists(Value("addcont"))) args.AddRange(["--addcont-dir", Value("addcont")]);
 
         if (!string.IsNullOrWhiteSpace(titleId)) env["KYTY_BC250_TITLE_ID"] = titleId;
         if (Value("KYTY_LOD_STATS_MODE") == "banks") env["KYTY_NATIVE_GPU_LOD_STATS"] = "0";
@@ -408,8 +427,16 @@ internal static class KytyBridge
             env.Remove("KYTY_DEMONS_SCREAM_ASSERT_RECOVERY");
         }
         // A line = one argument, preserving paths with whitespace without shell evaluation.
-        if (!cleanUpstream && values.TryGetValue("extraArguments", out var extra))
-            args.AddRange(extra.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        var extraArgs = cleanUpstream ? [] : Value("extraArguments").Split('\n',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!extraArgs.Contains("--addcont-dir"))
+        {
+            var dlc = Value("addcont");
+            if (dlc.Length == 0 && !GameArchive.IsArchive(ebootPath))
+                dlc = Path.Combine(GameArchive.MetadataFolder(ebootPath), "addcont");
+            if (Directory.Exists(dlc)) args.AddRange(["--addcont-dir", Path.GetFullPath(dlc)]);
+        }
+        args.AddRange(extraArgs);
         if (!cleanUpstream && values.TryGetValue("extraEnvironment", out var extraEnv))
         {
             foreach (var line in extraEnv.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

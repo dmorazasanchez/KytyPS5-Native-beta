@@ -129,24 +129,25 @@ if [[ "$fg_mode" != off ]]; then
     printf '[KytyPS5 LSFG diagnostic] mode=%s profile=%s config=%s layer_dir=%s\n' \
         "$fg_mode" "${MAKO_PROFILE:-}" "${MAKO_CONFIG:-}" "${VK_ADD_IMPLICIT_LAYER_PATH:-default}" >&2
 fi
-# User-requested Yotei content experiment: register all 15 catalogue labels.
-# These are license-only entries; no extra content directories are implied.
+# Yotei also needs license labels for add-ons it cannot mount. Keep the mounted data
+# for any labels the selected DLC directory already supplies.
 if [[ "$mode" == "upstream" && "$content_title" == "PPSA26344" ]]; then
-    set -- "$@" --addcont GHOST2APP0000000
-    set -- "$@" --addcont GHOST2BASE000000
-    set -- "$@" --addcont GHOST2BASEME0000
-    set -- "$@" --addcont GHOST2CEUPGRADE0
-    set -- "$@" --addcont GHOST2COLLECTORS
-    set -- "$@" --addcont GHOST2DDE0000000
-    set -- "$@" --addcont GHOST2DISC000000
-    set -- "$@" --addcont GHOST2DLC0000000
-    set -- "$@" --addcont GHOST2DLCPREPURC
-    set -- "$@" --addcont GHOST2DLCREVIEW0
-    set -- "$@" --addcont GHOST2LEGENDS000
-    set -- "$@" --addcont GHOST2LEGENDSUPG
-    set -- "$@" --addcont GHOST2PREORDER00
-    set -- "$@" --addcont GHOST2SAPPORO000
-    set -- "$@" --addcont GHOST2SHIP000000
+    dlc_dir= prev=
+    for arg in "$@"; do
+        if [[ "$prev" == --addcont-dir ]]; then dlc_dir="$arg"; break; fi
+        prev="$arg"
+    done
+    installed_labels=
+    if [[ -d "$dlc_dir" ]]; then
+        installed_labels="$("$upstream" --list-addon-labels "$dlc_dir" "$content_title")"
+    fi
+    for label in GHOST2APP0000000 GHOST2BASE000000 GHOST2BASEME0000 GHOST2CEUPGRADE0 \
+        GHOST2COLLECTORS GHOST2DDE0000000 GHOST2DISC000000 GHOST2DLC0000000 GHOST2DLCPREPURC \
+        GHOST2DLCREVIEW0 GHOST2LEGENDS000 GHOST2LEGENDSUPG GHOST2PREORDER00 GHOST2SAPPORO000 GHOST2SHIP000000; do
+        if ! grep -Fxq "$label" <<< "$installed_labels"; then
+            set -- "$@" --addcont "$label"
+        fi
+    done
 fi
 
 # Native upscaling for any game whose profile has a supported route: kyty-upscaler-scan identifies the game's
@@ -380,6 +381,25 @@ if [[ "${KYTY_UPSCALER:-game}" == hlx_* || "${KYTY_UPSCALER:-game}" == auto ]] &
     echo "[Kyty launcher] HLX FSR 4 is missing from $beta_data/upscalers/dlls; using the game's own upscaler for this launch." >&2
     export KYTY_UPSCALER=game
 fi
+# Keep the legacy backends launchable when a profile enables the newer ray-tracing option.
+# An activity is an explicit launch request, so report when the chosen backend cannot open it.
+case "${selected##*/}" in
+    kyty_emulator_astro|kyty_emulator_audio|kyty_emulator_guard|kyty_emulator_fast|kyty_emulator_fast_guard)
+        args=()
+        for arg in "$@"; do
+            case "$arg" in
+                --native-rt)
+                    echo '[Kyty launcher] The selected legacy backend does not support native ray tracing.' >&2 ;;
+                --launch-activity)
+                    echo '[Kyty launcher] The selected legacy backend cannot launch activities. Use a current native or upscaler backend.' >&2
+                    exit 78 ;;
+                *) args+=("$arg") ;;
+            esac
+        done
+        set -- "${args[@]}"
+        ;;
+esac
+
 # Log the final choice after every backend override. The frontend captures stderr
 # in the game's log, so a crash cannot leave us guessing which executable ran.
 # These are requested settings; the backend reports what actually initializes.

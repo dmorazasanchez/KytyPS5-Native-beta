@@ -59,6 +59,7 @@ internal sealed class Preferences
 
 internal sealed record Game(string Name, string TitleId, string Version, string Path, string? Icon, string? Background)
 {
+    public bool SupportsActivityLaunch { get; init; }
     public string Folder => GameArchive.MetadataFolder(Path);
     public static Game Read(string path)
     {
@@ -68,11 +69,16 @@ internal sealed record Game(string Name, string TitleId, string Version, string 
         var sys = System.IO.Path.Combine(folder, "sce_sys");
         var name = GameArchive.IsArchive(path) ? System.IO.Path.GetFileNameWithoutExtension(path) : System.IO.Path.GetFileName(folder);
         string id = "", version = "";
+        var supportsActivity = false;
         try
         {
             var json = JsonNode.Parse(File.ReadAllText(System.IO.Path.Combine(sys, "param.json")));
             id = json?["titleId"]?.GetValue<string>() ?? "";
             version = json?["contentVersion"]?.GetValue<string>() ?? "";
+            supportsActivity = json?["gameIntent"] is JsonObject intent &&
+                intent["permittedIntents"] is JsonArray intents && intents.OfType<JsonObject>().Any(entry =>
+                    entry["intentType"] is JsonValue value && value.TryGetValue<string>(out var type) &&
+                    type == "launchActivity");
             var localized = json?["localizedParameters"];
             name = localized?["en-US"]?["titleName"]?.GetValue<string>() ??
                 localized?[json?["defaultLanguage"]?.GetValue<string>() ?? "en-US"]?["titleName"]?.GetValue<string>() ?? name;
@@ -80,7 +86,8 @@ internal sealed record Game(string Name, string TitleId, string Version, string 
         catch (Exception e) when (e is IOException or JsonException or InvalidOperationException) { }
         string? Art(params string[] candidates) => candidates.Select(x => System.IO.Path.Combine(sys, x)).FirstOrDefault(File.Exists);
         return new Game(name, id, version, System.IO.Path.GetFullPath(path),
-            Art("icon0.png", "icon0.dds", "icon0.jpg"), Art("pic1.png", "pic0.png", "pic1.jpg", "pic0.jpg"));
+            Art("icon0.png", "icon0.dds", "icon0.jpg"), Art("pic1.png", "pic0.png", "pic1.jpg", "pic0.jpg"))
+            { SupportsActivityLaunch = supportsActivity };
     }
 
     public static List<Game> Scan(Preferences settings)

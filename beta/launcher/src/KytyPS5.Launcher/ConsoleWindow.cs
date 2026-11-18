@@ -26,6 +26,7 @@ internal sealed partial class ConsoleWindow : Window
     private readonly List<Button> _tabs = [];
     private readonly List<Button> _tiles = [];
     private readonly List<Button> _actions = [];
+    private int _homePrimaryActionCount;
     private readonly Dictionary<string, Bitmap> _icons = [];
     private Bitmap? _backgroundBitmap;
     private List<Game> _games = [];
@@ -203,6 +204,14 @@ internal sealed partial class ConsoleWindow : Window
         var options = Button("Game settings", () => ShowSettings(Selected), "nav");
         options.Width = 240; options.Height = 66; options.IsEnabled = Selected is not null;
         buttons.Children.Add(play); buttons.Children.Add(options); _actions.Add(play); _actions.Add(options);
+        if (Selected is { SupportsActivityLaunch: true } activityGame)
+        {
+            var activity = Button("Launch activity…", () => ShowActivities(activityGame), "nav");
+            activity.Width = 240; activity.Height = 66;
+            activity.IsEnabled = _gameProcess is null && !_launching;
+            buttons.Children.Add(activity); _actions.Add(activity);
+        }
+        _homePrimaryActionCount = _actions.Count;
         hero.Children.Add(buttons); Grid.SetRow(hero, 1); page.Children.Add(hero);
         var quick = new Grid { ColumnDefinitions = new("*,*,*"), ColumnSpacing = 18, Margin = new(0, 24, 0, 8) };
         var values = Selected is { } game ? KytyBridge.Load(game.TitleId, game.Path) : KytyBridge.Load(null, null);
@@ -371,18 +380,23 @@ internal sealed partial class ConsoleWindow : Window
         }
         var item = _actions.IndexOf(focus!);
         if (action == PadAction.Accept) focus?.RaiseEvent(new RoutedEventArgs(Avalonia.Controls.Button.ClickEvent));
-        else if (action == PadAction.Up) Focus(item >= 2 ? _actions[0] : _tiles.ElementAtOrDefault(_selected) ?? _tabs[0]);
-        else if (action == PadAction.Down) Focus(_actions.ElementAtOrDefault(_page == "home" ? 2 : 0));
+        else if (action == PadAction.Up) Focus(_page == "home" && item >= _homePrimaryActionCount ? _actions[0] : _tiles.ElementAtOrDefault(_selected) ?? _tabs[0]);
+        else if (action == PadAction.Down) Focus(_actions.ElementAtOrDefault(_page == "home" ? _homePrimaryActionCount : 0));
         else if (action is PadAction.Left or PadAction.Right && _actions.Count > 0) Focus(_actions[Math.Clamp(item + (action == PadAction.Right ? 1 : -1), 0, _actions.Count - 1)]);
     }
 
-    private async void Launch()
+    private void Launch()
     {
-        if (Selected is not { } game || _gameProcess is not null || _launching) return;
+        if (Selected is { } game) Launch(game);
+    }
+
+    private async void Launch(Game game, string? activity = null)
+    {
+        if (_gameProcess is not null || _launching) return;
         _launching = true;
         try
         {
-            var command = KytyBridge.Build(game.Path, game.TitleId);
+            var command = KytyBridge.Build(game.Path, game.TitleId, activity);
             _audio.Sounds.Request(UiSound.Launch);
             await _audio.SuspendForGameAsync();
             if (_closing) return;
@@ -417,7 +431,9 @@ internal sealed partial class ConsoleWindow : Window
             _inputTimer.Interval = TimeSpan.FromMilliseconds(33);
             if (_closing) return;
             _audio.Resume(); OpenPage("home"); Activate(); PlayMusic();
-            if (code != 0) Message("Game session ended", $"{game.Name} exited with code {code}.\nSession log: {_logFile}");
+            if (activity is not null && code == 78)
+                Message("Could not launch activity", "The selected legacy backend cannot launch activities. Use a current native or upscaler backend.");
+            else if (code != 0) Message("Game session ended", $"{game.Name} exited with code {code}.\nSession log: {_logFile}");
         }
         catch (Exception e)
         {
