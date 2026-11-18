@@ -42,6 +42,10 @@ public:
 	Generator(const Generator&)            = delete;
 	Generator& operator=(const Generator&) = delete;
 
+	// The colour encoding of the frames that follow: PQ (BT.2100 HDR) or SDR. FSR reads them with that transfer
+	// function; a change re-creates its contexts (and so resets the history) on the next frame.
+	void SetHdr(bool pq);
+
 	// Step 1, with `real` in TRANSFER_SRC_OPTIMAL: takes this flip's guides and makes the half-size copy for
 	// optical flow. False when there is nothing to interpolate with (no guides, unsupported frame): present
 	// `real` alone. Every true must be followed by Record in the same command buffer.

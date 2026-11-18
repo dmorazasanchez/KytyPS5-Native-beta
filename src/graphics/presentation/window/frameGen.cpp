@@ -71,6 +71,10 @@ bool Supported(vk::Format f) {
 	return f == vk::Format::eA2B10G10R10UnormPack32 || f == vk::Format::eR8G8B8A8Unorm || f == vk::Format::eB8G8R8A8Unorm;
 }
 
+// PQ frames: FSR works on linear light scaled to this peak (it converts PQ to linear, interpolates and back with
+// the same factor, so the value sets only the range its luminance-based steps see). A typical HDR TV's peak.
+constexpr float kHdrPeakNits = 1000.0f;
+
 const auto g_fg_process_start = std::chrono::steady_clock::now(); // (KYTY_FRAMEGEN_DUMP_AT times count from here)
 
 struct AlignedFree {
@@ -165,12 +169,16 @@ struct Generator::Impl {
 	vk::Extent2D                             display {}, max_render {};
 	vk::Format                               format = vk::Format::eUndefined;
 	bool                                     linear_source = false;
+	bool                                     hdr_wanted    = false; // SetHdr selects the next input's encoding.
+	bool                                     hdr           = false; // Encoding of the current contexts.
 
 	FfxBackbufferTransferFunction TransferFunction() const {
+		if (hdr) return FFX_BACKBUFFER_TRANSFER_FUNCTION_PQ;
 		return linear_source ? FFX_BACKBUFFER_TRANSFER_FUNCTION_SCRGB : FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
 	}
 
 	float MaxLuminance() const {
+		if (hdr) return kHdrPeakNits;
 		// FidelityFX divides scRGB by (max - min) / 80. A 0..80 range preserves normalized linear SDR.
 		return linear_source ? 80.0f : 1.0f;
 	}
@@ -593,8 +601,8 @@ struct Generator::Impl {
 			reset = true;
 			fi_reset_pending = true;
 		}
-		if (created && display == real.extent && format == real.format && render.width <= max_render.width &&
-		    render.height <= max_render.height) {
+		if (created && display == real.extent && format == real.format && hdr == hdr_wanted &&
+		    render.width <= max_render.width && render.height <= max_render.height) {
 			return true;
 		}
 		const vk::Extent2D cap = render;
@@ -633,7 +641,8 @@ struct Generator::Impl {
 		// The title's depth convention, from its profile (Yotei: inverted, finite; Demon's Souls: inverted, infinite).
 		const uint32_t depth_flags = NativeUpscaler::FgDepthFlags();
 		description.flags = ((depth_flags & 1u) != 0 ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INVERTED : 0u) |
-		                    ((depth_flags & 2u) != 0 ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INFINITE : 0u);
+		                    ((depth_flags & 2u) != 0 ? FFX_FRAMEINTERPOLATION_ENABLE_DEPTH_INFINITE : 0u) |
+		                    (hdr_wanted ? FFX_FRAMEINTERPOLATION_ENABLE_HDR_COLOR_INPUT : 0u);
 		description.maxRenderSize                     = {cap.width, cap.height};
 		description.displaySize                       = {real.extent.width, real.extent.height};
 		description.backBufferFormat                  = ffxGetSurfaceFormatVK(static_cast<VkFormat>(real.format));
@@ -665,6 +674,7 @@ struct Generator::Impl {
 		created    = true;
 		display    = real.extent;
 		format     = real.format;
+		hdr        = hdr_wanted;
 		max_render = cap;
 		reset      = true;
 		Report("FSR 3.1 frame interpolation %ux%u, depth and motion up to %ux%u, optical flow %ux%u (FidelityFX SDK 1.1.4)\n",
@@ -1336,6 +1346,10 @@ bool Generator::Generate(vk::CommandBuffer command, const Target& real, const Ta
 }
 Generator::~Generator() = default;
 
+void Generator::SetHdr(bool pq) {
+	m_impl->hdr_wanted = pq;
+}
+
 bool Generator::Begin(vk::CommandBuffer command, const Target& real) {
 	if (!m_impl->UsesWorking(real)) return m_impl->Begin(command, real);
 	Target small {};
@@ -1386,6 +1400,7 @@ bool Active() {
 struct Generator::Impl {};
 Generator::Generator(GraphicContext&) {}
 Generator::~Generator() = default;
+void Generator::SetHdr(bool) {}
 bool Generator::Begin(vk::CommandBuffer, const Target&) {
 	return false;
 }
