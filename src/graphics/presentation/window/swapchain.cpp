@@ -42,10 +42,11 @@ struct Presenter::Frame {
 	uint64_t      present_tick = 0;
 	uint64_t      last_acquire = 0; // the pool's acquisition count when this frame was last handed out
 	bool          busy         = false;
-	bool          hdr          = false;
+	uint32_t      source_flags = 0;
 	bool          blank        = false;
 	uint64_t      fg_boundary  = 0; // frame generation: the boundary whose guides are this frame's (SetFrameGuides)
 
+	[[nodiscard]] bool IsHdr() const { return (source_flags & 4u) != 0; }
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
 	void CopyFrom(CommandBuffer& command, Image& source);
@@ -533,6 +534,10 @@ void Swapchain::Create() {
 		EXIT("swapchain format cannot be a blit destination: format=%d\n",
 		     static_cast<int>(m_format));
 	}
+	// A minimized window's surface has no area; presentation creates the swapchain once it has one.
+	if (m_extent.width == 0 || m_extent.height == 0) {
+		return;
+	}
 
 	vk::SwapchainCreateInfoKHR create_info {};
 	create_info.sType            = vk::StructureType::eSwapchainCreateInfoKHR;
@@ -719,7 +724,7 @@ void Swapchain::Recreate(bool surface_lost) {
 
 bool Swapchain::NeedsResize() const {
 	Common::LockGuard lock(m_window.mutex);
-	return m_window_extent.width != m_window.graphic_ctx.screen_width ||
+	return m_handle == nullptr || m_window_extent.width != m_window.graphic_ctx.screen_width ||
 	       m_window_extent.height != m_window.graphic_ctx.screen_height;
 }
 
@@ -876,9 +881,7 @@ void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& lay
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_overlay_layout, 0, 1, &write);
 	// The main bus ignores alpha.
 	const uint32_t flags = (layer.premultiplied_alpha ? 1u : 0u) | (m_hdr_active ? 2u : 0u) |
-	                       (frame.hdr ? 4u : 0u) |
-	                       (frame.image.format == vk::Format::eR16G16B16A16Sfloat ? 8u : 0u) |
-	                       (layer.bus == 0 ? 16u : 0u);
+	                       frame.source_flags | (layer.bus == 0 ? 16u : 0u);
 	command.pushConstants(m_overlay_layout, vk::ShaderStageFlagBits::eFragment, 0,
 	                      sizeof(flags), &flags);
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics, m_overlay_pipeline);
@@ -908,7 +911,8 @@ void Swapchain::DrawLayer(vk::CommandBuffer command, const Presenter::Layer& lay
 void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
                                       const Presenter::Layer& overlay, bool draw_system_overlay) {
 	auto       vk_command      = command.Handle();
-	const bool convert_source  = source != nullptr && source->hdr && !m_hdr_active;
+	const bool convert_source =
+	    source != nullptr && VideoOutSourceNeedsDraw(source->source_flags, m_hdr_active);
 	const bool blit_source     = source != nullptr && !convert_source;
 	const bool draw_overlay    = overlay.frame != nullptr;
 	const bool draw_attachment = convert_source || draw_overlay || draw_system_overlay;
@@ -1085,8 +1089,8 @@ Presenter::Presenter(WindowContext& window): m_impl(std::make_unique<Impl>(windo
 
 Presenter::~Presenter() = default;
 
-Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info, bool hdr,
-                                          bool headset) {
+Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo& info,
+                                          uint64_t video_out_format, bool headset) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(buffer.IsInvalid());
 	auto frame_format = info.pixel_format;
@@ -1096,14 +1100,14 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		case vk::Format::eA2R10G10B10UnormPack32:
 			// FSR's Vulkan backend accepts A2B10G10R10. Convert the displayed channels on the GPU rather than
 			// reinterpreting the bits (which swaps red/blue), so Astro can use the same interpolation path.
-			if (FrameGen::Enabled() && !hdr && !headset) frame_format = vk::Format::eA2B10G10R10UnormPack32;
+			if (FrameGen::Enabled() && !IsHdrVideoOutPixelFormat(video_out_format) && !headset) frame_format = vk::Format::eA2B10G10R10UnormPack32;
 			break;
 		default: break;
 	}
 	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
-	frame->hdr         = hdr;
-	frame->blank       = false;
-	frame->fg_boundary = 0;
+	frame->source_flags = VideoOutSourceFlags(video_out_format);
+	frame->blank        = false;
+	frame->fg_boundary  = 0;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
 	auto&             image = m_impl->ResolveSurface(info);
 	if (image.backing.format == vk::Format::eUndefined) {
@@ -1126,9 +1130,9 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 	KYTY_PROFILER_FUNCTION();
 	auto              format = m_impl->frames.GetFormat();
 	auto*             frame  = m_impl->frames.Acquire({width, height}, format);
-	frame->hdr         = false;
-	frame->blank       = true;
-	frame->fg_boundary = 0;
+	frame->source_flags = 0;
+	frame->blank        = true;
+	frame->fg_boundary  = 0;
 	frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
 	vk::ClearColorValue clear {};
 	clear.float32[3] = opaque ? 1.0f : 0.0f;
@@ -1240,7 +1244,7 @@ void Presenter::Impl::Present() {
 	// Keep black/blank flips in the current color space; only real main-bus frames switch it.
 	const auto* main_frame = layers[0].frame;
 	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
-	                         swapchain.SetHdr(main_frame->hdr);
+	                         swapchain.SetHdr(main_frame->IsHdr());
 	if (!swapchain.Exists()) {
 		// Released while direct flips ran; this present (menu, toast, fallback flip) needs it again.
 		swapchain.Create();
@@ -1252,6 +1256,9 @@ void Presenter::Impl::Present() {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
+		if (swapchain.ImageCount() == 0) {
+			return;
+		}
 		auto status = [&] {
 			ScopedTimer acquire_time(Counter::PresentAcquireNs);
 			return swapchain.AcquireNextImage(present_scheduler);
@@ -1358,7 +1365,7 @@ bool Presenter::Impl::EnqueueDynamic(Frame& real) {
 		}
 		return false;
 	}
-	if (real.hdr || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
+	if (real.IsHdr() || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
 		return false;
 	}
 	if (!fg_was_dynamic) {
@@ -1419,7 +1426,7 @@ bool Presenter::Impl::DynamicTick() {
 	FgReal*        B       = fg_reals.size() >= 2 ? &fg_reals[1] : nullptr;
 	CommandBuffer* command = nullptr;
 	const bool     usable  = fg != nullptr && FrameGen::Active() && B != nullptr && A.frame->image.extent == B->frame->image.extent &&
-	                    A.frame->image.format == B->frame->image.format;
+	                    A.frame->image.format == B->frame->image.format && A.frame->source_flags == B->frame->source_flags;
 	const vk::Extent2D extent = B != nullptr ? vk::Extent2D {B->frame->image.extent.width, B->frame->image.extent.height} : vk::Extent2D {};
 	FrameGen::Target   bt {}, at {};
 	if (B != nullptr) {
@@ -1458,8 +1465,9 @@ bool Presenter::Impl::DynamicTick() {
 	if (usable && ready && wanted) {
 		if (command == nullptr) command = &present_scheduler.BeginCommand();
 		generated        = frames.Acquire(extent, B->frame->image.format);
-		generated->hdr   = false;
-		generated->blank = false;
+		generated->source_flags = B->frame->source_flags;
+		generated->blank        = false;
+		generated->fg_boundary  = 0;
 		generated->Configure(window.graphic_ctx, extent, B->frame->image.format);
 		B->frame->Transit(command->Handle(), vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
 		generated->Transit(command->Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
@@ -1554,11 +1562,11 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
 	static uint64_t fg_inputs = 0;
 	if (++fg_inputs <= 3 || fg_inputs % 600 == 0) {
 		std::fprintf(stderr, "[frame generation] input %llu: format=%u hdr=%u blank=%u usage=0x%x guides=%llu\n",
-		             static_cast<unsigned long long>(fg_inputs), static_cast<unsigned>(real.image.format), real.hdr ? 1u : 0u,
+		             static_cast<unsigned long long>(fg_inputs), static_cast<unsigned>(real.image.format), real.IsHdr() ? 1u : 0u,
 		             real.blank ? 1u : 0u, static_cast<unsigned>(static_cast<VkImageUsageFlags>(real.image.usage)),
 		             static_cast<unsigned long long>(real.fg_boundary));
 	}
-	if (real.hdr || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
+	if (real.IsHdr() || real.blank || !(real.image.usage & vk::ImageUsageFlagBits::eSampled)) {
 		fg->Reset();
 		return false;
 	}
@@ -1571,8 +1579,9 @@ bool Presenter::Impl::TryFrameGen(Frame& real) {
 	bool                   dumping   = false;
 	if (fg->Begin(command.Handle(), source)) {
 		generated        = frames.Acquire(extent, real.image.format);
-		generated->hdr   = false;
-		generated->blank = false;
+		generated->source_flags = real.source_flags;
+		generated->blank        = false;
+		generated->fg_boundary  = 0;
 		generated->Configure(window.graphic_ctx, extent, real.image.format);
 		real.Transit(command.Handle(), vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead);
 		generated->Transit(command.Handle(), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);

@@ -1228,7 +1228,7 @@ bool VideoOutDriver::Impl::OverlayFrameReady() {
 	uint64_t            serial  = 0;
 	bool                direct  = false;
 	Graphics::ImageInfo info;
-	bool                hdr = false;
+	uint64_t            video_out_format = 0;
 	bool                ask = false;
 	{
 		Common::LockGuard lock(main.mutex);
@@ -1244,7 +1244,7 @@ bool VideoOutDriver::Impl::OverlayFrameReady() {
 			    main.groups[main.buffers[index].group_index].occupied) {
 				const auto& group = main.groups[main.buffers[index].group_index];
 				info              = group.ImageInfo(main.buffers[index]);
-				hdr               = Graphics::IsHdrVideoOutPixelFormat(group.attribute.pixel_format);
+				video_out_format  = group.attribute.pixel_format;
 				ask               = true;
 			}
 		}
@@ -1263,13 +1263,13 @@ bool VideoOutDriver::Impl::OverlayFrameReady() {
 	if (ask) {
 		auto&      presenter = m_presenter;
 		const bool queued    = m_renderer.GetGpu().SubmitHostTask(
-		    [&presenter, info, hdr](Graphics::CommandBuffer& command) -> void* {
+		    [&presenter, info, video_out_format](Graphics::CommandBuffer& command) -> void* {
 			    // As FlipQueue::Prepare: in primary mode Kyty never rendered the buffer.
 			    if (Graphics::NativeGpu::ShadowShowsNativeFrames()) {
 				    (void)presenter.Renderer().InvalidateMemory(info.data.address, info.data.size,
 				                                                Graphics::NativeGpu::PrimaryRendering());
 			    }
-			    return &presenter.PrepareFrame(command, info, hdr, false);
+			    return &presenter.PrepareFrame(command, info, video_out_format, false);
 		    },
 		    [&presenter, slot = m_overlay_copy, serial](void* frame) {
 			    Common::LockGuard lock(slot->mutex);
@@ -1466,7 +1466,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	Graphics::ImageInfo source_info;
 	bool                current = false;
 	bool                premultiplied_alpha = false;
-	bool                hdr                 = false;
+	uint64_t            video_out_format    = 0;
 	bool                headset             = false;
 	{
 		Common::LockGuard lock(cfg->mutex);
@@ -1482,7 +1482,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 			}
 			const auto& group   = cfg->groups[surface.group_index];
 			source_info         = group.ImageInfo(surface);
-			hdr                 = Graphics::IsHdrVideoOutPixelFormat(group.attribute.pixel_format);
+			video_out_format    = group.attribute.pixel_format;
 			premultiplied_alpha = (group.attribute.option &
 			                       VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED) != 0;
 		}
@@ -1525,7 +1525,7 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 			                                              Graphics::NativeGpu::PrimaryRendering());
 		}
 		const auto prepare_t0 = std::chrono::steady_clock::now();
-		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr, headset);
+		frame = &m_presenter.PrepareFrame(buffer, source_info, video_out_format, headset);
 		m_presenter.SetFrameGuides(*frame, NativeUpscaler::FgFlipGuides(source_info.data.address, index));
 		Graphics::NativeGpu::ShadowFlipStats(
 		    std::chrono::duration<double>(std::chrono::steady_clock::now() - prepare_t0).count());
@@ -2995,6 +2995,16 @@ bool VideoOutDriver::IsBufferLabel(uint64_t addr, int* handle, int* index) {
 	return true;
 }
 
+uint64_t* VideoOutGetBufferLabels(int handle, int* bus) {
+	auto* ctx = DriverState().Get(handle);
+	if (ctx == nullptr) {
+		return nullptr;
+	}
+
+	*bus = ctx->bus;
+	return ctx->labels.data();
+}
+
 KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {
 	PRINT_NAME();
 
@@ -3182,16 +3192,15 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 
+	int32_t attribute  = 0x20000000; // Without a param file, HDR stays allowed.
 	int32_t attribute3 = 0;
+	Loader::SystemContentParamSfoGetInt("ATTRIBUTE", &attribute);
 	Loader::SystemContentParamSfoGetInt("ATTRIBUTE3", &attribute3);
-	int32_t attribute = 0;
-	const bool hdr_allowed = !Loader::SystemContentParamSfoGetInt("ATTRIBUTE", &attribute) ||
-	                         (attribute & 0x20000000) != 0;
 	ctx->mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
 	    ((attribute3 & 4) != 0 && driver.width < 3840 && driver.height < 2160 ? 1u : 2u);
-	status->dynamicRange = hdr_allowed && driver.IsHdrSupported() ? 2u : 1u;
+	status->dynamicRange = (attribute & 0x20000000) != 0 && driver.IsHdrSupported() ? 2u : 1u;
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
 	         ? VIDEO_OUT_REFRESH_RATE_119_88HZ
