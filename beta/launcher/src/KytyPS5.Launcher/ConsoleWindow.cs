@@ -427,7 +427,9 @@ internal sealed partial class ConsoleWindow : Window
             await process.WaitForExitAsync();
             process.WaitForExit();
             var code = process.ExitCode;
-            process.OutputDataReceived -= Log; process.ErrorDataReceived -= Log; process.Dispose(); _gameProcess = null;
+            process.OutputDataReceived -= Log; process.ErrorDataReceived -= Log;
+            if (!_closing) await RestoreDashboardSdrAsync();
+            process.Dispose(); _gameProcess = null;
             _inputTimer.Interval = TimeSpan.FromMilliseconds(33);
             if (_closing) return;
             _audio.Resume(); OpenPage("home"); Activate(); PlayMusic();
@@ -442,6 +444,29 @@ internal sealed partial class ConsoleWindow : Window
             Message("Could not launch game", e.Message);
         }
         finally { _launching = false; }
+    }
+
+    private async Task RestoreDashboardSdrAsync()
+    {
+        if (Environment.GetEnvironmentVariable("KYTYPS5_LABWC_CONFIG") is null ||
+            Environment.GetEnvironmentVariable("KYTYPS5_BUNDLE_ROOT") is not { } bundle) return;
+        try
+        {
+            var info = new ProcessStartInfo(System.IO.Path.Combine(bundle, "bin/python3")) { UseShellExecute = false };
+            info.ArgumentList.Add("-I");
+            info.ArgumentList.Add(System.IO.Path.Combine(bundle, "session-hdr.py"));
+            info.ArgumentList.Add("off");
+            using var process = Process.Start(info);
+            if (process is not null)
+            {
+                await process.WaitForExitAsync();
+                if (process.ExitCode != 0) Console.Error.WriteLine("Could not restore SDR in the PS5 dashboard.");
+            }
+        }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception)
+        {
+            Console.Error.WriteLine(error.Message);
+        }
     }
 
     private void StopGame() { try { _gameProcess?.Kill(true); } catch (InvalidOperationException) { } }

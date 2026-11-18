@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Give the session a writable copy of its Labwc configuration for per-game HDR.
+set -euo pipefail
+compositor=$1
+config_dir=$2
+shift 2
+version=$("$compositor" --version)
+if [[ "$version" =~ ^labwc[[:space:]]+([0-9]+)\.([0-9]+)\. ]] &&
+   (( 10#${BASH_REMATCH[1]} > 0 || 10#${BASH_REMATCH[2]} >= 20 )); then
+    config=$(mktemp "${XDG_RUNTIME_DIR:?}/kytyps5-labwc.XXXXXXXX.xml")
+    cp -- "$config_dir/rc.xml" "$config"
+    export KYTYPS5_LABWC_CONFIG="$config" KYTYPS5_LABWC="$compositor"
+    export WLR_RENDERER=vulkan
+    export SDL_VIDEO_DRIVER="${SDL_VIDEO_DRIVER:-wayland,x11}"
+    exec "$compositor" --config-dir "$config_dir" --config "$config" "$@"
+fi
+exec "$compositor" --config-dir "$config_dir" "$@"

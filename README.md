@@ -153,6 +153,10 @@ cd KytyPS5-BC250-*-PS5-Minimal-Mode
 ./install.sh             # installs (asks for your password)
 ```
 
+On an HDR-capable display, the session can follow **Game settings → Screen & video → HDR10 when available**.
+This requires Labwc 0.20 or later with its Vulkan renderer and the host's Wayland HDR support.
+The installer’s bundled Labwc runs in SDR. The PS-button Control centre also has **Shut down**.
+
 The installer detects the system and uses the matching setup:
 
 | | SteamOS | CachyOS / Arch |

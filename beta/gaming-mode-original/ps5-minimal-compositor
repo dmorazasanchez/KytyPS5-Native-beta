@@ -18,4 +18,4 @@ done
 /usr/bin/pipewire-pulse & pids+=("$!")
 /usr/bin/wireplumber & pids+=("$!")
 # -S binds the compositor lifetime to the GUI: closing it returns to KDE.
-/usr/bin/labwc --verbose --config-dir /etc/ps5-minimal/labwc --session /usr/local/libexec/ps5-minimal-launcher
+/usr/local/libexec/ps5-labwc /usr/bin/labwc /etc/ps5-minimal/labwc --verbose --session /usr/local/libexec/ps5-minimal-launcher

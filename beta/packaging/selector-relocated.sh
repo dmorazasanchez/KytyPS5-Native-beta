@@ -446,4 +446,18 @@ case "$(basename -- "$selected")" in
         done
         set -- "${args[@]}" ;;
 esac
+if [[ -n "${KYTYPS5_LABWC_CONFIG:-}" ]]; then
+    launch_game=0
+    session_hdr=off
+    for arg in "$@"; do
+        case "$arg" in
+            --game) launch_game=1 ;;
+            --hdr) session_hdr=on ;;
+            --guest-exec) break ;;
+        esac
+    done
+    if [[ "$launch_game" == 1 ]]; then
+        "$bundle_root/bin/python3" -I "$bundle_root/session-hdr.py" "$session_hdr"
+    fi
+fi
 exec "$selected" "$@"

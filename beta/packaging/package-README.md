@@ -153,6 +153,9 @@ cd KytyPS5-BC250-*-PS5-Minimal-Mode
 ./install.sh             # installs (asks for your password)
 ```
 
+On compatible Labwc and Mesa versions, **HDR10 when available** in the game's Screen & video settings controls HDR for the session.
+The dashboard runs in SDR. The PS-button Control centre includes **Shut down**.
+
 The installer detects the system and uses the matching setup:
 
 | | SteamOS | CachyOS / Arch |

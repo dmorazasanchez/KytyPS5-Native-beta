@@ -244,6 +244,9 @@ internal sealed partial class ConsoleWindow
         if (File.Exists((Environment.GetEnvironmentVariable("KYTYPS5_SESSION_CONTROL") ?? "/var/lib/kyty-beta-system/session/ps5-minimal-control")))
             ModalButtons(stack, ("Return to Desktop Mode", () => Confirm("Return to Desktop Mode?", "Save your game first. The PS5 session will close and KDE will open.", "Switch to desktop", () => StartTool("/usr/bin/pkexec", (Environment.GetEnvironmentVariable("KYTYPS5_SESSION_CONTROL") ?? "/var/lib/kyty-beta-system/session/ps5-minimal-control"), "desktop"))));
         ModalButtons(stack, ("Exit KytyPS5", () => Confirm("Exit KytyPS5?", _gameProcess is null ? "Close the launcher?" : "The running game will be stopped.", "Exit", () => { StopGame(); _closing = true; Close(); })));
+        ModalButtons(stack, ("Shut down", () => Confirm("Shut down the system?",
+            _gameProcess is null ? "The computer will power off." : "Save your game first. The computer will power off.",
+            "Shut down", () => StartTool("/usr/bin/systemctl", "--no-ask-password", "poweroff"))));
         Focus(_modalRows[0][0]);
     }
 

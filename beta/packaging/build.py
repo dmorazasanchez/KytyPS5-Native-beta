@@ -169,7 +169,8 @@ def main():
     # Retain the original selector as evidence, then rebase only its paths/lifecycle in the beta copy.
     cp(LIVE / 'kytyps5-runtime.sh', SOURCE / 'installed-runtime-selector.sh')
     cp(HOME / 'ps5-minimal-session-20261109/files', SOURCE / 'gaming-mode-original')
-    cp(HOME / 'ps5-minimal-session-20261109/files', OUT / 'system/session')
+    cp(SOURCE / 'gaming-mode-original', OUT / 'system/session')
+    cp(SOURCE / 'packaging/session-hdr.py', OUT / 'session-hdr.py')
     cp(BASE / 'downloads/session-runtime', OUT / 'system/session-runtime')
     manifest = {'version': VERSION, 'emulator_commit': subprocess.check_output(['git', '-C', str(NATIVE), 'rev-parse', 'HEAD'], text=True).strip(),
                 'backends': binaries, 'host': Path('/etc/os-release').read_text(),

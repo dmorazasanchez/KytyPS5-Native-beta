@@ -35,6 +35,10 @@ OVERLAY = {
     'beta/packaging/package-README.md': 'README.md',
     'beta/packaging/AppRun': 'AppRun',
     'beta/packaging/prepare-runtime.py': 'prepare-runtime.py',
+    'beta/packaging/session-hdr.py': 'session-hdr.py',
+    'beta/gaming-mode-original/ps5-labwc': 'system/session/ps5-labwc',
+    'beta/gaming-mode-original/ps5-minimal-compositor': 'system/session/ps5-minimal-compositor',
+    'beta/gaming-mode-original/rc.xml': 'system/session/rc.xml',
     **{'beta/astro-templates/' + f.name: 'upscalers/astro-templates/' + f.name
        for f in sorted((Path(__file__).resolve().parents[1] / 'astro-templates').glob('*.json'))},
     **{'beta/title-profiles/' + f.name: 'upscalers/title-profiles/' + f.name
@@ -102,7 +106,7 @@ def stage(previous, new_version, *replacements):
         if sha(root / rel) != digest:
             raise SystemExit('previous package is not pristine: ' + rel)
     for src, dst in OVERLAY.items():
-        mode = (root / dst).stat().st_mode if (root / dst).exists() else 0o100644
+        mode = (root / dst).stat().st_mode if (root / dst).exists() else (repo / src).stat().st_mode
         (root / dst).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(repo / src, root / dst)
         (root / dst).chmod(mode)
@@ -186,18 +190,23 @@ def finish(previous_appimage):
 
 
 def minimal(previous_tarball):
-    """The Minimal Mode download does not depend on the package version: same files, new name."""
+    """Update the separate installer with the staged Minimal Mode session files."""
     new = f'KytyPS5-BC250-{version()}-PS5-Minimal-Mode'
     dist.mkdir(exist_ok=True)
     with tarfile.open(previous_tarball) as src, tarfile.open(dist / (new + '.tar.gz'), 'w:gz', compresslevel=6) as out:
         members = src.getmembers()
         top = members[0].name.split('/', 1)[0]
+        session_updates = {p for p in OVERLAY.values() if p.startswith('system/session/')}
         for m in members:
+            if m.name.removeprefix(top + '/') in session_updates:
+                continue
             data = src.extractfile(m) if m.isfile() else None
             m.name = new + m.name[len(top):]
             if m.islnk():
                 m.linkname = new + m.linkname[len(top):]
             out.addfile(m, data)
+        for rel in sorted(session_updates):
+            out.add(root / rel, arcname=f'{new}/{rel}')
     print('Repacked ' + new)
 
 

@@ -2,7 +2,7 @@
 # Run in the Debian minimal build container with /output mounted.
 set -euo pipefail
 mkdir -p /output/bin /output/lib /output/licenses
-install -m755 /usr/bin/labwc /usr/bin/xdotool /output/bin/
+install -m755 /usr/bin/labwc /usr/bin/xdotool /usr/bin/wlr-randr /output/bin/
 for tool in labwc xdotool; do
     cat > "/output/$tool" <<'EOF'
 #!/usr/bin/env bash
@@ -13,7 +13,7 @@ exec /lib64/ld-linux-x86-64.so.2 --library-path "$base/lib" "$base/bin/${0##*/}"
 EOF
     chmod 755 "/output/$tool"
 done
-packages=(labwc xdotool)
+packages=(labwc xdotool wlr-randr)
 while read -r soname library; do
     # Use the host glibc, graphics stack and logind/udev clients.
     case "$soname" in
