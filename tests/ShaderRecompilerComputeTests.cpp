@@ -2239,7 +2239,10 @@ u32 EncodeD16AsD32(uint16_t value) {
 
 class VulkanHarness {
 public:
-  VulkanHarness() { Init(); }
+  enum class Profile { ShaderRecompiler, VideoOut };
+  explicit VulkanHarness(Profile profile = Profile::ShaderRecompiler) {
+    Init(profile);
+  }
   ~VulkanHarness() { Destroy(); }
   // Host float min/max is used on AMD GPUs, as in Kyty.
   [[nodiscard]] bool SupportsNativeFloatMinMax() const {
@@ -23885,7 +23888,7 @@ private:
     m_renderer = std::make_unique<RenderContext>(m_runtime_context);
   }
 
-  void Init() {
+  void Init(Profile profile) {
     static vk::detail::DynamicLoader loader;
     const auto get_instance_proc_addr =
         loader.getProcAddress<PFN_vkGetInstanceProcAddr>(
@@ -23920,6 +23923,18 @@ private:
               "vkEnumeratePhysicalDevices");
 
     for (auto physical : physical_devices) {
+      if (profile == Profile::VideoOut) {
+        vk::PhysicalDeviceVulkan13Features available13{};
+        vk::PhysicalDeviceFeatures2 available{.pNext = &available13};
+        physical.getFeatures2(&available);
+        const auto extensions = physical.enumerateDeviceExtensionProperties();
+        if (!available13.dynamicRendering || extensions.result != vk::Result::eSuccess ||
+            !std::ranges::any_of(extensions.value, [](const auto &property) {
+              return std::strcmp(property.extensionName.data(), VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0;
+            })) {
+          continue;
+        }
+      }
       u32 queue_count = 0;
       physical.getQueueFamilyProperties(&queue_count, nullptr);
       std::vector<vk::QueueFamilyProperties> queues(queue_count);
@@ -23928,6 +23943,11 @@ private:
         if ((queues[i].queueFlags &
              (vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eGraphics)) ==
             (vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eGraphics)) {
+          if (profile == Profile::VideoOut) {
+            m_physical_device = physical;
+            m_queue_family = i;
+            break;
+          }
           vk::PhysicalDeviceVulkan11Features features11{};
           vk::PhysicalDeviceVulkan12Features features12{};
           features12.sType = vk::StructureType::ePhysicalDeviceVulkan12Features;
@@ -23969,8 +23989,16 @@ private:
       }
     }
     Require("VulkanHarness", "dispatch", m_physical_device != nullptr,
-            "no Vulkan graphics+compute device with fragment barycentrics and 64-bit LDS/image atomics");
+            "no Vulkan graphics+compute device meeting the test requirements");
     m_physical_device.getMemoryProperties(&m_memory_properties);
+    if (profile == Profile::VideoOut) {
+      // The presentation shader uses dynamic rendering and a push descriptor.
+      vk::PhysicalDeviceVulkan13Features rendering{.dynamicRendering = true};
+      const char *extension = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+      CreateDevice({.pNext = &rendering, .enabledExtensionCount = 1,
+                    .ppEnabledExtensionNames = &extension});
+      return;
+    }
 
     vk::PhysicalDeviceFeatures available_features{};
     m_physical_device.getFeatures(&available_features);
@@ -24096,17 +24124,7 @@ private:
           "will be skipped\n");
     }
 
-    float priority = 1.0f;
-    vk::DeviceQueueCreateInfo queue_info{};
-    queue_info.sType = vk::StructureType::eDeviceQueueCreateInfo;
-    queue_info.queueFamilyIndex = m_queue_family;
-    queue_info.queueCount = 1;
-    queue_info.pQueuePriorities = &priority;
-
     vk::DeviceCreateInfo device_info{};
-    device_info.sType = vk::StructureType::eDeviceCreateInfo;
-    device_info.queueCreateInfoCount = 1;
-    device_info.pQueueCreateInfos = &queue_info;
     auto device_features11 = WindowContext::RequiredVulkan11Features();
     auto device_features12 = WindowContext::RequiredVulkan12Features();
     device_features12.shaderSharedInt64Atomics = true;
@@ -24222,6 +24240,20 @@ private:
     device_info.enabledExtensionCount =
         static_cast<uint32_t>(device_extensions.size());
     device_info.ppEnabledExtensionNames = device_extensions.data();
+    CreateDevice(device_info);
+  }
+
+  void CreateDevice(vk::DeviceCreateInfo device_info) {
+    float priority = 1.0f;
+    vk::DeviceQueueCreateInfo queue_info{};
+    queue_info.sType = vk::StructureType::eDeviceQueueCreateInfo;
+    queue_info.queueFamilyIndex = m_queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+
+    device_info.sType = vk::StructureType::eDeviceCreateInfo;
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
     RequireVk("VulkanHarness", "dispatch",
               m_physical_device.createDevice(&device_info, nullptr, &m_device),
               "vkCreateDevice");
@@ -57363,7 +57395,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--video-out-only") == 0) {
-    VulkanHarness vulkan;
+    VulkanHarness vulkan(VulkanHarness::Profile::VideoOut);
     vulkan.CheckVideoOutHdr10ToSdr();
     return 0;
   }

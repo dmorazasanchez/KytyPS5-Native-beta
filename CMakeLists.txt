@@ -878,6 +878,7 @@ if(BUILD_TESTING)
 		http_uri_parse_tests
 		rtc_tests
 		playgo_tests
+		psml_tests
 	)
 endif()
 
