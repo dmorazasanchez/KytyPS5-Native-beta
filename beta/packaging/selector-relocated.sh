@@ -410,6 +410,39 @@ printf '[Kyty launcher] Profile: %s; upscaler: %s; preset: %s; native frame gene
     "$mode" "${KYTY_UPSCALER:-backend-default}" "${KYTY_UPSCALE_PRESET:-backend-default}" \
     "${KYTY_FRAMEGEN:-backend-default}" "$fg_mode" >&2
 
+# Apply the session's presentation settings only to an emulator game launch.
+launch_game=0
+session_hdr=off
+for arg in "$@"; do
+    case "$arg" in
+        --game) launch_game=1 ;;
+        --hdr) session_hdr=on ;;
+        --guest-exec) break ;;
+    esac
+done
+if [[ "$launch_game" == 1 && "${KYTYPS5_HDR_MODE:-auto}" != 0 ]]; then
+    auto_hdr=0
+    if [[ -n "${KYTYPS5_LABWC_CONFIG:-}" ]]; then
+        auto_hdr=1
+    elif [[ -n "${DISPLAY:-}" ]] &&
+         [[ "$session_hdr" == on || ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/KytyPS5-Native/sdr" ]] &&
+         [[ "$(DISPLAY="${KYTYPS5_ROOT_DISPLAY:-:0}" xprop -root GAMESCOPE_DISPLAY_HDR_ENABLED 2>/dev/null | awk '{print $NF}')" == 1 ]]; then
+        socket=${GAMESCOPE_WAYLAND_DISPLAY:-}
+        session_env="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/gamescope-environment"
+        if [[ -z "$socket" && -r "$session_env" ]]; then
+            socket=$(sed -n 's/^GAMESCOPE_WAYLAND_DISPLAY=//p' "$session_env" | head -n 1)
+        fi
+        if [[ -n "$socket" ]]; then
+            export GAMESCOPE_WAYLAND_DISPLAY="$socket" ENABLE_GAMESCOPE_WSI=1
+            auto_hdr=1
+        fi
+    fi
+    if [[ "$auto_hdr" == 1 && "$session_hdr" == off ]]; then
+        set -- --hdr "$@"
+        session_hdr=on
+    fi
+fi
+
 if [[ "$dry_run" == "1" ]]; then
     printf 'Profile: %s\nExecutable: %s\nLossless Scaling frame generation: %s\nNative frame generation: %s\n' "$mode" "$selected" "$fg_mode" "${KYTY_FRAMEGEN:-off}"
     printf 'Upscaler profile: %s (upscaler %s, frame generation %s)\n' "${up_profile:-none}" "${up_state:-n/a}" "${up_fg_state:-n/a}"
@@ -446,18 +479,7 @@ case "$(basename -- "$selected")" in
         done
         set -- "${args[@]}" ;;
 esac
-if [[ -n "${KYTYPS5_LABWC_CONFIG:-}" ]]; then
-    launch_game=0
-    session_hdr=off
-    for arg in "$@"; do
-        case "$arg" in
-            --game) launch_game=1 ;;
-            --hdr) session_hdr=on ;;
-            --guest-exec) break ;;
-        esac
-    done
-    if [[ "$launch_game" == 1 ]]; then
-        "$bundle_root/bin/python3" -I "$bundle_root/session-hdr.py" "$session_hdr"
-    fi
+if [[ "$launch_game" == 1 && -n "${KYTYPS5_LABWC_CONFIG:-}" ]]; then
+    "$bundle_root/bin/python3" -I "$bundle_root/session-hdr.py" "$session_hdr"
 fi
 exec "$selected" "$@"

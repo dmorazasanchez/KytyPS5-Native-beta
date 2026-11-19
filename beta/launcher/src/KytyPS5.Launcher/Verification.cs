@@ -35,6 +35,13 @@ internal static class Verification
             settings.ExcludedGames.Add(eboot); Check(Game.Scan(settings).Count == 0, "Excluded games remain excluded");
             Check(KytyBridge.Options.Select(o => o.Id).Distinct().Count() == KytyBridge.Options.Count, "All native setting IDs are unique");
             Check(KytyBridge.Options.Count == 76 && KytyBridge.Options.Any(o => o.Id == "upscale_preset"), "Complete native settings manifest including upscaling");
+            foreach (var hdr in new[] { "auto", "1", "0" })
+            {
+                if (hdr != "auto") KytyBridge.Save(game.TitleId, eboot, new Dictionary<string, string> { ["hdr"] = hdr });
+                var launch = KytyBridge.Build(eboot, game.TitleId);
+                Check(launch.Environment["KYTYPS5_HDR_MODE"] == hdr && launch.Arguments.Contains("--hdr") == (hdr == "1"),
+                    $"Game launcher forwards HDR preference {hdr}");
+            }
             KytyBridge.Save(null, null, new Dictionary<string, string> { ["resolution"] = "1920x1080", ["fg_mode"] = "adaptive", ["futureKey"] = "keep" });
             KytyBridge.Save(game.TitleId, eboot, new Dictionary<string, string> { ["KYTY_NATIVE_GPU_PM4_MODE"] = "upstream", ["upscaler"] = "hlx_fsr4", ["upscale_preset"] = "quality", ["upscale_output"] = "3840x2160" });
             var loaded = KytyBridge.Load(game.TitleId, eboot);

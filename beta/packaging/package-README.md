@@ -37,6 +37,8 @@ Keep the AppImage or the extracted folder in a permanent place (for example `~/A
 Steam shortcut and Minimal Mode all point to it. If you move it, run `--install-desktop` again (and the Minimal Mode
 installer, if you use it).
 
+**HDR10 when available** defaults to **Automatic** for new profiles. In Steam Gaming Mode it follows Gamescope’s HDR output and the Decky HDR toggle. In PS5 Minimal Mode it allows HDR on compatible Labwc displays during play and returns the dashboard to SDR. Select **Off** or **On** in a game’s Screen & video settings to override the automatic choice. Existing per-game settings carry over.
+
 ## What you need
 
 | | Requirement |

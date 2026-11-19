@@ -305,6 +305,7 @@ internal sealed partial class ConsoleWindow
 
     private static string ChoiceLabel(string id, string value) => (id, value) switch
     {
+        ("hdr", "auto") => "Automatic", ("hdr", "1") => "On", ("hdr", "0") => "Off",
         ("upscaler", "auto") => "Automatic  ·  HLX / FSR 4 when supported",
         ("upscaler", "game") => "Game default", ("upscaler", "hlx_fsr4") => "HLX / FSR 4", ("upscaler", "hlx_dlss_e") => "HLX / DLSS (Model E)",
         ("upscale_preset", "dynamic") => "Dynamic", ("upscale_preset", "dlaa") => "Native / DLAA",

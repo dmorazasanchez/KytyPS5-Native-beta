@@ -49,6 +49,33 @@ with tempfile.TemporaryDirectory(prefix='kyty-beta-package-') as temp:
         check('Executable: '+str(bundle/'emulator'/binary) in r.stdout, name + ' selects ' + binary)
         check(all(s in r.stdout for s in contains) and all(s not in r.stdout for s in absent), name + ' settings propagate')
     route({}, 'Native', 'kyty_emulator_native')
+    # Reproduce Gamescope's display property independently of the host compositor.
+    test_bin = temp/'bin'
+    test_bin.mkdir()
+    xprop = test_bin/'xprop'
+    xprop.write_text('#!/bin/sh\nprintf "GAMESCOPE_DISPLAY_HDR_ENABLED(CARDINAL) = %s\\n" "$TEST_HDR"\n')
+    xprop.chmod(0o755)
+    steam = {'PATH': str(test_bin)+':'+env['PATH'], 'DISPLAY': ':1', 'TEST_HDR': '1',
+             'XDG_RUNTIME_DIR': str(temp), 'XDG_CONFIG_HOME': str(temp/'config'),
+             'GAMESCOPE_WAYLAND_DISPLAY': 'gamescope-0', 'KYTYPS5_LABWC_CONFIG': '', 'KYTYPS5_HDR_MODE': 'auto'}
+    hdr_arg = ['Argument: --hdr\n']
+    route(steam, 'Gamescope HDR output', 'kyty_emulator_native', hdr_arg)
+    route(dict(steam, TEST_HDR='0'), 'Gamescope SDR output', 'kyty_emulator_native', absent=hdr_arg)
+    route(dict(steam, KYTYPS5_HDR_MODE='0'), 'Saved HDR Off', 'kyty_emulator_native', absent=hdr_arg)
+    route(dict(steam, GAMESCOPE_WAYLAND_DISPLAY=''), 'Missing Gamescope socket name', 'kyty_emulator_native', absent=hdr_arg)
+    (temp/'gamescope-environment').write_text('GAMESCOPE_WAYLAND_DISPLAY=gamescope-0\n')
+    route(dict(steam, GAMESCOPE_WAYLAND_DISPLAY=''), 'Gamescope session socket discovery', 'kyty_emulator_native', hdr_arg)
+    flags = temp/'config/KytyPS5-Native'
+    flags.mkdir(parents=True)
+    (flags/'hdr').touch()
+    route(steam, 'Legacy HDR marker', 'kyty_emulator_native', hdr_arg)
+    (flags/'sdr').touch()
+    route(steam, 'Decky SDR opt-out', 'kyty_emulator_native', absent=hdr_arg)
+    route(dict(steam, KYTYPS5_HDR_MODE='1'), 'Explicit game HDR On', 'kyty_emulator_native',
+          hdr_arg, args=['--game', str(temp/'eboot.bin'), '--hdr'])
+    route(dict(steam, KYTYPS5_LABWC_CONFIG='rc.xml'), 'Labwc automatic HDR', 'kyty_emulator_native', hdr_arg)
+    route(dict(steam, KYTYPS5_LABWC_CONFIG='rc.xml', KYTYPS5_HDR_MODE='0'), 'Labwc saved HDR Off', 'kyty_emulator_native', absent=hdr_arg)
+    route(steam, 'Gamescope non-game command', 'kyty_emulator_native', absent=hdr_arg, args=['--help'])
     route({'KYTY_NATIVE_GPU_PM4_MODE':'fast'}, 'Legacy Fast', 'kyty_emulator_fast')
     for adapter,binary in [('fsr3_description_v1','kyty_emulator_auto_upscaler'),('taa_paths_v1','kyty_emulator_launcher_taa_fg')]:
         profile.write_text(json.dumps({'capabilities':{'upscaler':{'state':'available'},'frame_generation':{'state':'available'}},'runtime':{'adapter':adapter}}))
